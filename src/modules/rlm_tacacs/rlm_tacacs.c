@@ -61,7 +61,7 @@ static conf_parser_t const module_config[] = {
 
 	{ FR_CONF_OFFSET("revive_interval", rlm_tacacs_t, revive_interval) },
 
-	{ FR_CONF_OFFSET_SUBSECTION("pool", 0, rlm_tacacs_t, trunk_conf, fr_trunk_config ) },
+	{ FR_CONF_OFFSET_SUBSECTION("pool", 0, rlm_tacacs_t, trunk_conf, trunk_config ) },
 
 	{ FR_CONF_OFFSET_SUBSECTION("retry", 0, rlm_tacacs_t, retry, retry_config ) },
 
@@ -130,8 +130,8 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, UNUSED void *parent,
 
 static void mod_tacacs_signal(module_ctx_t const *mctx, request_t *request, fr_signal_t action)
 {
-	rlm_tacacs_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_tacacs_t);
-	rlm_tacacs_io_t	const	*io = (rlm_tacacs_io_t const *)inst->io_submodule->module;		/* Public symbol exported by the module */
+	rlm_tacacs_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_tacacs_t);
+	rlm_tacacs_io_t	const	*io = (rlm_tacacs_io_t const *)inst->io_submodule->exported;		/* Public symbol exported by the module */
 
 	/*
 	 *	We received a duplicate packet, ignore the dup, and rely on the
@@ -141,7 +141,7 @@ static void mod_tacacs_signal(module_ctx_t const *mctx, request_t *request, fr_s
 
 	if (!io->signal) return;
 
-	io->signal(MODULE_CTX(inst->io_submodule->dl_inst,
+	io->signal(MODULE_CTX(inst->io_submodule,
 			      module_thread(inst->io_submodule)->data, mctx->env_data,
 			      mctx->rctx), request, action);
 }
@@ -151,7 +151,7 @@ static void mod_tacacs_signal(module_ctx_t const *mctx, request_t *request, fr_s
  */
 static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_tacacs_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_tacacs_t);
+	rlm_tacacs_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_tacacs_t);
 	rlm_rcode_t		rcode;
 	unlang_action_t		ua;
 
@@ -175,7 +175,7 @@ static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, modul
 	 *	return another code which indicates what happened to
 	 *	the request...
 	 */
-	ua = inst->io->enqueue(&rcode, &rctx, inst->io_submodule->dl_inst->data,
+	ua = inst->io->enqueue(&rcode, &rctx, inst->io_submodule->data,
 			       module_thread(inst->io_submodule)->data, request);
 	if (ua != UNLANG_ACTION_YIELD) {
 		fr_assert(rctx == NULL);
@@ -185,13 +185,13 @@ static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, modul
 	return unlang_module_yield(request, inst->io->resume, mod_tacacs_signal, 0, rctx);
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
 	size_t i, num_types;
-	rlm_tacacs_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_tacacs_t);
+	rlm_tacacs_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_tacacs_t);
 
-	inst->io = (rlm_tacacs_io_t const *)inst->io_submodule->module;	/* Public symbol exported by the module */
-	inst->name = mctx->inst->name;
+	inst->io = (rlm_tacacs_io_t const *)inst->io_submodule->exported;	/* Public symbol exported by the module */
+	inst->name = mctx->mi->name;
 
 	/*
 	 *	These limits are specific to TACACS, and cannot be over-ridden, due to 8-bit ID fields!
@@ -256,17 +256,18 @@ module_rlm_t rlm_tacacs = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "tacacs",
-		.flags		= MODULE_TYPE_THREAD_SAFE | MODULE_TYPE_RESUMABLE,
 		.inst_size	= sizeof(rlm_tacacs_t),
 		.config		= module_config,
 
 		.onload		= mod_load,
 		.unload		= mod_unload,
 
-		.bootstrap	= mod_bootstrap,
+		.instantiate	= mod_instantiate,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,	.method = mod_process },
-		MODULE_NAME_TERMINATOR
-	},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_process },
+			MODULE_BINDING_TERMINATOR
+		}
+	}
 };

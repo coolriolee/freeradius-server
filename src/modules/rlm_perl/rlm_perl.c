@@ -54,6 +54,13 @@ extern char **environ;
 #  error perl must be compiled with USE_ITHREADS
 #endif
 
+typedef struct {
+	bool	request;	//!< Should the request list be replaced after module call
+	bool	reply;		//!< Should the reply list be replaced after module call
+	bool	control;	//!< Should the control list be replaced after module call
+	bool	session;	//!< Should the session list be replaced after module call
+} rlm_perl_replace_t;
+
 /*
  *	Define a structure for our module configuration.
  *
@@ -75,6 +82,7 @@ typedef struct {
 	char const	*perl_flags;
 	PerlInterpreter	*perl;
 	bool		perl_parsed;
+	rlm_perl_replace_t	replace;
 	HV		*rad_perlconf_hv;	//!< holds "config" items (perl %RAD_PERLCONF hash).
 
 } rlm_perl_t;
@@ -84,6 +92,14 @@ typedef struct {
 } rlm_perl_thread_t;
 
 static void *perl_dlhandle;		//!< To allow us to load perl's symbols into the global symbol table.
+
+static const conf_parser_t replace_config[] = {
+	{ FR_CONF_OFFSET("request", rlm_perl_replace_t, request) },
+	{ FR_CONF_OFFSET("reply", rlm_perl_replace_t, reply) },
+	{ FR_CONF_OFFSET("control", rlm_perl_replace_t, control) },
+	{ FR_CONF_OFFSET("session", rlm_perl_replace_t, session) },
+	CONF_PARSER_TERMINATOR
+};
 
 /*
  *	A mapping of configuration file names to internal variables.
@@ -102,6 +118,8 @@ static const conf_parser_t module_config[] = {
 	RLM_PERL_CONF(detach),
 
 	{ FR_CONF_OFFSET("perl_flags", rlm_perl_t, perl_flags) },
+
+	{ FR_CONF_OFFSET_SUBSECTION("replace", 0, rlm_perl_t, replace, replace_config) },
 
 	CONF_PARSER_TERMINATOR
 };
@@ -581,33 +599,32 @@ static void perl_parse_config(CONF_SECTION *cs, int lvl, HV *rad_hv)
 	DEBUG("%*s}", indent_section, " ");
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	xlat_t		*xlat;
+static void perl_store_vps(request_t *request, fr_pair_list_t *vps, HV *rad_hv,
+			   const char *hash_name, bool dbg_print);
 
-	xlat = xlat_func_register_module(NULL, mctx, mctx->inst->name, perl_xlat, FR_TYPE_VOID);
-	xlat_func_args_set(xlat, perl_xlat_args);
-
-	return 0;
-}
-
-static void perl_vp_to_svpvn_element(request_t *request, AV *av, fr_pair_t const *vp,
-				     int *i, const char *hash_name, const char *list_name)
+static void perl_vp_to_svpvn_element(request_t *request, AV *av, fr_pair_t *vp,
+				     int *i, const char *hash_name, bool dbg_print)
 {
 
 	SV *sv;
 
+	if (dbg_print) RDEBUG2("$%s{'%s'}[%i] = %pP", hash_name, vp->da->name, *i, vp);
 	switch (vp->vp_type) {
 	case FR_TYPE_STRING:
-		RDEBUG2("$%s{'%s'}[%i] = &%s.%s -> '%s'", hash_name, vp->da->name, *i,
-		        list_name, vp->da->name, vp->vp_strvalue);
 		sv = newSVpvn(vp->vp_strvalue, vp->vp_length);
 		break;
 
 	case FR_TYPE_OCTETS:
-		RDEBUG2("$%s{'%s'}[%i] = &%s.%s -> 0x%pH", hash_name, vp->da->name, *i,
-		        list_name, vp->da->name, &vp->data);
 		sv = newSVpvn((char const *)vp->vp_octets, vp->vp_length);
+		break;
+
+	case FR_TYPE_STRUCTURAL:
+	{
+		HV		*hv;
+		hv = newHV();
+		perl_store_vps(request, &vp->vp_group, hv, vp->da->name, false);
+		sv = newRV_noinc((SV *)hv);
+	}
 		break;
 
 	default:
@@ -618,8 +635,6 @@ static void perl_vp_to_svpvn_element(request_t *request, AV *av, fr_pair_t const
 		slen = fr_pair_print_value_quoted(&FR_SBUFF_OUT(buffer, sizeof(buffer)), vp, T_BARE_WORD);
 		if (slen < 0) return;
 
-		RDEBUG2("$%s{'%s'}[%i] = &%s.%s -> '%pV'", hash_name, vp->da->name, *i,
-		        list_name, vp->da->name, fr_box_strvalue_len(buffer, (size_t)slen));
 		sv = newSVpvn(buffer, (size_t)slen);
 	}
 		break;
@@ -637,8 +652,8 @@ static void perl_vp_to_svpvn_element(request_t *request, AV *av, fr_pair_t const
  *  	Example for this is Vendor-Specific.Cisco.AVPair that holds multiple values.
  *  	Which will be available as array_ref in $RAD_REQUEST{'Vendor-Specific.Cisco.AVPair'}
  */
-static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_list_t *vps, HV *rad_hv,
-			   const char *hash_name, const char *list_name)
+static void perl_store_vps(request_t *request, fr_pair_list_t *vps, HV *rad_hv,
+			   const char *hash_name, bool dbg_print)
 {
 	fr_pair_t *vp;
 	fr_dcursor_t cursor;
@@ -663,9 +678,9 @@ static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_l
 			AV *av;
 
 			av = newAV();
-			perl_vp_to_svpvn_element(request, av, vp, &i, hash_name, list_name);
+			perl_vp_to_svpvn_element(request, av, vp, &i, hash_name, dbg_print);
 			do {
-				perl_vp_to_svpvn_element(request, av, next, &i, hash_name, list_name);
+				perl_vp_to_svpvn_element(request, av, next, &i, hash_name, dbg_print);
 				fr_dcursor_next(&cursor);
 			} while ((next = fr_dcursor_next_peek(&cursor)) && ATTRIBUTE_EQ(vp, next));
 			(void)hv_store(rad_hv, name, strlen(name), newRV_noinc((SV *)av), 0);
@@ -676,18 +691,24 @@ static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_l
 		/*
 		 *	It's a normal single valued attribute
 		 */
+		if (dbg_print) RDEBUG2("$%s{'%s'} = %pP'", hash_name, vp->da->name, vp);
 		switch (vp->vp_type) {
 		case FR_TYPE_STRING:
-			RDEBUG2("$%s{'%s'} = &%s.%s -> '%pV'", hash_name, vp->da->name, list_name,
-			       vp->da->name, &vp->data);
 			(void)hv_store(rad_hv, name, strlen(name), newSVpvn(vp->vp_strvalue, vp->vp_length), 0);
 			break;
 
 		case FR_TYPE_OCTETS:
-			RDEBUG2("$%s{'%s'} = &%s.%s -> %pV", hash_name, vp->da->name, list_name,
-			       vp->da->name, &vp->data);
 			(void)hv_store(rad_hv, name, strlen(name),
 				       newSVpvn((char const *)vp->vp_octets, vp->vp_length), 0);
+			break;
+
+		case FR_TYPE_STRUCTURAL:
+		{
+			HV *hv;
+			hv = newHV();
+			perl_store_vps(request, &vp->vp_group, hv, vp->da->name, false);
+			(void)hv_store(rad_hv, name, strlen(name), newRV_noinc((SV *)hv), 0);
+		}
 			break;
 
 		default:
@@ -696,8 +717,6 @@ static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_l
 			ssize_t slen;
 
 			slen = fr_pair_print_value_quoted(&FR_SBUFF_OUT(buffer, sizeof(buffer)), vp, T_BARE_WORD);
-			RDEBUG2("$%s{'%s'} = &%s.%s -> '%pV'", hash_name, vp->da->name,
-			        list_name, vp->da->name, fr_box_strvalue_len(buffer, (size_t)slen));
 			(void)hv_store(rad_hv, name, strlen(name),
 				       newSVpvn(buffer, (size_t)(slen)), 0);
 		}
@@ -707,6 +726,9 @@ static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_l
 	REXDENT();
 }
 
+static int get_hv_content(TALLOC_CTX *ctx, request_t *request, HV *my_hv, fr_pair_list_t *vps, const char *list_name,
+			  fr_dict_attr_t const *parent, bool dbg_print);
+
 /*
  *
  *     Verify that a Perl SV is a string and save it in FreeRadius
@@ -714,7 +736,7 @@ static void perl_store_vps(UNUSED TALLOC_CTX *ctx, request_t *request, fr_pair_l
  *
  */
 static int pairadd_sv(TALLOC_CTX *ctx, request_t *request, fr_pair_list_t *vps, char *key, SV *sv,
-		      const char *hash_name, const char *list_name)
+		      const char *list_name, fr_dict_attr_t const *parent, bool dbg_print)
 {
 	char		*val;
 	fr_pair_t      *vp;
@@ -725,16 +747,17 @@ static int pairadd_sv(TALLOC_CTX *ctx, request_t *request, fr_pair_list_t *vps, 
 
 	val = SvPV(sv, len);
 
-	da = fr_dict_attr_search_by_qualified_oid(NULL, request->dict, key, true, true);
+	da = fr_dict_attr_by_name(NULL, parent, key);
 	if (!da) {
 		REDEBUG("Ignoring unknown attribute '%s'", key);
 		return -1;
 	}
 	fr_assert(da != NULL);
 
-	vp = fr_pair_afrom_da_nested(ctx, vps, da);
+	vp = fr_pair_afrom_da(ctx, da);
 	if (!vp) {
 	fail:
+		talloc_free(vp);
 		RPEDEBUG("Failed to create pair %s.%s = %s", list_name, key, val);
 		return -1;
 	}
@@ -748,13 +771,27 @@ static int pairadd_sv(TALLOC_CTX *ctx, request_t *request, fr_pair_list_t *vps, 
 		fr_pair_value_memdup(vp, (uint8_t const *)val, len, true);
 		break;
 
+	case FR_TYPE_STRUCTURAL:
+	{
+		HV	*hv;
+		if (!SvROK(sv) || (SvTYPE(SvRV(sv)) != SVt_PVHV)) {
+			RPEDEBUG("%s should be retuned as a hash", vp->da->name);
+			goto fail;
+		}
+		hv = (HV *)SvRV(sv);
+		if (get_hv_content(vp, request, hv, &vp->vp_group, list_name, da, false) < 0) goto fail;
+		if (vp->vp_type == FR_TYPE_STRUCT) fr_pair_list_sort(&vp->vp_group, fr_pair_cmp_by_da);
+	}
+		break;
+
 	default:
 		if (fr_pair_value_from_str(vp, val, len, NULL, false) < 0) goto fail;
 	}
+	fr_pair_append(vps, vp);
 
 	PAIR_VERIFY(vp);
 
-	RDEBUG2("&%s.%s = $%s{'%s'} -> '%s'", list_name, key, hash_name, key, val);
+	if (dbg_print) RDEBUG2("%s.%pP", list_name, vp);
 	return 0;
 }
 
@@ -762,7 +799,7 @@ static int pairadd_sv(TALLOC_CTX *ctx, request_t *request, fr_pair_list_t *vps, 
  *     Gets the content from hashes
  */
 static int get_hv_content(TALLOC_CTX *ctx, request_t *request, HV *my_hv, fr_pair_list_t *vps,
-			  const char *hash_name, const char *list_name)
+			  const char *list_name, fr_dict_attr_t const *parent, bool dbg_print)
 {
 	SV		*res_sv, **av_sv;
 	AV		*av;
@@ -777,11 +814,11 @@ static int get_hv_content(TALLOC_CTX *ctx, request_t *request, HV *my_hv, fr_pai
 			len = av_len(av);
 			for (j = 0; j <= len; j++) {
 				av_sv = av_fetch(av, j, 0);
-				if (pairadd_sv(ctx, request, vps, key, *av_sv, hash_name, list_name) < 0) continue;
+				if (pairadd_sv(ctx, request, vps, key, *av_sv, list_name, parent, dbg_print) < 0) continue;
 				ret++;
 			}
 		} else {
-			if (pairadd_sv(ctx, request, vps, key, res_sv, hash_name, list_name) < 0) continue;
+			if (pairadd_sv(ctx, request, vps, key, res_sv, list_name, parent, dbg_print) < 0) continue;
 			ret++;
 		}
 	}
@@ -800,7 +837,7 @@ static unlang_action_t do_perl(rlm_rcode_t *p_result, module_ctx_t const *mctx, 
 			       PerlInterpreter *interp, char const *function_name)
 {
 
-	rlm_perl_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t);
+	rlm_perl_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_perl_t);
 	fr_pair_list_t		vps;
 	int			ret=0, count;
 	STRLEN			n_a;
@@ -832,10 +869,10 @@ static unlang_action_t do_perl(rlm_rcode_t *p_result, module_ctx_t const *mctx, 
 		rad_request_hv = get_hv("RAD_REQUEST", 1);
 		rad_state_hv = get_hv("RAD_STATE", 1);
 
-		perl_store_vps(request->request_ctx, request, &request->request_pairs, rad_request_hv, "RAD_REQUEST", "request");
-		perl_store_vps(request->reply_ctx, request, &request->reply_pairs, rad_reply_hv, "RAD_REPLY", "reply");
-		perl_store_vps(request->control_ctx, request, &request->control_pairs, rad_config_hv, "RAD_CONFIG", "control");
-		perl_store_vps(request->session_state_ctx, request, &request->session_state_pairs, rad_state_hv, "RAD_STATE", "session-state");
+		perl_store_vps(request, &request->request_pairs, rad_request_hv, "RAD_REQUEST", true);
+		perl_store_vps(request, &request->reply_pairs, rad_reply_hv, "RAD_REPLY", true);
+		perl_store_vps(request, &request->control_pairs, rad_config_hv, "RAD_CONFIG", true);
+		perl_store_vps(request, &request->session_state_pairs, rad_state_hv, "RAD_STATE", true);
 
 		/*
 		 * Store pointer to request structure globally so radiusd::xlat works
@@ -875,22 +912,30 @@ static unlang_action_t do_perl(rlm_rcode_t *p_result, module_ctx_t const *mctx, 
 		LEAVE;
 
 		fr_pair_list_init(&vps);
-		if ((get_hv_content(request->request_ctx, request, rad_request_hv, &vps, "RAD_REQUEST", "request")) > 0) {
+		if (inst->replace.request &&
+		    (get_hv_content(request->request_ctx, request, rad_request_hv, &vps, "request",
+		    		    fr_dict_root(request->dict), true)) > 0) {
 			fr_pair_list_free(&request->request_pairs);
 			fr_pair_list_append(&request->request_pairs, &vps);
 		}
 
-		if ((get_hv_content(request->reply_ctx, request, rad_reply_hv, &vps, "RAD_REPLY", "reply")) > 0) {
+		if (inst->replace.reply &&
+		    (get_hv_content(request->reply_ctx, request, rad_reply_hv, &vps, "reply",
+		    		    fr_dict_root(request->dict), true)) > 0) {
 			fr_pair_list_free(&request->reply_pairs);
 			fr_pair_list_append(&request->reply_pairs, &vps);
 		}
 
-		if ((get_hv_content(request->control_ctx, request, rad_config_hv, &vps, "RAD_CONFIG", "control")) > 0) {
+		if (inst->replace.control &&
+		    (get_hv_content(request->control_ctx, request, rad_config_hv, &vps, "control",
+		    		    fr_dict_root(request->dict), true)) > 0) {
 			fr_pair_list_free(&request->control_pairs);
 			fr_pair_list_append(&request->control_pairs, &vps);
 		}
 
-		if ((get_hv_content(request->session_state_ctx, request, rad_state_hv, &vps, "RAD_STATE", "session-state")) > 0) {
+		if (inst->replace.session &&
+		    (get_hv_content(request->session_state_ctx, request, rad_state_hv, &vps, "session-state",
+		    		    fr_dict_root(request->dict), true)) > 0) {
 			fr_pair_list_free(&request->session_state_pairs);
 			fr_pair_list_append(&request->session_state_pairs, &vps);
 		}
@@ -902,7 +947,7 @@ static unlang_action_t do_perl(rlm_rcode_t *p_result, module_ctx_t const *mctx, 
 #define RLM_PERL_FUNC(_x) \
 static unlang_action_t CC_HINT(nonnull) mod_##_x(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request) \
 { \
-	rlm_perl_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t); \
+	rlm_perl_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_perl_t); \
 	return do_perl(p_result, mctx, request, \
 		       ((rlm_perl_thread_t *)talloc_get_type_abort(mctx->thread, rlm_perl_thread_t))->perl, \
 		       inst->func_##_x); \
@@ -946,7 +991,7 @@ DIAG_ON(DIAG_UNKNOWN_PRAGMAS)
 
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_perl_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t);
+	rlm_perl_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_perl_t);
 	rlm_perl_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_perl_thread_t);
 	PerlInterpreter		*interp;
 	UV			clone_flags = 0;
@@ -996,8 +1041,8 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_perl_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_perl_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_perl_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 	AV		*end_AV;
 
 	char const	**embed_c;	/* Stupid Perl and lack of const consistency */
@@ -1074,7 +1119,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 DIAG_OFF(nested-externs)
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_perl_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t);
+	rlm_perl_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_perl_t);
 	int 		ret = 0, count = 0;
 
 
@@ -1107,6 +1152,16 @@ static int mod_detach(module_detach_ctx_t const *mctx)
 	return ret;
 }
 DIAG_ON(nested-externs)
+
+static int mod_bootstrap(module_inst_ctx_t const *mctx)
+{
+	xlat_t *xlat;
+
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, perl_xlat, FR_TYPE_VOID);
+	xlat_func_args_set(xlat, perl_xlat_args);
+
+	return 0;
+}
 
 static int mod_load(void)
 {
@@ -1155,7 +1210,6 @@ static void mod_unload(void)
 	PERL_SYS_TERM();
 }
 
-
 /*
  *	The module name should be the only globally exported symbol.
  *	That is, everything else should be 'static'.
@@ -1170,7 +1224,6 @@ module_rlm_t rlm_perl = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "perl",
-		.flags			= MODULE_TYPE_THREAD_SAFE,
 		.inst_size		= sizeof(rlm_perl_t),
 
 		.config			= module_config,
@@ -1184,17 +1237,20 @@ module_rlm_t rlm_perl = {
 		.thread_instantiate	= mod_thread_instantiate,
 		.thread_detach		= mod_thread_detach,
 	},
-	.method_names = (module_method_name_t[]){
-		/*
-		 *	Hack to support old configurations
-		 */
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			/*
+			 *	Hack to support old configurations
+			 */
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting	},
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate },
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY), .method = mod_authorize },
 
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_preacct		},
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting	},
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate	},
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth		},
-		MODULE_NAME_TERMINATOR
+			{ .section = SECTION_NAME("recv", "accounting-request"), .method = mod_preacct },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize },
+
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

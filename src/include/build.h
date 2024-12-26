@@ -32,7 +32,9 @@ extern "C" {
  *
  */
 #ifndef static_assert
+# if __STDC_VERSION__ < 202000
 #  define static_assert _Static_assert
+# endif
 # else
 #  include <assert.h>
 #endif
@@ -369,14 +371,28 @@ do { \
  *	compiler.
  */
 #ifdef __GNUC__
-#  define CC_HINT(...)	__attribute__((__VA_ARGS__))
-#  define likely(_x)	__builtin_expect((_x), 1)
-#  define unlikely(_x)	__builtin_expect((_x), 0)
+#  define CC_HINT(...)		__attribute__((__VA_ARGS__))
+#  define likely(_x)		__builtin_expect((_x), 1)
+#  define unlikely(_x)		__builtin_expect((_x), 0)
+#  define unpredictable(_x)	__builtin_unpredictable((_x))
 #else
 #  define CC_HINT(...)
-#  define likely(_x)	_x
-#  define unlikely(_x)	_x
+#  define likely(_x) _x
+#  define unlikely(_x) _x
+#  define unpredictable(_x) _x
 #endif
+
+/*
+ *	GNU version check
+ */
+#ifdef __GNUC__
+#define	__GNUC_PREREQ__(x, y)						\
+	((__GNUC__ == (x) && __GNUC_MINOR__ >= (y)) ||			\
+	 (__GNUC__ > (x)))
+#else
+#define	__GNUC_PREREQ__(x, y)	0
+#endif
+
 
 /*
  *	Macros to add pragmas
@@ -394,6 +410,29 @@ do { \
 #  define CC_ACQUIRE_HANDLE(_tag)
 #  define CC_USE_HANDLE(_tag)
 #  define CC_RELEASE_HANDLE(_tag)
+#endif
+
+/*
+ *      Disable various forms of ubsan
+ */
+#ifndef __has_feature
+#  define __has_feature(_x) 0
+#endif
+#if defined(__clang__) && __has_feature(undefined_behavior_sanitizer)
+#  define CC_NO_UBSAN(_sanitize)        __attribute__((no_sanitize(STRINGIFY(_sanitize))))
+#elif __GNUC_PREREQ__(4, 9) && defined(__SANITIZE_UNDEFINED__)
+#  define CC_NO_UBSAN(_sanitize)        __attribute__((no_sanitize_undefined))
+#else
+#  define CC_NO_UBSAN(_sanitize)
+#endif
+
+/*
+ *	Disable sanitizers for undefined behaviour
+ */
+#if defined(__clang__)
+#  define CC_NO_SANITIZE_UNDEFINED(_what) CC_HINT(no_sanitize(_what))
+#else
+#  define CC_NO_SANITIZE_UNDEFINED(_what)
 #endif
 
 /*

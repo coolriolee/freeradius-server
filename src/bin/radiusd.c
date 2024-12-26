@@ -52,7 +52,6 @@ RCSID("$Id$")
 #include <freeradius-devel/util/cap.h>
 #endif
 
-#include <ctype.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
@@ -239,7 +238,8 @@ int main(int argc, char *argv[])
 	bool			raddb_dir_set = false;
 
 	size_t			pool_size = 0;
-	void			*pool_page_start = NULL, *pool_page_end = NULL;
+	void			*pool_page_start = NULL;
+	size_t			pool_page_len = 0;
 	bool			do_mprotect;
 
 #ifndef NDEBUG
@@ -285,7 +285,7 @@ int main(int argc, char *argv[])
 			 *	catch any stray writes.
 			 */
 			global_ctx = talloc_page_aligned_pool(talloc_autofree_context(),
-							      &pool_page_start, &pool_page_end, pool_size);
+							      &pool_page_start, &pool_page_len, 0, pool_size);
 			do_mprotect = true;
 		} else {
 	 		global_ctx = talloc_new(talloc_autofree_context());
@@ -638,6 +638,27 @@ int main(int argc, char *argv[])
 	INFO("%s", fr_debug_state_to_msg(fr_debug_state));
 
 	/*
+	 *	Track configuration versions.  This lets us know if the configuration changed.
+	 */
+	if (fr_debug_lvl) {
+		uint8_t digest[16];
+
+		cf_md5_final(digest);
+
+		digest[6] &= 0x0f; /* ver is 0b0100 at bits 48:51 */
+		digest[6] |= 0x40;
+		digest[8] &= ~0xc0; /* var is 0b10 at bits 64:65 */
+		digest[8] |= 0x80;
+
+		/*
+		 *	UUIDv4 format: 4-2-2-2-6
+		 */
+		INFO("Configuration version: %02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+		     digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+		     digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14], digest[15]);
+	}
+
+	/*
 	 *  Call this again now we've loaded the configuration. Yes I know...
 	 */
 	if (talloc_config_set(config) < 0) {
@@ -792,7 +813,7 @@ int main(int argc, char *argv[])
 	 */
 	if (unlang_global_init() < 0) EXIT_WITH_FAILURE;
 
-	if (server_init(config->root_cs) < 0) EXIT_WITH_FAILURE;
+	if (server_init(config->root_cs, config->raddb_dir, fr_dict_unconst(fr_dict_internal())) < 0) EXIT_WITH_FAILURE;
 
 	/*
 	 *  Everything seems to have loaded OK, exit gracefully.
@@ -901,7 +922,10 @@ int main(int argc, char *argv[])
 	 *  what to do, so we might as well do the default, and die.
 	 */
 #ifdef SIGPIPE
-	signal(SIGPIPE, SIG_IGN);
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+		ERROR("Failed ignoring SIGPIPE: %s", fr_syserror(errno));
+		goto cleanup;
+	}
 #endif
 
 	if (fr_set_signal(SIGHUP, sig_hup) < 0) goto set_signal_error;
@@ -963,7 +987,7 @@ int main(int argc, char *argv[])
 	 *  to write to this memory we get a SIGBUS.
 	 */
 	if (do_mprotect) {
-	    	if (mprotect(pool_page_start, (uintptr_t)pool_page_end - (uintptr_t)pool_page_start, PROT_READ) < 0) {
+	    	if (mprotect(pool_page_start, pool_page_len, PROT_READ) < 0) {
 			PERROR("Protecting global memory failed: %s", fr_syserror(errno));
 			EXIT_WITH_FAILURE;
 		}
@@ -988,13 +1012,16 @@ int main(int argc, char *argv[])
 	/*
 	 *  Ignore the TERM signal: we're about to die.
 	 */
-	signal(SIGTERM, SIG_IGN);
+	if (unlikely(signal(SIGTERM, SIG_IGN) == SIG_ERR)) {
+		ERROR("Failed blocking SIGTERM, we may receive spurious signals: %s",
+		      fr_syserror(errno));
+	}
 
 	/*
 	 *  Unprotect global memory
 	 */
 	if (do_mprotect) {
-		if (mprotect(pool_page_start, (uintptr_t)pool_page_end - (uintptr_t)pool_page_start,
+		if (mprotect(pool_page_start, pool_page_len,
 			     PROT_READ | PROT_WRITE) < 0) {
 			PERROR("Unprotecting global memory failed: %s", fr_syserror(errno));
 			EXIT_WITH_FAILURE;
@@ -1030,7 +1057,10 @@ int main(int argc, char *argv[])
 	 *  We're exiting, so we can delete the PID file.
 	 *  (If it doesn't exist, we can ignore the error returned by unlink)
 	 */
-	if (config->daemonize) unlink(config->pid_file);
+	if (config->daemonize) {
+		DEBUG3("Unlinking PID file %s", config->pid_file);
+		unlink(config->pid_file);
+	}
 
 	/*
 	 *  Free memory in an explicit and consistent order
@@ -1058,7 +1088,16 @@ int main(int argc, char *argv[])
 	 */
 	if (config->spawn_workers) {
 		INFO("All threads have exited, sending SIGTERM to remaining children");
-		kill(-radius_pid, SIGTERM);
+
+		/*
+		 *	If pid is negative, but not -1, sig
+		 *	shall be sent to all processes
+		 *	(excluding an unspecified set of system processes)
+		 *	whose process group ID is equal to the absolute value
+		 *	of pid, and for which the process has permission
+		 *	to send a signal.
+		 */
+		kill(-getpgid(radius_pid), SIGTERM);
 	}
 
 	/*
@@ -1087,14 +1126,7 @@ cleanup:
 	 */
 	fr_atexit_thread_trigger_all();
 
-	fr_snmp_free();
-
 	server_free();
-
-	/*
-	 *	Free any resources used by the unlang interpreter.
-	 */
-	unlang_global_free();
 
 #ifdef WITH_TLS
 	fr_openssl_free();		/* Cleanup any memory alloced by OpenSSL and placed into globals */
@@ -1202,7 +1234,22 @@ static NEVER_RETURNS void usage(main_config_t const *config, int status)
  */
 static void sig_fatal(int sig)
 {
+	static int last_sig;
+
 	if (getpid() != radius_pid) _exit(sig);
+
+	/*
+	 *	Suppress duplicate signals.
+	 *
+	 *	For some reason on macOS we get multiple signals
+	 *	for the same event (SIGINT).
+	 *
+	 *	...this also fixes the problem of the user hammering
+	 *	Ctrl-C and causing ungraceful exits as we try and
+	 *	write out signals to a pipe that's already closed.
+	 */
+	if (sig == last_sig) return;
+	last_sig = sig;
 
 	switch (sig) {
 	case SIGTERM:

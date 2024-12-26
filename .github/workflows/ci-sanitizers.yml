@@ -22,8 +22,7 @@ env:
   NO_PERFORMANCE_TESTS: yes
   DO_BUILD: yes
   HOSTAPD_BUILD_DIR: eapol_test.ci
-  HOSTAPD_GIT_TAG: hostap_2_10
-  ALT_OPENSSL: "3.0.2"
+  HOSTAPD_GIT_TAG: hostap_2_11
   DEBIAN_FRONTEND: noninteractive
   CI: 1
   GH_ACTIONS: 1
@@ -57,7 +56,7 @@ jobs:
         #  docker  - the docker image name, if containers are being used
         #  name    - used in the job name only
         os:
-          - { runs_on: "ubuntu-20.04",  code: "ubuntu2004", docker: "ubuntu:20.04", name: "gh-ubuntu20", imageos: "ubuntu20" }
+          - { runs_on: "ubuntu-24.04",  code: "ubuntu2404", docker: "ubuntu:24.04", name: "gh-ubuntu24", imageos: "ubuntu24" }
 
         env:
           - { CC: clang, BUILD_CFLAGS: "-DWITH_EVAL_DEBUG",         LIBS_OPTIONAL: no,  LIBS_ALT: no,  TEST_TYPE: fixtures, NAME: linux-clang-lean    }
@@ -96,6 +95,7 @@ jobs:
           use_sanitizers: true
           cc: ${{ matrix.env.CC }}
           test_type: ${{ matrix.env.TEST_TYPE }}
+          platform: ${{ matrix.os.imageos }}
 
       - name: Run main CI tests
         uses: ./.github/actions/ci-tests

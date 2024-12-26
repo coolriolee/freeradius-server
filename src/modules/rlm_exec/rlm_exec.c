@@ -24,7 +24,7 @@
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <stdint.h>
 
@@ -138,7 +138,7 @@ static xlat_action_t exec_xlat_oneshot(TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out
 				       xlat_ctx_t const *xctx,
 				       request_t *request, fr_value_box_list_t *in)
 {
-	rlm_exec_t const	*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_exec_t);
+	rlm_exec_t const	*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_exec_t);
 	fr_pair_list_t		*env_pairs = NULL;
 	fr_exec_state_t		*exec;
 
@@ -240,7 +240,7 @@ static rlm_rcode_t rlm_exec_status2rcode(request_t *request, fr_value_box_t *box
 static unlang_action_t mod_exec_oneshot_nowait_resume(rlm_rcode_t *p_result, module_ctx_t const *mctx,
 						      request_t *request)
 {
-	rlm_exec_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_exec_t);
+	rlm_exec_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_exec_t);
 	fr_value_box_list_t	*args = talloc_get_type_abort(mctx->rctx, fr_value_box_list_t);
 	fr_pair_list_t		*env_pairs = NULL;
 
@@ -282,7 +282,7 @@ static fr_sbuff_parse_rules_t const rhs_term = {
 static unlang_action_t mod_exec_oneshot_wait_resume(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	int			status;
-	rlm_exec_t const       	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_exec_t);
+	rlm_exec_t const       	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_exec_t);
 	rlm_exec_ctx_t		*m = talloc_get_type_abort(mctx->rctx, rlm_exec_ctx_t);
 	rlm_rcode_t		rcode;
 
@@ -387,7 +387,7 @@ static unlang_action_t CC_HINT(nonnull) mod_exec_dispatch_oneshot(rlm_rcode_t *p
 	rlm_exec_ctx_t		*m;
 	fr_pair_list_t		*env_pairs = NULL;
 	TALLOC_CTX		*ctx;
-	rlm_exec_t const       	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_exec_t);
+	rlm_exec_t const       	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_exec_t);
 	exec_call_env_t		*env_data = talloc_get_type_abort(mctx->env_data, exec_call_env_t);
 
 	if (!env_data->program) {
@@ -442,24 +442,10 @@ static unlang_action_t CC_HINT(nonnull) mod_exec_dispatch_oneshot(rlm_rcode_t *p
 					   NULL, 0, &m->box);
 }
 
-/*
- *	Do any per-module initialization that is separate to each
- *	configured instance of the module.  e.g. set up connections
- *	to external databases, read configuration files, set up
- *	dictionary entries, etc.
- *
- *	If configuration information is given in the config section
- *	that must be referenced in later calls, store a handle to it
- *	in *instance otherwise put a null pointer there.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mob_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_exec_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_exec_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
-	xlat_t		*xlat;
-
-	xlat = xlat_func_register_module(NULL, mctx, mctx->inst->name, exec_xlat_oneshot, FR_TYPE_STRING);
-	xlat_func_args_set(xlat, exec_xlat_args);
+	rlm_exec_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_exec_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 
 	if (inst->input_list && !tmpl_is_list(inst->input_list)) {
 		cf_log_perr(conf, "Invalid input list '%s'", inst->input_list->name);
@@ -506,6 +492,25 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 
 	return 0;
 }
+/*
+ *	Do any per-module initialization that is separate to each
+ *	configured instance of the module.  e.g. set up connections
+ *	to external databases, read configuration files, set up
+ *	dictionary entries, etc.
+ *
+ *	If configuration information is given in the config section
+ *	that must be referenced in later calls, store a handle to it
+ *	in *instance otherwise put a null pointer there.
+ */
+static int mod_bootstrap(module_inst_ctx_t const *mctx)
+{
+	xlat_t			*xlat;
+
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, exec_xlat_oneshot, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, exec_xlat_args);
+
+	return 0;
+}
 
 /*
  *	The module name should be the only globally exported symbol.
@@ -521,14 +526,15 @@ module_rlm_t rlm_exec = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "exec",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_exec_t),
 		.config		= module_config,
 		.bootstrap	= mod_bootstrap,
+		.instantiate	= mob_instantiate
 	},
-        .method_names = (module_method_name_t[]){
-                { .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_exec_dispatch_oneshot,
-		  .method_env = &exec_method_env },
-                MODULE_NAME_TERMINATOR
-        }
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_exec_dispatch_oneshot, .method_env = &exec_method_env },
+			MODULE_BINDING_TERMINATOR
+		}
+	}
 };

@@ -58,17 +58,14 @@ static fr_dict_attr_t const *attr_module_success_message;
 static fr_dict_attr_t const *attr_stripped_user_name;
 
 static fr_dict_attr_t const *attr_acct_status_type;
-static fr_dict_attr_t const *attr_calling_station_id;
-static fr_dict_attr_t const *attr_chap_password;
-static fr_dict_attr_t const *attr_nas_port;
 static fr_dict_attr_t const *attr_packet_type;
 static fr_dict_attr_t const *attr_proxy_state;
-static fr_dict_attr_t const *attr_service_type;
 static fr_dict_attr_t const *attr_state;
 static fr_dict_attr_t const *attr_user_name;
 static fr_dict_attr_t const *attr_user_password;
 static fr_dict_attr_t const *attr_original_packet_code;
 static fr_dict_attr_t const *attr_error_cause;
+static fr_dict_attr_t const *attr_event_timestamp;
 
 extern fr_dict_attr_autoload_t process_radius_dict_attr[];
 fr_dict_attr_autoload_t process_radius_dict_attr[] = {
@@ -78,18 +75,16 @@ fr_dict_attr_autoload_t process_radius_dict_attr[] = {
 	{ .out = &attr_stripped_user_name, .name = "Stripped-User-Name", .type = FR_TYPE_STRING, .dict = &dict_freeradius },
 
 	{ .out = &attr_acct_status_type, .name = "Acct-Status-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
-	{ .out = &attr_calling_station_id, .name = "Calling-Station-Id", .type = FR_TYPE_STRING, .dict = &dict_radius },
-	{ .out = &attr_chap_password, .name = "CHAP-Password", .type = FR_TYPE_OCTETS, .dict = &dict_radius },
-	{ .out = &attr_nas_port, .name = "NAS-Port", .type = FR_TYPE_UINT32, .dict = &dict_radius },
 	{ .out = &attr_proxy_state, .name = "Proxy-State", .type = FR_TYPE_OCTETS, .dict = &dict_radius },
 	{ .out = &attr_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
-	{ .out = &attr_service_type, .name = "Service-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
 	{ .out = &attr_state, .name = "State", .type = FR_TYPE_OCTETS, .dict = &dict_radius },
 	{ .out = &attr_user_name, .name = "User-Name", .type = FR_TYPE_STRING, .dict = &dict_radius },
 	{ .out = &attr_user_password, .name = "User-Password", .type = FR_TYPE_STRING, .dict = &dict_radius },
 
 	{ .out = &attr_original_packet_code, .name = "Extended-Attribute-1.Original-Packet-Code", .type = FR_TYPE_UINT32, .dict = &dict_radius },
 	{ .out = &attr_error_cause, .name = "Error-Cause", .type = FR_TYPE_UINT32, .dict = &dict_radius },
+
+	{ .out = &attr_event_timestamp, .name = "Event-Timestamp", .type = FR_TYPE_DATE, .dict = &dict_radius },
 
 	{ NULL }
 };
@@ -137,16 +132,6 @@ typedef struct {
 } process_radius_sections_t;
 
 typedef struct {
-	bool		log_stripped_names;
-	bool		log_auth;		//!< Log authentication attempts.
-	bool		log_auth_badpass;	//!< Log failed authentications.
-	bool		log_auth_goodpass;	//!< Log successful authentications.
-	char const	*auth_badpass_msg;	//!< Additional text to append to failed auth messages.
-	char const	*auth_goodpass_msg;	//!< Additional text to append to successful auth messages.
-
-	char const	*denied_msg;		//!< Additional text to append if the user is already logged
-						//!< in (simultaneous use check failed).
-
 	fr_time_delta_t	session_timeout;	//!< Maximum time between the last response and next request.
 	uint32_t	max_session;		//!< Maximum ongoing session allowed.
 
@@ -189,21 +174,7 @@ static const conf_parser_t session_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
-static const conf_parser_t log_config[] = {
-	{ FR_CONF_OFFSET("stripped_names", process_radius_auth_t, log_stripped_names), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth", process_radius_auth_t, log_auth), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth_badpass", process_radius_auth_t, log_auth_badpass), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth_goodpass", process_radius_auth_t,  log_auth_goodpass), .dflt = "no" },
-	{ FR_CONF_OFFSET("msg_badpass", process_radius_auth_t, auth_badpass_msg) },
-	{ FR_CONF_OFFSET("msg_goodpass", process_radius_auth_t, auth_goodpass_msg) },
-	{ FR_CONF_OFFSET("msg_denied", process_radius_auth_t, denied_msg), .dflt = "You are already logged in - access denied" },
-
-	CONF_PARSER_TERMINATOR
-};
-
 static const conf_parser_t auth_config[] = {
-	{ FR_CONF_POINTER("log", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) log_config },
-
 	{ FR_CONF_POINTER("session", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) session_config },
 
 	CONF_PARSER_TERMINATOR
@@ -219,7 +190,7 @@ static const conf_parser_t config[] = {
 /*
  *	Debug the packet if requested.
  */
-static void radius_packet_debug(request_t *request, fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
+static void radius_packet_debug(request_t *request, fr_packet_t *packet, fr_pair_list_t *list, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];
@@ -234,7 +205,7 @@ static void radius_packet_debug(request_t *request, fr_radius_packet_t *packet, 
 #endif
 		       "",
 		       received ? "Received" : "Sending",
-		       fr_radius_packet_names[packet->code],
+		       fr_radius_packet_name[packet->code],
 		       packet->id,
 		       packet->socket.inet.src_ipaddr.af == AF_INET6 ? "[" : "",
 		       fr_box_ipaddr(packet->socket.inet.src_ipaddr),
@@ -256,127 +227,6 @@ static void radius_packet_debug(request_t *request, fr_radius_packet_t *packet, 
 	} else {
 		log_request_proto_pair_list(L_DBG_LVL_1, request, NULL, list, NULL);
 	}
-}
-
-#define RAUTH(fmt, ...)		log_request(L_AUTH, L_DBG_LVL_OFF, request, __FILE__, __LINE__, fmt, ## __VA_ARGS__)
-
-/*
- *	Return a short string showing the terminal server, port
- *	and calling station ID.
- */
-static char *auth_name(char *buf, size_t buflen, request_t *request)
-{
-	fr_pair_t	*cli;
-	fr_pair_t	*pair;
-	uint32_t	port = 0;	/* RFC 2865 NAS-Port is 4 bytes */
-	char const	*tls = "";
-	fr_client_t	*client = client_from_request(request);
-
-	cli = fr_pair_find_by_da(&request->request_pairs, NULL, attr_calling_station_id);
-
-	pair = fr_pair_find_by_da(&request->request_pairs, NULL, attr_nas_port);
-	if (pair != NULL) port = pair->vp_uint32;
-
-	if (request->packet->socket.inet.dst_port == 0) tls = " via proxy to virtual server";
-
-	snprintf(buf, buflen, "from client %.128s port %u%s%.128s%s",
-		 client ? client->shortname : "", port,
-		 (cli ? " cli " : ""), (cli ? cli->vp_strvalue : ""),
-		 tls);
-
-	return buf;
-}
-
-/*
- *	Make sure user/pass are clean and then create an attribute
- *	which contains the log message.
- */
-static void CC_HINT(format (printf, 4, 5)) auth_message(process_radius_auth_t const *inst,
-							request_t *request, bool goodpass, char const *fmt, ...)
-{
-	va_list		 ap;
-
-	bool		logit;
-	char const	*extra_msg = NULL;
-
-	char		password_buff[128];
-	char const	*password_str = NULL;
-
-	char		buf[1024];
-	char		extra[1024];
-	char		*p;
-	char		*msg;
-	fr_pair_t	*username = NULL;
-	fr_pair_t	*password = NULL;
-
-	/*
-	 *	No logs?  Then no logs.
-	 */
-	if (!inst->log_auth) return;
-
-	/*
-	 * Get the correct username based on the configured value
-	 */
-	if (!inst->log_stripped_names) {
-		username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_name);
-	} else {
-		username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_stripped_user_name);
-		if (!username) username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_name);
-	}
-
-	/*
-	 *	Clean up the password
-	 */
-	if (inst->log_auth_badpass || inst->log_auth_goodpass) {
-		password = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_password);
-		if (!password) {
-			fr_pair_t *auth_type;
-
-			auth_type = fr_pair_find_by_da(&request->control_pairs, NULL, attr_auth_type);
-			if (auth_type) {
-				snprintf(password_buff, sizeof(password_buff), "<via Auth-Type = %s>",
-					 fr_dict_enum_name_by_value(auth_type->da, &auth_type->data));
-				password_str = password_buff;
-			} else {
-				password_str = "<no User-Password attribute>";
-			}
-		} else if (fr_pair_find_by_da(&request->request_pairs, NULL, attr_chap_password)) {
-			password_str = "<CHAP-Password>";
-		}
-	}
-
-	if (goodpass) {
-		logit = inst->log_auth_goodpass;
-		extra_msg = inst->auth_goodpass_msg;
-	} else {
-		logit = inst->log_auth_badpass;
-		extra_msg = inst->auth_badpass_msg;
-	}
-
-	if (extra_msg) {
-		extra[0] = ' ';
-		p = extra + 1;
-		if (xlat_eval(p, sizeof(extra) - 1, request, extra_msg, NULL, NULL) < 0) return;
-	} else {
-		*extra = '\0';
-	}
-
-	/*
-	 *	Expand the input message
-	 */
-	va_start(ap, fmt);
-	msg = fr_vasprintf(request, fmt, ap);
-	va_end(ap);
-
-	RAUTH("%s: [%pV%s%pV] (%s)%s",
-	      msg,
-	      username ? &username->data : fr_box_strvalue("<no User-Name attribute>"),
-	      logit ? "/" : "",
-	      logit ? (password_str ? fr_box_strvalue(password_str) : &password->data) : fr_box_strvalue(""),
-	      auth_name(buf, sizeof(buf), request),
-	      extra);
-
-	talloc_free(msg);
 }
 
 /** Keep a copy of some attributes to keep them from being tamptered with
@@ -474,7 +324,7 @@ RESUME(generic_radius_response)
 
 RECV(access_request)
 {
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	/*
 	 *	Only reject if the state has already been thawed.
@@ -497,7 +347,7 @@ RESUME(access_request)
 	CONF_SECTION			*cs;
 	fr_dict_enum_value_t const		*dv;
 	fr_process_state_t const	*state;
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
 
@@ -700,16 +550,9 @@ RESUME(auth_type)
 RESUME(access_accept)
 {
 	fr_pair_t			*vp;
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
-
-	vp = fr_pair_find_by_da(&request->request_pairs, NULL, attr_module_success_message);
-	if (vp) {
-		auth_message(&inst->auth, request, true, "Login OK (%pV)", &vp->data);
-	} else {
-		auth_message(&inst->auth, request, true, "Login OK");
-	}
 
 	/*
 	 *	Check that there is a name which can be used to
@@ -733,17 +576,9 @@ RESUME(access_accept)
 
 RESUME(access_reject)
 {
-	fr_pair_t			*vp;
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
-
-	vp = fr_pair_find_by_da(&request->request_pairs, NULL, attr_module_failure_message);
-	if (vp) {
-		auth_message(&inst->auth, request, false, "Login incorrect (%pV)", &vp->data);
-	} else {
-		auth_message(&inst->auth, request, false, "Login incorrect");
-	}
 
 	fr_state_discard(inst->auth.state_tree, request);
 	radius_request_pairs_to_reply(request, mctx->rctx);
@@ -752,22 +587,64 @@ RESUME(access_reject)
 
 RESUME(access_challenge)
 {
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
 
 	/*
-	 *	Cache the state context.
+	 *	Cache the state context, unless this is a subrequest.
+	 *	Subrequest state context will be handled by the caller.
 	 *
 	 *	If this fails, don't respond to the request.
 	 */
-	if (fr_request_to_state(inst->auth.state_tree, request) < 0) {
+	if (!request->parent && fr_request_to_state(inst->auth.state_tree, request) < 0) {
 		return CALL_SEND_TYPE(FR_RADIUS_CODE_DO_NOT_RESPOND);
 	}
 
 	fr_assert(request->reply->code == FR_RADIUS_CODE_ACCESS_CHALLENGE);
 	radius_request_pairs_to_reply(request, mctx->rctx);
 	RETURN_MODULE_OK;
+}
+
+/** A wrapper around recv generic which stores fields from the request
+ */
+RECV(accounting_request)
+{
+	module_ctx_t			our_mctx = *mctx;
+	fr_pair_t			*acct_delay, *event_timestamp;
+
+	fr_assert_msg(!mctx->rctx, "rctx not expected here");
+	our_mctx.rctx = radius_request_pairs_store(request);
+	mctx = &our_mctx;	/* Our mutable mctx */
+
+	/*
+	 *	Acct-Delay-Time is horrific.  Its existence in a packet means that any retransmissions can't
+	 *	be retransmissions!  Instead, we have to send a brand new packet each time.  This rewriting is
+	 *	expensive, causes ID churn, over-allocation of IDs, and makes it more difficult to discover
+	 *	end-to-end failures.
+	 *
+	 *	As a result, we delete Acct-Delay-Time, and replace it with Event-Timestamp.
+	 */
+	event_timestamp = fr_pair_find_by_da(&request->request_pairs, NULL, attr_event_timestamp);
+	if (!event_timestamp) {
+		MEM(event_timestamp = fr_pair_afrom_da(request->request_ctx, attr_event_timestamp));
+		fr_pair_append(&request->request_pairs, event_timestamp);
+		event_timestamp->vp_date = fr_time_to_unix_time(request->packet->timestamp);
+
+		acct_delay = fr_pair_find_by_da(&request->request_pairs, NULL, attr_event_timestamp);
+		if (acct_delay) {
+			if (acct_delay->vp_uint32 < ((365 * 86400))) {
+				event_timestamp->vp_date = fr_unix_time_sub_time_delta(event_timestamp->vp_date, fr_time_delta_from_sec(acct_delay->vp_uint32));
+
+				RDEBUG("Accounting-Request packet contains %pP.  Creating %pP",
+				       acct_delay, event_timestamp);
+			}
+		} else {
+			RDEBUG("Accounting-Request packet is missing Event-Timestamp.  Adding it to packet as %pP.", event_timestamp);
+		}
+	}
+
+	return CALL_RECV(generic);
 }
 
 RESUME(acct_type)
@@ -815,7 +692,7 @@ RESUME(accounting_request)
 	CONF_SECTION			*cs;
 	fr_dict_enum_value_t const	*dv;
 	fr_process_state_t const	*state;
-	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	process_radius_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
 
@@ -916,7 +793,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 {
 	fr_process_state_t const *state;
 
-	(void) talloc_get_type_abort_const(mctx->inst->data, process_radius_t);
+	(void) talloc_get_type_abort_const(mctx->mi->data, process_radius_t);
 
 	PROCESS_TRACE;
 
@@ -954,7 +831,7 @@ static xlat_arg_parser_t const xlat_func_radius_secret_verify_args[] = {
  *
  * Example:
 @verbatim
-%radius_secret_verify(<secret>)
+%radius.secret.verify(<secret>)
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -964,7 +841,7 @@ static xlat_action_t xlat_func_radius_secret_verify(TALLOC_CTX *ctx, fr_dcursor_
 {
 	fr_value_box_t  *secret, *vb;
 	int		ret;
-	bool		require_ma = false;
+	bool		require_message_authenticator = false;
 
 	XLAT_ARGS(args, &secret);
 
@@ -977,9 +854,9 @@ static xlat_action_t xlat_func_radius_secret_verify(TALLOC_CTX *ctx, fr_dcursor_
 	 *	All the other packet types are signed using the
 	 *	authenticator field.
 	 */
-	if (request->packet->code == FR_RADIUS_CODE_ACCESS_REQUEST) require_ma = true;
+	if (request->packet->code == FR_RADIUS_CODE_ACCESS_REQUEST) require_message_authenticator = true;
 
-	ret = fr_radius_verify(request->packet->data, NULL, secret->vb_octets, secret->vb_length, require_ma);
+	ret = fr_radius_verify(request->packet->data, NULL, secret->vb_octets, secret->vb_length, require_message_authenticator, false);
 	switch (ret) {
 	case 0:
 		vb->vb_bool = true;
@@ -1001,7 +878,9 @@ static xlat_action_t xlat_func_radius_secret_verify(TALLOC_CTX *ctx, fr_dcursor_
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	process_radius_t	*inst = talloc_get_type_abort(mctx->inst->data, process_radius_t);
+	process_radius_t	*inst = talloc_get_type_abort(mctx->mi->data, process_radius_t);
+
+	inst->server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
 	inst->auth.state_tree = fr_state_tree_init(inst, attr_state, main_config->spawn_workers, inst->auth.max_session,
 						   inst->auth.session_timeout, inst->auth.state_server_id,
@@ -1012,10 +891,9 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	process_radius_t	*inst = talloc_get_type_abort(mctx->inst->data, process_radius_t);
+	CONF_SECTION	*server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
-	inst->server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
-	if (virtual_server_section_attribute_define(inst->server_cs, "authenticate", attr_auth_type) < 0) return -1;
+	if (virtual_server_section_attribute_define(server_cs, "authenticate", attr_auth_type) < 0) return -1;
 
 	return 0;
 }
@@ -1030,6 +908,11 @@ static int mod_load(void)
 	xlat_func_args_set(xlat, xlat_func_radius_secret_verify_args);
 
 	return 0;
+}
+
+static void mod_unload(void)
+{
+	xlat_func_unregister("radius.secret.verify");
 }
 
 /*
@@ -1102,7 +985,7 @@ static fr_process_state_t const process_state[] = {
 			[RLM_MODULE_DISALLOW]	= FR_RADIUS_CODE_DO_NOT_RESPOND
 		},
 		.rcode = RLM_MODULE_NOOP,
-		.recv = recv_generic_radius_request,
+		.recv = recv_accounting_request,
 		.resume = resume_accounting_request,
 		.section_offset = offsetof(process_radius_sections_t, accounting_request),
 	},
@@ -1252,105 +1135,89 @@ static fr_process_state_t const process_state[] = {
 
 static virtual_server_compile_t const compile_list[] = {
 	{
-		.name = "recv",
-		.name2 = "Access-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Access-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(access_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Access-Accept",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Access-Accept"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(access_accept),
 	},
 	{
-		.name = "send",
-		.name2 = "Access-Challenge",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Access-Challenge"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(access_challenge),
 	},
 	{
-		.name = "send",
-		.name2 = "Access-Reject",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Access-Reject"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(access_reject),
 	},
 
 	{
-		.name = "recv",
-		.name2 = "Accounting-Request",
-		.component = MOD_PREACCT,
+		.section = SECTION_NAME("recv", "Accounting-Request"),
+		.actions = &mod_actions_preacct,
 		.offset = PROCESS_CONF_OFFSET(accounting_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Accounting-Response",
-		.component = MOD_ACCOUNTING,
+		.section = SECTION_NAME("send", "Accounting-Response"),
+		.actions = &mod_actions_accounting,
 		.offset = PROCESS_CONF_OFFSET(accounting_response),
 	},
 
 	{
-		.name = "recv",
-		.name2 = "Status-Server",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Status-Server"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(status_server),
 	},
 	{
-		.name = "recv",
-		.name2 = "CoA-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "CoA-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(coa_request),
 	},
 	{
-		.name = "send",
-		.name2 = "CoA-ACK",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "CoA-ACK"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(coa_ack),
 	},
 	{
-		.name = "send",.name2 = "CoA-NAK",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "CoA-NAK"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(coa_nak),
 	},
 	{
-		.name = "recv",
-		.name2 = "Disconnect-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Disconnect-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(disconnect_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Disconnect-ACK",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Disconnect-ACK"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(disconnect_ack),
 	},
 	{
-		.name = "send",
-		.name2 = "Disconnect-NAK",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Disconnect-NAK"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(disconnect_nak),
 	},
 	{
-		.name = "send",
-		.name2 = "Protocol-Error",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Protocol-Error"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(protocol_error),
 	},
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond),
 	},
 	{
-		.name = "authenticate",
-		.name2 = CF_IDENT_ANY,
-		.component = MOD_AUTHENTICATE
+		.section = SECTION_NAME("authenticate", CF_IDENT_ANY),
+		.actions = &mod_actions_authenticate
 	},
 	{
-		.name = "accounting",
-		.name2 = CF_IDENT_ANY,
-		.component = MOD_AUTHENTICATE
+		.section = SECTION_NAME("accounting", CF_IDENT_ANY),
+		.actions = &mod_actions_authenticate
 	},
 
 	DYNAMIC_CLIENT_SECTIONS,
@@ -1367,6 +1234,7 @@ fr_process_module_t process_radius = {
 		.inst_size	= sizeof(process_radius_t),
 
 		.onload		= mod_load,
+		.unload		= mod_unload,
 		.bootstrap	= mod_bootstrap,
 		.instantiate	= mod_instantiate
 	},

@@ -194,8 +194,6 @@ int fr_dhcpv4_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *data, 
 		 *	Loop over all the options data
 		 */
 		while (p < end) {
-			if (p[0] == 0) break; /* padding */
-
 			len = fr_dhcpv4_decode_option(ctx, &tmp, p, (end - p), packet_ctx);
 			if (len <= 0) {
 			fail:
@@ -227,8 +225,6 @@ int fr_dhcpv4_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *data, 
 				p = data + 44;
 				end = p + 64;
 				while (p < end) {
-					if (p[0] == 0) break; /* padding */
-
 					len = fr_dhcpv4_decode_option(ctx, &tmp,
 								      p, end - p, packet_ctx);
 					if (len <= 0) goto fail;
@@ -243,8 +239,6 @@ int fr_dhcpv4_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *data, 
 				p = data + 108;
 				end = p + 128;
 				while (p < end) {
-					if (p[0] == 0) break; /* padding */
-
 					len = fr_dhcpv4_decode_option(ctx, &tmp,
 								      p, end - p, packet_ctx);
 					if (len <= 0) goto fail;
@@ -370,7 +364,7 @@ int fr_dhcpv4_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *data, 
 	return 0;
 }
 
-int fr_dhcpv4_packet_encode(fr_radius_packet_t *packet, fr_pair_list_t *list)
+int fr_dhcpv4_packet_encode(fr_packet_t *packet, fr_pair_list_t *list)
 {
 	ssize_t		len;
 	fr_pair_t	*vp;
@@ -398,9 +392,9 @@ int fr_dhcpv4_packet_encode(fr_radius_packet_t *packet, fr_pair_list_t *list)
 	return 0;
 }
 
-fr_radius_packet_t *fr_dhcpv4_packet_alloc(uint8_t const *data, ssize_t data_len)
+fr_packet_t *fr_dhcpv4_packet_alloc(uint8_t const *data, ssize_t data_len)
 {
-	fr_radius_packet_t *packet;
+	fr_packet_t *packet;
 	uint32_t	magic;
 	uint8_t const	*code;
 
@@ -410,7 +404,7 @@ fr_radius_packet_t *fr_dhcpv4_packet_alloc(uint8_t const *data, ssize_t data_len
 	if (data_len < MIN_PACKET_SIZE) return NULL;
 
 	/* Now that checks are done, allocate packet */
-	packet = fr_radius_packet_alloc(NULL, false);
+	packet = fr_packet_alloc(NULL, false);
 	if (!packet) {
 		fr_strerror_const("Failed allocating packet");
 		return NULL;

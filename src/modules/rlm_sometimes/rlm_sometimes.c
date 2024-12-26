@@ -48,8 +48,8 @@ static const conf_parser_t module_config[] = {
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_sometimes_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_sometimes_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_sometimes_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_sometimes_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 
 	/*
 	 *	Convert the rcode string to an int, and get rid of it
@@ -72,9 +72,9 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
  *	A lie!  It always returns!
  */
 static unlang_action_t sometimes_return(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request,
-					fr_radius_packet_t *packet, fr_radius_packet_t *reply)
+					fr_packet_t *packet, fr_packet_t *reply)
 {
-	rlm_sometimes_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_sometimes_t);
+	rlm_sometimes_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_sometimes_t);
 	uint32_t		hash;
 	fr_pair_t		*vp;
 	float			value;
@@ -161,9 +161,11 @@ module_rlm_t rlm_sometimes = {
 		.config		= module_config,
 		.instantiate	= mod_instantiate
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_sometimes_reply },
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_sometimes_packet },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_sometimes_reply },
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_sometimes_packet },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

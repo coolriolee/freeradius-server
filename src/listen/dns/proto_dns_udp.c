@@ -242,7 +242,7 @@ static int mod_connection_set(fr_listen_t *li, fr_io_address_t *connection)
 }
 
 
-static void mod_network_get(void *instance, int *ipproto, bool *dynamic_clients, fr_trie_t const **trie)
+static void mod_network_get(int *ipproto, bool *dynamic_clients, fr_trie_t const **trie, void *instance)
 {
 	proto_dns_udp_t		*inst = talloc_get_type_abort(instance, proto_dns_udp_t);
 
@@ -338,10 +338,10 @@ static char const *mod_name(fr_listen_t *li)
 }
 
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_dns_udp_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_dns_udp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_dns_udp_t		*inst = talloc_get_type_abort(mctx->mi->data, proto_dns_udp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	size_t			num;
 	CONF_SECTION		*server_cs;
 	fr_client_t		*client;
@@ -450,7 +450,7 @@ fr_app_io_t proto_dns_udp = {
 		.config			= udp_listen_config,
 		.inst_size		= sizeof(proto_dns_udp_t),
 		.thread_inst_size	= sizeof(proto_dns_udp_thread_t),
-		.bootstrap		= mod_bootstrap
+		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= 576,
 	.track_duplicates	= false,

@@ -160,7 +160,7 @@ static fr_process_state_t const process_state[] = {
 /*
  *	Debug the packet if requested.
  */
-static void arp_packet_debug(request_t *request, fr_radius_packet_t const *packet, fr_pair_list_t const *list, bool received)
+static void arp_packet_debug(request_t *request, fr_packet_t const *packet, fr_pair_list_t const *list, bool received)
 {
 	if (!packet) return;
 	if (!RDEBUG_ENABLED) return;
@@ -182,7 +182,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_arp_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_arp_t);
 	fr_assert(PROCESS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "arp";
@@ -204,43 +204,35 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 static const virtual_server_compile_t compile_list[] = {
 	{
-		.name = "recv",
-		.name2 = "Request",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Request"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(request),
 	},
 	{
-		.name = "send",
-		.name2 = "Reply",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Reply"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(reply),
 	},
 	{			/* we can listen for others ARP replies, too */
-		.name = "recv",
-		.name2 = "Reply",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Reply"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_reply),
 	},
 	{
-		.name = "recv",
-		.name2 = "Reverse-Request",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Reverse-Request"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(reverse_request),
 	},
-
 	{
-		.name = "send",
-		.name2 = "Reverse-Reply",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Reverse-Reply"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(reverse_reply),
 	},
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond),
 	},
-
 	COMPILE_TERMINATOR
 };
 

@@ -52,15 +52,15 @@ typedef	int (*xlat_resolve_t)(xlat_exp_t *xlat, void *inst, xlat_res_rules_t con
  */
 typedef int (*xlat_purify_t)(xlat_exp_t *xlat, void *inst, request_t *request);
 
+int8_t		xlat_func_cmp(void const *one, void const *two);
+
 xlat_t		*xlat_func_find_module(module_inst_ctx_t const *mctx, char const *name);
 
-xlat_t		*xlat_func_register_module(TALLOC_CTX *ctx, module_inst_ctx_t const *mctx,
-					   char const *name, xlat_func_t func, fr_type_t return_type);
 xlat_t		*xlat_func_register(TALLOC_CTX *ctx, char const *name, xlat_func_t func, fr_type_t return_type) CC_HINT(nonnull(2));
 
-int		xlat_func_args_set(xlat_t *xlat, xlat_arg_parser_t const args[]) CC_HINT(nonnull);
+void		xlat_mctx_set(xlat_t *x, module_inst_ctx_t const *mctx);
 
-int		xlat_func_mono_set(xlat_t *xlat, xlat_arg_parser_t const *arg) CC_HINT(nonnull);
+int		xlat_func_args_set(xlat_t *xlat, xlat_arg_parser_t const args[]) CC_HINT(nonnull);
 
 void		xlat_func_call_env_set(xlat_t *x, call_env_method_t const *env) CC_HINT(nonnull);
 
@@ -73,6 +73,8 @@ void		xlat_func_resolve_set(xlat_t *xlat, xlat_resolve_t func);
 void		xlat_purify_func_set(xlat_t *xlat, xlat_purify_t func);
 
 /** Set the escaped values for output boxes
+ *
+ * Any boxes output by the xlat function will have their values marked as safe for something.
  *
  * @param[in] _xlat		function to set the escaped value for (as returned by xlat_register).
  * @param[in] _escaped		escaped value to write to output boxes.
@@ -112,7 +114,7 @@ void _xlat_func_thread_instantiate_set(xlat_t const *xlat,
 				       void *uctx);
 
 void		xlat_func_unregister(char const *name);
-void		xlat_func_unregister_module(dl_module_inst_t const *inst);
+void		xlat_func_unregister_module(module_instance_t const *inst);
 /** @hidecallgraph */
 
 int		xlat_func_init(void);

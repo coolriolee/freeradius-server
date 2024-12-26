@@ -162,6 +162,10 @@ typedef uintptr_t fr_value_box_safe_for_t;
  * fr_type_t should be an enumeration of the values in this union.
  *
  * Don't change the order of the fields below without checking that the output of radsize doesn't change.
+ *
+ * The first few fields (before safe_for) are reused in the #fr_pair_t.  This allows structural
+ * data types to have vp->vp_type, and to also use / set the various flags defined below.  Do NOT
+ * change the order of the fields!
  */
 struct value_box_s {
 	/** Type and flags should appear together for packing efficiency
@@ -172,6 +176,9 @@ struct value_box_s {
 	unsigned int   				secret : 1;		//!< Same as #fr_dict_attr_flags_t secret
 	unsigned int				immutable : 1;		//!< once set, the value cannot be changed
 	unsigned int				talloced : 1;		//!< Talloced, not stack or text allocated.
+
+	unsigned int				edit : 1;		//!< to control foreach / edits
+
 	fr_value_box_safe_for_t	_CONST		safe_for;		//!< A unique value to indicate if that value box is safe
 									///< for consumption by a particular module for a particular
 									///< purpose.  e.g. LDAP, SQL, etc.
@@ -459,6 +466,12 @@ extern fr_sbuff_parse_rules_t const value_parse_rules_solidus_quoted;
 extern fr_sbuff_parse_rules_t const value_parse_rules_backtick_quoted;
 extern fr_sbuff_parse_rules_t const *value_parse_rules_quoted[T_TOKEN_LAST];
 extern fr_sbuff_parse_rules_t const *value_parse_rules_quoted_char[UINT8_MAX];
+
+extern fr_sbuff_parse_rules_t const value_parse_rules_double_3quoted;
+extern fr_sbuff_parse_rules_t const value_parse_rules_single_3quoted;
+extern fr_sbuff_parse_rules_t const value_parse_rules_solidus_3quoted;
+extern fr_sbuff_parse_rules_t const value_parse_rules_backtick_3quoted;
+extern fr_sbuff_parse_rules_t const *value_parse_rules_3quoted[T_TOKEN_LAST];
 /** @} */
 
 /** @name Allocation and initialisation functions
@@ -1069,13 +1082,6 @@ void fr_value_box_set_secret(fr_value_box_t *box, bool secret)
 	box->secret = secret;
 }
 
-static inline CC_HINT(nonnull, always_inline)
-void fr_value_box_set_immutable(fr_value_box_t *box)
-{
-	box->immutable = true;
-}
-
-
 /** @name Assign and manipulate binary-unsafe C strings
  *
  * @{
@@ -1205,7 +1211,7 @@ ssize_t		fr_value_box_from_str(TALLOC_CTX *ctx, fr_value_box_t *dst,
  */
 ssize_t 	fr_value_box_list_concat_as_string(bool *tainted, bool *secret, fr_sbuff_t *sbuff, fr_value_box_list_t *list,
 					   	  char const *sep, size_t sep_len, fr_sbuff_escape_rules_t const *e_rules,
-					   	  fr_value_box_list_action_t proc_action, bool flatten)
+					   	  fr_value_box_list_action_t proc_action, fr_value_box_safe_for_t safe_for, bool flatten)
 		CC_HINT(nonnull(3,4));
 
 ssize_t		fr_value_box_list_concat_as_octets(bool *tainted, bool *secret, fr_dbuff_t *dbuff, fr_value_box_list_t *list,

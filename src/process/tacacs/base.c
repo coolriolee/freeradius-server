@@ -158,16 +158,6 @@ typedef struct {
 } process_tacacs_sections_t;
 
 typedef struct {
-	bool		log_stripped_names;
-	bool		log_auth;		//!< Log authentication attempts.
-	bool		log_auth_badpass;	//!< Log failed authentications.
-	bool		log_auth_goodpass;	//!< Log successful authentications.
-	char const	*auth_badpass_msg;	//!< Additional text to append to failed auth messages.
-	char const	*auth_goodpass_msg;	//!< Additional text to append to successful auth messages.
-
-	char const	*denied_msg;		//!< Additional text to append if the user is already logged
-						//!< in (simultaneous use check failed).
-
 	fr_time_delta_t	session_timeout;	//!< Maximum time between the last response and next request.
 	uint32_t	max_session;		//!< Maximum ongoing session allowed.
 
@@ -215,21 +205,7 @@ static const conf_parser_t session_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
-static const conf_parser_t log_config[] = {
-	{ FR_CONF_OFFSET("stripped_names", process_tacacs_auth_t, log_stripped_names), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth", process_tacacs_auth_t, log_auth), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth_badpass", process_tacacs_auth_t, log_auth_badpass), .dflt = "no" },
-	{ FR_CONF_OFFSET("auth_goodpass", process_tacacs_auth_t,  log_auth_goodpass), .dflt = "no" },
-	{ FR_CONF_OFFSET("msg_badpass", process_tacacs_auth_t, auth_badpass_msg) },
-	{ FR_CONF_OFFSET("msg_goodpass", process_tacacs_auth_t, auth_goodpass_msg) },
-	{ FR_CONF_OFFSET("msg_denied", process_tacacs_auth_t, denied_msg), .dflt = "You are already logged in - access denied" },
-
-	CONF_PARSER_TERMINATOR
-};
-
 static const conf_parser_t auth_config[] = {
-	{ FR_CONF_POINTER("log", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) log_config },
-
 	{ FR_CONF_POINTER("session", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) session_config },
 
 	CONF_PARSER_TERMINATOR
@@ -242,118 +218,6 @@ static const conf_parser_t config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
-
-#define RAUTH(fmt, ...)		log_request(L_AUTH, L_DBG_LVL_OFF, request, __FILE__, __LINE__, fmt, ## __VA_ARGS__)
-
-/*
- *	Return a short string showing the terminal server, port
- *	and calling station ID.
- */
-static char *auth_name(char *buf, size_t buflen, request_t *request)
-{
-	char const	*tls = "";
-	fr_client_t	*client = client_from_request(request);
-
-	if (request->packet->socket.inet.dst_port == 0) tls = " via proxy to virtual server";
-
-	snprintf(buf, buflen, "from client %.128s%s",
-		 client ? client->shortname : "", tls);
-
-	return buf;
-}
-
-
-/*
- *	Make sure user/pass are clean and then create an attribute
- *	which contains the log message.
- */
-static void CC_HINT(format (printf, 4, 5)) auth_message(process_tacacs_auth_t const *inst,
-							request_t *request, bool goodpass, char const *fmt, ...)
-{
-	va_list		 ap;
-
-	bool		logit;
-	char const	*extra_msg = NULL;
-
-	char		password_buff[256];
-	char const	*password_str = NULL;
-
-	char		buf[1024];
-	char		extra[1024];
-	char		*p;
-	char		*msg;
-	fr_pair_t	*username = NULL;
-	fr_pair_t	*password = NULL;
-
-	/*
-	 *	No logs?  Then no logs.
-	 */
-	if (!inst->log_auth) return;
-
-	/*
-	 *	Get the correct username based on the configured value
-	 */
-	if (!inst->log_stripped_names) {
-		username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_name);
-	} else {
-		username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_stripped_user_name);
-		if (!username) username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_name);
-	}
-
-	/*
-	 *	Clean up the password
-	 */
-	if (inst->log_auth_badpass || inst->log_auth_goodpass) {
-		password = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_password);
-		if (!password) {
-			fr_pair_t *auth_type;
-
-			auth_type = fr_pair_find_by_da(&request->control_pairs, NULL, attr_auth_type);
-			if (auth_type) {
-				snprintf(password_buff, sizeof(password_buff), "<via Auth-Type = %s>",
-					 fr_dict_enum_name_by_value(auth_type->da, &auth_type->data));
-				password_str = password_buff;
-			} else {
-				password_str = "<no User-Password attribute>";
-			}
-		} else if (fr_pair_find_by_da(&request->request_pairs, NULL, attr_chap_password)) {
-			password_str = "<CHAP-Password>";
-		}
-	}
-
-	if (goodpass) {
-		logit = inst->log_auth_goodpass;
-		extra_msg = inst->auth_goodpass_msg;
-	} else {
-		logit = inst->log_auth_badpass;
-		extra_msg = inst->auth_badpass_msg;
-	}
-
-	if (extra_msg) {
-		extra[0] = ' ';
-		p = extra + 1;
-		if (xlat_eval(p, sizeof(extra) - 1, request, extra_msg, NULL, NULL) < 0) return;
-	} else {
-		*extra = '\0';
-	}
-
-	/*
-	 *	Expand the input message
-	 */
-	va_start(ap, fmt);
-	msg = fr_vasprintf(request, fmt, ap);
-	va_end(ap);
-
-	RAUTH("%s: [%pV%s%pV] (%s)%s",
-	      msg,
-	      username ? &username->data : fr_box_strvalue("<no User-Name attribute>"),
-	      logit ? "/" : "",
-	      logit ? (password_str ? fr_box_strvalue(password_str) : &password->data) : fr_box_strvalue(""),
-	      auth_name(buf, sizeof(buf), request),
-	      extra);
-
-	talloc_free(msg);
-}
 
 /*
  *	Synthesize a State attribute from connection && session information.
@@ -516,7 +380,7 @@ RESUME(auth_start)
 	CONF_SECTION			*cs;
 	fr_dict_enum_value_t const	*dv;
 	fr_process_state_t const	*state;
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	PROCESS_TRACE;
 
@@ -765,17 +629,9 @@ RESUME(auth_type)
 
 RESUME(auth_pass)
 {
-	fr_pair_t			*vp;
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	PROCESS_TRACE;
-
-	vp = fr_pair_find_by_da(&request->request_pairs, NULL, attr_module_success_message);
-	if (vp) {
-		auth_message(&inst->auth, request, true, "Login OK (%pV)", &vp->data);
-	} else {
-		auth_message(&inst->auth, request, true, "Login OK");
-	}
 
 	// @todo - worry about user identity existing?
 
@@ -785,17 +641,9 @@ RESUME(auth_pass)
 
 RESUME(auth_fail)
 {
-	fr_pair_t			*vp;
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	PROCESS_TRACE;
-
-	vp = fr_pair_find_by_da(&request->request_pairs, NULL, attr_module_failure_message);
-	if (vp) {
-		auth_message(&inst->auth, request, false, "Login incorrect (%pV)", &vp->data);
-	} else {
-		auth_message(&inst->auth, request, false, "Login incorrect");
-	}
 
 	// @todo - insert server message saying "failed"
 	// and also for FAIL
@@ -806,7 +654,7 @@ RESUME(auth_fail)
 
 RESUME(auth_restart)
 {
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	PROCESS_TRACE;
 
@@ -816,7 +664,7 @@ RESUME(auth_restart)
 
 RESUME(auth_get)
 {
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 	process_tacacs_session_t	*session;
 	fr_pair_t			*vp, *copy;
 
@@ -905,7 +753,7 @@ send_reply:
 
 RECV(auth_cont)
 {
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 	process_tacacs_session_t	*session;
 
 	if ((state_create(request->request_ctx, &request->request_pairs, request, false) < 0) ||
@@ -973,7 +821,7 @@ RECV(auth_cont)
  */
 RECV(auth_cont_abort)
 {
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	if ((state_create(request->request_ctx, &request->request_pairs, request, false) < 0) ||
 	    (fr_state_to_request(inst->auth.state_tree, request) < 0)) {
@@ -1110,7 +958,7 @@ RESUME(accounting_request)
 	CONF_SECTION			*cs;
 	fr_dict_enum_value_t const		*dv;
 	fr_process_state_t const	*state;
-	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 
 	PROCESS_TRACE;
 
@@ -1182,7 +1030,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_tacacs_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_tacacs_t);
 	fr_assert(FR_TACACS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "tacacs";
@@ -1202,10 +1050,17 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 	return state->recv(p_result, mctx, request);
 }
 
-
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	process_tacacs_t	*inst = talloc_get_type_abort(mctx->inst->data, process_tacacs_t);
+	process_tacacs_t	*inst = talloc_get_type_abort(mctx->mi->data, process_tacacs_t);
+
+	inst->server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
+
+	FR_INTEGER_BOUND_CHECK("session.max_rounds", inst->auth.max_rounds, >=, 1);
+	FR_INTEGER_BOUND_CHECK("session.max_rounds", inst->auth.max_rounds, <=, 8);
+
+	FR_INTEGER_BOUND_CHECK("session.max", inst->auth.max_session, >=, 64);
+	FR_INTEGER_BOUND_CHECK("session.max", inst->auth.max_session, <=, (1 << 18));
 
 	inst->auth.state_tree = fr_state_tree_init(inst, attr_tacacs_state, main_config->spawn_workers, inst->auth.max_session,
 						   inst->auth.session_timeout, inst->auth.state_server_id,
@@ -1215,16 +1070,9 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	process_tacacs_t	*inst = talloc_get_type_abort(mctx->inst->data, process_tacacs_t);
+	CONF_SECTION	*server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
-	inst->server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
-	if (virtual_server_section_attribute_define(inst->server_cs, "authenticate", attr_auth_type) < 0) return -1;
-
-	FR_INTEGER_BOUND_CHECK("session.max_rounds", inst->auth.max_rounds, >=, 1);
-	FR_INTEGER_BOUND_CHECK("session.max_rounds", inst->auth.max_rounds, <=, 8);
-
-	FR_INTEGER_BOUND_CHECK("session.max", inst->auth.max_session, >=, 64);
-	FR_INTEGER_BOUND_CHECK("session.max", inst->auth.max_session, <=, (1 << 18));
+	if (virtual_server_section_attribute_define(server_cs, "authenticate", attr_auth_type) < 0) return -1;
 
 	return 0;
 }
@@ -1474,136 +1322,115 @@ static virtual_server_compile_t compile_list[] = {
 	 *	protocol.  Pretty much everything they did was wrong.
 	 */
 	{
-		.name = "recv",
-		.name2 = "Authentication-Start",
-		.component = MOD_AUTHENTICATE,
+		.section = SECTION_NAME("recv", "Authentication-Start"),
+		.actions = &mod_actions_authenticate,
 		.offset = PROCESS_CONF_OFFSET(auth_start),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-Pass",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-Pass"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_pass),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-Fail",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-Fail"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_fail),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-GetData",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-GetData"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_getdata),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-GetUser",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-GetUser"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_getuser),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-GetPass",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-GetPass"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_getpass),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-Restart",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-Restart"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_restart),
 	},
 	{
-		.name = "send",
-		.name2 = "Authentication-Error",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authentication-Error"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(auth_error),
 	},
 	{
-		.name = "recv",
-		.name2 = "Authentication-Continue",
-		.component = MOD_AUTHENTICATE,
+		.section = SECTION_NAME("recv", "Authentication-Continue"),
+		.actions = &mod_actions_authenticate,
 		.offset = PROCESS_CONF_OFFSET(auth_cont),
 	},
 	{
-		.name = "recv",
-		.name2 = "Authentication-Continue-Abort",
-		.component = MOD_AUTHENTICATE,
+		.section = SECTION_NAME("recv", "Authentication-Continue-Abort"),
+		.actions = &mod_actions_authenticate,
 		.offset = PROCESS_CONF_OFFSET(auth_cont_abort),
 	},
 
 	{
-		.name = "authenticate",
-		.name2 = CF_IDENT_ANY,
-		.component = MOD_AUTHENTICATE,
+		.section = SECTION_NAME("authenticate", CF_IDENT_ANY),
+		.actions = &mod_actions_authenticate,
 	},
 
 	/* authorization */
 
 	{
-		.name = "recv",
-		.name2 = "Authorization-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Authorization-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(autz_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Authorization-Pass-Add",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authorization-Pass-Add"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(autz_pass_add),
 	},
 	{
-		.name = "send",
-		.name2 = "Authorization-Pass-Replace",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authorization-Pass-Replace"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(autz_pass_replace),
 	},
 	{
-		.name = "send",
-		.name2 = "Authorization-Fail",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authorization-Fail"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(autz_fail),
 	},
 	{
-		.name = "send",
-		.name2 = "Authorization-Error",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Authorization-Error"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(autz_error),
 	},
 
 	/* accounting */
 
 	{
-		.name = "recv",
-		.name2 = "Accounting-Request",
-		.component = MOD_ACCOUNTING,
+		.section = SECTION_NAME("recv", "Accounting-Request"),
+		.actions = &mod_actions_accounting,
 		.offset = PROCESS_CONF_OFFSET(acct_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Accounting-Success",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Accounting-Success"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(acct_success),
 	},
 	{
-		.name = "send",
-		.name2 = "Accounting-Error",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Accounting-Error"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(acct_error),
 	},
 
 	{
-		.name = "accounting",
-		.name2 = CF_IDENT_ANY,
-		.component = MOD_ACCOUNTING,
+		.section = SECTION_NAME("accounting", CF_IDENT_ANY),
+		.actions = &mod_actions_accounting,
 	},
 
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond),
 	},
 

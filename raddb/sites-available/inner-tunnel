@@ -76,14 +76,14 @@ recv Access-Request {
 	filter_inner_identity
 
 	#
-	#  The chap module will set 'Auth-Type := CHAP' if we are
+	#  The chap module will set 'Auth-Type := ::CHAP' if we are
 	#  handling a CHAP request and Auth-Type has not already been set
 	chap
 
 	#
 	#  If the users are logging in with an MS-CHAP-Challenge
 	#  attribute for authentication, the mschap module will find
-	#  the MS-CHAP-Challenge attribute, and add 'Auth-Type := MS-CHAP'
+	#  the MS-CHAP-Challenge attribute, and add 'Auth-Type := ::MS-CHAP'
 	#  to the request, which will cause the server to then use
 	#  the mschap module for authentication.
 	mschap
@@ -159,8 +159,8 @@ recv Access-Request {
 #
 #  This section lists which modules are available for authentication.
 #  Note that it does NOT mean 'try each module in order'.  It means
-#  that a module from the 'authorize' section adds a configuration
-#  attribute 'Auth-Type := FOO'.  That authentication type is then
+#  that a module from the 'recv Access-Request' section adds a configuration
+#  attribute 'Auth-Type := ::FOO'.  That authentication type is then
 #  used to pick the appropriate module from the list below.
 #
 
@@ -177,7 +177,7 @@ recv Access-Request {
 
 #
 #  PAP authentication, when a back-end database listed
-#  in the 'authorize' section supplies a password.  The
+#  in the 'recv Access-Request' section supplies a password.  The
 #  password can be clear-text, or encrypted.
 authenticate pap {
 	pap
@@ -185,7 +185,7 @@ authenticate pap {
 
 #
 #  Most people want CHAP authentication
-#  A back-end database listed in the 'authorize' section
+#  A back-end database listed in the 'recv Access-Request' section
 #  MUST supply a CLEAR TEXT password.  Encrypted passwords
 #  won't work.
 authenticate chap {
@@ -287,6 +287,13 @@ send Access-Accept {
 	#  the reply.
 	#
 #	use_tunneled_reply
+
+	#
+	#  Call an instance of `linelog` to log the authentication success
+	#  - equivalent to the previous log `auth = yes` option in v3.
+	#  See `mods-enabled/linelog` for message formats and destinations.
+	#
+#	log_auth_result
 }
 
 #
@@ -299,6 +306,14 @@ send Access-Accept {
 send Access-Reject {
 	#  log failed authentications in SQL, too.
 	-sql
+
+	#
+	#  Call an instance of `linelog` to log the authentication failure
+	#  - equivalent to the previous log `auth = yes` option in v3.
+	#  See `mods-enabled/linelog` for message formats and destinations.
+	#
+#	log_auth_result
+
 	attr_filter.access_reject
 
 	#

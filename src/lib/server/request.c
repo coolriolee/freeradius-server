@@ -24,8 +24,12 @@
  */
 RCSID("$Id$")
 
-#include <freeradius-devel/server/base.h>
+#include <freeradius-devel/server/request.h>
+#include <freeradius-devel/server/request_data.h>
+#include <freeradius-devel/unlang/interpret.h>
+
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/util/atexit.h>
 
 static request_init_args_t	default_args;
 
@@ -103,7 +107,7 @@ void request_log_prepend(request_t *request, fr_log_t *log_dst, fr_log_lvl_t lvl
 			talloc_free(request->log.dst);
 			request->log.dst = dst;
 		}
-
+		request->log.lvl = L_DBG_LVL_OFF;
 		return;
 	}
 
@@ -116,9 +120,10 @@ void request_log_prepend(request_t *request, fr_log_t *log_dst, fr_log_lvl_t lvl
 		last = &request->log.dst;
 		while (*last) {
 			dst = *last;
-			if (dst->uctx == log_dst) {
+			if (((fr_log_t *)dst->uctx)->parent == log_dst) {
 				*last = dst->next;
-				free(dst);
+				talloc_free(dst);
+				if (!request->log.dst) request->log.lvl = L_DBG_LVL_OFF;
 				return;
 			}
 
@@ -132,8 +137,9 @@ void request_log_prepend(request_t *request, fr_log_t *log_dst, fr_log_lvl_t lvl
 	 *	Change the debug level of an existing destination.
 	 */
 	for (dst = request->log.dst; dst != NULL; dst = dst->next) {
-		if (dst->uctx == log_dst) {
+		if (((fr_log_t *)dst->uctx)->parent == log_dst) {
 			dst->lvl = lvl;
+			if (lvl > request->log.lvl) request->log.lvl = lvl;
 			return;
 		}
 	}
@@ -146,7 +152,8 @@ void request_log_prepend(request_t *request, fr_log_t *log_dst, fr_log_lvl_t lvl
 	dst->func = vlog_request;
 	dst->uctx = log_dst;
 
-	dst->lvl = request->log.lvl;
+	dst->lvl = lvl;
+	if (lvl > request->log.lvl) request->log.lvl = lvl;
 	dst->next = request->log.dst;
 
 	request->log.dst = dst;
@@ -158,8 +165,8 @@ static inline void CC_HINT(always_inline) request_log_init_child(request_t *chil
 	 *	Copy debug information.
 	 */
 	memcpy(&(child->log), &(parent->log), sizeof(child->log));
-	child->log.unlang_indent = 0;	/* Apart from the indent which we reset */
-	child->log.module_indent = 0;	/* Apart from the indent which we reset */
+	child->log.indent.unlang = 0;	/* Apart from the indent which we reset */
+	child->log.indent.module = 0;	/* Apart from the indent which we reset */
 	child->log.lvl = parent->log.lvl;
 }
 
@@ -209,13 +216,13 @@ static inline CC_HINT(always_inline) int request_child_init(request_t *child, re
 	 *
 	 *	FIXME: Permit different servers for inner && outer sessions?
 	 */
-	child->packet = fr_radius_packet_alloc(child, true);
+	child->packet = fr_packet_alloc(child, true);
 	if (!child->packet) {
 		talloc_free(child);
 		return -1;
 	}
 
-	child->reply = fr_radius_packet_alloc(child, false);
+	child->reply = fr_packet_alloc(child, false);
 	if (!child->reply) {
 		talloc_free(child);
 		return -1;
@@ -472,7 +479,7 @@ static inline CC_HINT(always_inline) request_t *request_alloc_pool(TALLOC_CTX *c
 					   10,					/* extra */
 					   (UNLANG_FRAME_PRE_ALLOC * UNLANG_STACK_MAX) +	/* Stack memory */
 					   (sizeof(fr_pair_t) * 5) +		/* pair lists and root*/
-					   (sizeof(fr_radius_packet_t) * 2) +	/* packets */
+					   (sizeof(fr_packet_t) * 2) +	/* packets */
 					   128					/* extra */
 					   ));
 	fr_assert(ctx != request);
@@ -692,7 +699,13 @@ int request_detach(request_t *child)
 	return 0;
 }
 
-int request_global_init(void)
+static int _request_global_free(UNUSED void *uctx)
+{
+	fr_dict_autofree(request_dict);
+	return 0;
+}
+
+static int _request_global_init(UNUSED void *uctx)
 {
 	if (fr_dict_autoload(request_dict) < 0) {
 		PERROR("%s", __FUNCTION__);
@@ -703,13 +716,14 @@ int request_global_init(void)
 		fr_dict_autofree(request_dict);
 		return -1;
 	}
-
 	return 0;
 }
 
-void request_global_free(void)
+int request_global_init(void)
 {
-	fr_dict_autofree(request_dict);
+	int ret;
+	fr_atexit_global_once_ret(&ret, _request_global_init, _request_global_free, NULL);
+	return ret;
 }
 
 #ifdef WITH_VERIFY_PTR
@@ -717,11 +731,11 @@ void request_global_free(void)
  *	Verify a packet.
  */
 static void packet_verify(char const *file, int line,
-			  request_t const *request, fr_radius_packet_t const *packet, fr_pair_list_t *list, char const *type)
+			  request_t const *request, fr_packet_t const *packet, fr_pair_list_t *list, char const *type)
 {
 	TALLOC_CTX *parent;
 
-	fr_fatal_assert_msg(packet, "CONSISTENCY CHECK FAILED %s[%i]: fr_radius_packet_t %s pointer was NULL",
+	fr_fatal_assert_msg(packet, "CONSISTENCY CHECK FAILED %s[%i]: fr_packet_t %s pointer was NULL",
 			    file, line, type);
 
 	parent = talloc_parent(packet);
@@ -730,7 +744,7 @@ static void packet_verify(char const *file, int line,
 		if (parent) fr_log_talloc_report(parent);
 
 
-		fr_fatal_assert_fail("CONSISTENCY CHECK FAILED %s[%i]: Expected fr_radius_packet_t %s to be parented "
+		fr_fatal_assert_fail("CONSISTENCY CHECK FAILED %s[%i]: Expected fr_packet_t %s to be parented "
 				     "by %p (%s), but parented by %p (%s)",
 				     file, line, type, request, talloc_get_name(request),
 				     parent, parent ? talloc_get_name(parent) : "NULL");

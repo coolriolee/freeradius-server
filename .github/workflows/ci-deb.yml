@@ -35,9 +35,8 @@ jobs:
           M=$(cat <<EOF
           {
             "env": [
-              { "NAME": "ubuntu-20.04", "OS": "ubuntu:20.04"    },
               { "NAME": "ubuntu-22.04", "OS": "ubuntu:22.04"    },
-              { "NAME": "debian-11",    "OS": "debian:bullseye" },
+              { "NAME": "ubuntu-24.04", "OS": "ubuntu:24.04"    },
               { "NAME": "debian-12",    "OS": "debian:bookworm" },
               { "NAME": "debian-sid",   "OS": "debian:sid"      }
             ]
@@ -48,7 +47,7 @@ jobs:
           M=$(cat <<EOF
           {
             "env": [
-              { "NAME": "debian-11",    "OS": "debian:bullseye" }
+              { "NAME": "debian-12",    "OS": "debian:bookworm" }
             ]
           }
         EOF
@@ -73,7 +72,7 @@ jobs:
 
     env:
       HOSTAPD_BUILD_DIR: /tmp/eapol_test.ci
-      HOSTAPD_GIT_TAG: hostap_2_10
+      HOSTAPD_GIT_TAG: hostap_2_11
 
     name: "DEB build"
 
@@ -103,7 +102,7 @@ jobs:
         apt-get install -y --no-install-recommends make gcc libc6-dev equivs file curl gnupg2 lsb-release
 
     - name: NetworkRADIUS signing key
-      run: curl -sS https://packages.networkradius.com/pgp/packages%40networkradius.com | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=yes apt-key add -
+      run: curl -sS https://packages.inkbridgenetworks.com/pgp/packages%40networkradius.com | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=yes apt-key add -
 
     - name: Set up NetworkRADIUS extras repository
       run: |
@@ -225,7 +224,7 @@ jobs:
         apt-get install -y --no-install-recommends procps curl gnupg2 ca-certificates lsb-release
 
     - name: NetworkRADIUS signing key
-      run: curl -sS https://packages.networkradius.com/pgp/packages%40networkradius.com | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=yes apt-key add -
+      run: curl -sS https://packages.inkbridgenetworks.com/pgp/packages%40networkradius.com | APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=yes apt-key add -
 
     - name: Set up NetworkRADIUS extras repository
       run: |

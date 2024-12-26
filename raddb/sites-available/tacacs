@@ -27,14 +27,14 @@ server tacacs {
 	#
 	#  ### TACACS+ Configuration
 	#
-	#  All of the configuration for processing TACAC+ packets goes here.
+	#  All of the configuration for processing TACACS+ packets goes here.
 	#
 	tacacs {
 		#
-		#  #### Access-Request subsection
+		#  #### Authentication subsection
 		#
 		#  This section contains configuration which is
-		#  specific to processing `Access-Request` packets.
+		#  specific to processing `Authentication` packets.
 		#
 		#  Similar sections can be added, but are not
 		#  necessary for Accounting-Request (and other)
@@ -42,69 +42,6 @@ server tacacs {
 		#  needed for other packet types.
 		#
 		Authentication {
-			#
-			#  log:: Logging configuration for TACACS+ authentication
-			#
-			log {
-				#
-				#  stripped_names:: Log the full
-				#  `User-Name` attribute, as it was
-				#  found in the request.
-				#
-				#  allowed values: {no, yes}
-				#
-				stripped_names = no
-
-				#
-				#  auth:: Log authentication requests
-				#  to the log file.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth = no
-
-				#
-				#  auth_goodpass:: Log "good"
-				#  passwords with the authentication
-				#  requests.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth_goodpass = no
-
-				#
-				#  auth_badpass:: Log "bad"
-				#  passwords with the authentication
-				#  requests.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth_badpass = no
-
-				#
-				#  msg_goodpass::
-				#  msg_badpass::
-				#
-				#  Log additional text at the end of the "Login OK" messages.
-				#  for these to work, the "auth" and "auth_goodpass" or "auth_badpass"
-				#  configurations above have to be set to "yes".
-				#
-				#  The strings below are dynamically expanded, which means that
-				#  you can put anything you want in them.  However, note that
-				#  this expansion can be slow, and can negatively impact server
-				#  performance.
-				#
-#				msg_goodpass = ""
-#				msg_badpass = ""
-
-				#
-				#  msg_denied::
-				#
-				#  The message when the user exceeds the Simultaneous-Use limit.
-				#
-				msg_denied = "You are already logged in - access denied"
-			}
-
 			#
 			#  session:: Controls how ongoing
 			#  (multi-round) sessions are handled
@@ -291,17 +228,18 @@ server tacacs {
 	#
 	#  ### Recv
 	#
+	#
+	#  In general, it is not necessary to set `Auth-Type` in this section.  The packet header
+	#  contains a TACACS `Authentication-Type` with value `PAP`, `CHAP`, etc.  That value will
+	#  be used automatically by the server to set `Auth-Type`.
+	#
+	#  The only reason to set `Auth-Type` here is when you want to use a custom
+	#  authentication method, such as `ldap`.  You should ONLY set `Auth-Type := ldap` when
+	#  the packet contains `Authentication-Type = PAP` _and_ the passwords in LDAP are stored
+	#  in "crypt" or hashed form.
+	#
 	recv Authentication-Start {
 		-sql
-
-		#
-		#  In general, it is not necessary to set `Auth-Type` here.  The packet header
-		#  contains a TACACS `Authentication-Type` with value `PAP`, `CHAP`, etc.  That value will
-		#  be used automatically.
-		#
-		#  The only reason to set `Auth-Type` here is when you want to use a custom
-		#  authentication method, such as `ldap`.
-		#
 	}
 
 	authenticate PAP {
@@ -321,6 +259,17 @@ server tacacs {
 	}
 
 	#
+	#  LDAP authentication will only work with PAP authentication
+	#
+#	authenticate ldap {
+#		if (Authentication-Type != PAP) {
+#			%log.warn("The packet is not PAP.  LDAP authentication is likely to fail!")
+#		}
+#
+#		ldap
+#	}
+
+	#
 	#  The automatic state machine will ensure that both User-Name
 	#  and User-Password have been provided by this point making
 	#  ASCII authentication equivalent to PAP.
@@ -337,12 +286,28 @@ server tacacs {
 	#
 	#  ### Send
 	#
+	#  Note that "follow" is officially deprecated, and is not supported.
+	#
 	send Authentication-Pass {
 		&reply.Server-Message := "Hello %{User-Name}"
+
+		#
+		#  Call an instance of `linelog` to log the authentication success
+		#  - equivalent to the previous log `auth = yes` option in v3.
+		#  See `mods-enabled/linelog` for message formats and destinations.
+		#
+#		log_auth_authentication_pass
 	}
 
 	send Authentication-Fail {
 		&reply.Server-Message := "Failed login!"
+
+		#
+		#  Call an instance of `linelog` to log the authentication failure
+		#  - equivalent to the previous log `auth = yes` option in v3.
+		#  See `mods-enabled/linelog` for message formats and destinations.
+		#
+#		log_auth_authentication_fail
 	}
 
 	#
@@ -360,11 +325,28 @@ server tacacs {
 	#
 	#  ## Authentication-Continue
 	#
-	#  This should handle ASCII methods as PAP with challenge-response.
+	#  This section handles responses to challenges for `Authentication-Type = ASCII`
+	#
+	#  i.e. The server receives an `Authentication-Start` packet
+	#  with `Authentication-Type = ASCII`, and replies with a
+	#  challenge.  The client returns the username or password in
+	#  an `Authentication-Continue` packet.  The server should
+	#  then check the username or password.
+	#
+	#  The TACACS+ protocol puts the response username or password
+	#  into the "data" field.  For simplicity, the server copies
+	#  that field into the User-Name or User-Password attribute as
+	#  appropriate.  This automatic copyinh means that it is a lot
+	#  easier to understand and configure TACACS+.
 	#
 
 	#
 	#  ### Recv
+	#
+	#  Receive `Authentication-Continue` packet.  When this
+	#  section is done and has a User-Password, the server will
+	#  run an `authenticate ... { }` section.  It will then call
+	#  one of the `send` sections to send the reply.
 	#
 	recv Authentication-Continue {
 		#
@@ -396,11 +378,30 @@ server tacacs {
 	#
 	#	### Send
 	#
+	#	Add the arguments to whatever the user entered.
+	#
 	send Authorization-Pass-Add {
 		&reply.Authorization-Status := Pass-Add
 		&reply.Server-Message := "authorization-response-server"
 		&reply.Data := "authorization-response-data"
 		&reply.Argument-List := "key1=var1"
+	}
+
+	#
+	#	Replace whatever the user entered with the following arguments
+	#
+	send Authorization-Pass-Reply {
+		&reply.Authorization-Status := Pass-Repl
+		&reply.Server-Message := "authorization-response-server"
+		&reply.Data := "authorization-response-data"
+		&reply.Argument-List := "key1=var1"
+	}
+
+	#
+	#	Reject the request
+	#
+	send Authorization-Fail {
+		&reply.Authorization-Status := Fail
 	}
 
 	#

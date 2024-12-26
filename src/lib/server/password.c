@@ -25,6 +25,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/password.h>
 
+#include <freeradius-devel/util/atexit.h>
 #include <freeradius-devel/util/base64.h>
 #include <freeradius-devel/util/base16.h>
 #include <freeradius-devel/util/md4.h>
@@ -217,12 +218,10 @@ static fr_table_num_sorted_t const password_header_table[] = {
 #ifdef HAVE_OPENSSL_EVP_H
 	{ L("{ssha224}"),			FR_SSHA2_224	},
 	{ L("{ssha256}"),			FR_SSHA2_256	},
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	{ L("{ssha3-224}"),			FR_SSHA3_224	},
 	{ L("{ssha3-256}"),			FR_SSHA3_256	},
 	{ L("{ssha3-384}"),			FR_SSHA3_384	},
 	{ L("{ssha3-512}"),			FR_SSHA3_512	},
-#  endif
 	{ L("{ssha384}"),			FR_SSHA2_384	},
 	{ L("{ssha512}"),			FR_SSHA2_512	},
 #endif
@@ -236,9 +235,7 @@ static size_t password_header_table_len = NUM_ELEMENTS(password_header_table);
 
 #ifdef HAVE_OPENSSL_EVP_H
 static fr_pair_t *password_process_sha2(TALLOC_CTX *ctx, request_t *request, fr_pair_t *known_good);
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 static fr_pair_t *password_process_sha3(TALLOC_CTX *ctx, request_t *request, fr_pair_t *known_good);
-#  endif
 #endif
 static fr_pair_t *password_process_header(TALLOC_CTX *ctx, request_t *request, fr_pair_t *known_good);
 
@@ -317,7 +314,6 @@ static password_info_t password_info[] = {
 						.da = &attr_sha2_512,
 						.min_hash_len = SHA512_DIGEST_LENGTH,
 					},
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	[FR_SHA3]			= {
 						.type = PASSWORD_HASH_VARIABLE,
 						.da = &attr_sha3,
@@ -344,7 +340,6 @@ static password_info_t password_info[] = {
 						.da = &attr_sha3_512,
 						.min_hash_len = SHA512_DIGEST_LENGTH
 					},
-#  endif
 #endif
 	[FR_SMD5]			= {
 						.type = PASSWORD_HASH,
@@ -377,7 +372,6 @@ static password_info_t password_info[] = {
 						.da = &attr_ssha2_512,
 						.min_hash_len = SHA512_DIGEST_LENGTH
 					},
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	[FR_SSHA3_224]			= {
 						.type = PASSWORD_HASH_SALTED,
 						.da = &attr_ssha3_224,
@@ -398,7 +392,6 @@ static password_info_t password_info[] = {
 						.da = &attr_ssha3_512,
 						.min_hash_len = SHA512_DIGEST_LENGTH
 					}
-#  endif
 #endif
 };
 
@@ -558,7 +551,6 @@ static fr_pair_t *password_process_sha2(TALLOC_CTX *ctx, request_t *request, fr_
 	}
 }
 
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 /** Split SHA3 hashes into separate attributes based on their length
  *
  * @param[in] ctx		to allocate attributes in.
@@ -603,7 +595,6 @@ static fr_pair_t *password_process_sha3(TALLOC_CTX *ctx, request_t *request, fr_
 		return normalised;
 	}
 }
-#  endif
 #endif
 
 /** Convert a Password.With-Header attribute to the correct type
@@ -1025,10 +1016,7 @@ fr_pair_t *password_find(bool *ephemeral, TALLOC_CTX *ctx, request_t *request,
 	return NULL;
 }
 
-/** Load our dictionaries
- *
- */
-int password_init(void)
+static int _password_init(UNUSED void *uctx)
 {
 	if (fr_dict_autoload(password_dict) < 0) {
 		PERROR("%s", __FUNCTION__);
@@ -1043,7 +1031,21 @@ int password_init(void)
 	return 0;
 }
 
-void password_free(void)
+static int _password_free(UNUSED void *uctx)
 {
 	fr_dict_autofree(password_dict);
+
+	return 0;
+}
+
+/** Load our dictionaries
+ *
+ */
+int password_init(void)
+{
+	int ret;
+
+	fr_atexit_global_once_ret(&ret, _password_init, _password_free, NULL);
+
+	return ret;
 }

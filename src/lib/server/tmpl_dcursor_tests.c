@@ -1,7 +1,5 @@
 static void test_init(void);
-static void test_free(void);
 #  define TEST_INIT  test_init()
-#  define TEST_FINI  test_free()
 
 #include <freeradius-devel/util/acutest.h>
 #include <freeradius-devel/util/acutest_helpers.h>
@@ -36,11 +34,6 @@ static void test_init(void)
 	if (request_global_init() < 0) goto error;
 }
 
-static void test_free(void)
-{
-	request_global_free();
-}
-
 static request_t *request_fake_alloc(void)
 {
 	request_t	*request;
@@ -50,10 +43,10 @@ static request_t *request_fake_alloc(void)
 	 */
 	request = request_local_alloc_external(autofree, NULL);
 
-	request->packet = fr_radius_packet_alloc(request, false);
+	request->packet = fr_packet_alloc(request, false);
 	TEST_CHECK(request->packet != NULL);
 
-	request->reply = fr_radius_packet_alloc(request, false);
+	request->reply = fr_packet_alloc(request, false);
 	TEST_CHECK(request->reply != NULL);
 
 	return request;

@@ -23,12 +23,14 @@ LOGDIR="${BUILDDIR}/logs"
 CERTDIR="${BUILDDIR}/certs"
 CERTSRCDIR="${BASEDIR}/raddb/certs"
 PASSWORD="whatever"
+HTTP_PORT=8080
+HTTPS_PORT=8443
 
 # Important files for running openresty
 CONF="${BUILDDIR}/nginx.conf"
 
 # Find the mime.types file
-MIME_TYPES_LOCATIONS="/usr/local/openresty/nginx/conf/mime.types /opt/homebrew/etc/openresty/mime.types /usr/local/etc/nginx/mime.types /etc/nginx/mime.types"
+MIME_TYPES_LOCATIONS="/usr/local/openresty/nginx/conf/mime.types /usr/local/etc/openresty/mime.types /opt/homebrew/etc/openresty/mime.types /usr/local/etc/nginx/mime.types /etc/nginx/mime.types"
 for i in ${MIME_TYPES_LOCATIONS}; do
 	if [ -e "${i}" ]; then
 		MIME_TYPES="${i}"
@@ -79,7 +81,7 @@ http {
     sendfile      on;
 
     server {
-        listen       8080;
+        listen       ${HTTP_PORT};
 	server_name  localhost;
 
 	location / {
@@ -103,7 +105,7 @@ http {
     }
 
     server {
-        listen       8443 ssl;
+        listen       ${HTTPS_PORT} ssl;
 	server_name  localhost;
 
 	ssl_certificate      ${CERTDIR}/server.pem;
@@ -124,6 +126,15 @@ http {
 	    default_type 'application/json';
 	    add_header   'Content-Type' 'application/json';
 	    content_by_lua_file  ${APIDIR}/json-api.lua;
+	}
+
+        location ~ ^/delay/([0-9]*)$ {
+	    default_type 'application/json';
+	    add_header   'Content-Type' 'application/json';
+            content_by_lua_block {
+                ngx.sleep(tonumber(ngx.var[1]))
+		ngx.say('{\"delay_us\":' .. ngx.ctx.openresty_request_time_us .. '}')
+            }
 	}
 
 	location ~ ^/post(.*)$ {
@@ -154,4 +165,9 @@ cp "${CIDIR}/openresty/.htpasswd" "${BUILDDIR}"
 #
 echo "Starting openresty"
 openresty -c ${CONF} -p ${BUILDDIR}
-echo "Running openresty on port 8080 and 8443, accepting all local connections"
+echo "Running openresty on port ${HTTP_PORT} and ${HTTPS_PORT}, accepting all local connections"
+cat << EOF
+export REST_TEST_SERVER=127.0.0.1
+export REST_TEST_SERVER_PORT=${HTTP_PORT}
+export REST_TEST_SERVER_SSL_PORT=${HTTPS_PORT}
+EOF

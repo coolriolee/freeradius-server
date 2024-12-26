@@ -49,6 +49,9 @@ void		cf_file_free(CONF_SECTION *cs);
 bool		cf_file_check(CONF_PAIR *cp, bool check_perms);
 void		cf_file_check_user(uid_t uid, gid_t gid);
 
+void		cf_md5_init(void);
+void		cf_md5_final(uint8_t *digest);
+
 /*
  *	Config file writing
  */
@@ -62,6 +65,8 @@ char const	*cf_expand_variables(char const *filename, int lineno,
 				     CONF_SECTION *outer_cs,
 				     char *output, size_t outsize,
 				     char const *input, ssize_t inlen, bool *soft_fail);
+void		cf_section_set_unlang(CONF_SECTION *cs);
+
 #ifdef __cplusplus
 }
 #endif

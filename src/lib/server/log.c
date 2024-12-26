@@ -27,8 +27,17 @@
  */
 RCSID("$Id$")
 
-#include <freeradius-devel/server/base.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/util/dict.h>
+#include <freeradius-devel/util/log.h>
+#include <freeradius-devel/util/syserror.h>
+#include <freeradius-devel/util/file.h>
+
+#include <freeradius-devel/server/log.h>
+#include <freeradius-devel/server/pair.h>
+#include <freeradius-devel/server/util.h>
+
+#include <freeradius-devel/unlang/xlat.h>
 
 #ifdef HAVE_SYS_STAT_H
 #  include <sys/stat.h>
@@ -175,6 +184,7 @@ fr_table_num_sorted_t const syslog_severity_table[] = {
 size_t syslog_severity_table_len = NUM_ELEMENTS(syslog_severity_table);
 
 fr_table_num_sorted_t const log_destination_table[] = {
+	{ L("file"),		L_DST_FILES	},
 	{ L("files"),		L_DST_FILES	},
 	{ L("null"),		L_DST_NULL	},
 	{ L("stderr"),		L_DST_STDERR	},
@@ -431,13 +441,13 @@ print_fmt:
 	/*
 	 *	Make sure the indent isn't set to something crazy
 	 */
-	unlang_indent = request->log.unlang_indent > sizeof(spaces) - 1 ?
+	unlang_indent = request->log.indent.unlang > sizeof(spaces) - 1 ?
 			sizeof(spaces) - 1 :
-			request->log.unlang_indent;
+			request->log.indent.unlang;
 
-	module_indent = request->log.module_indent > sizeof(spaces) - 1 ?
+	module_indent = request->log.indent.module > sizeof(spaces) - 1 ?
 			sizeof(spaces) - 1 :
-			request->log.module_indent;
+			request->log.indent.module;
 
 	/*
 	 *	Module name and indentation i.e.
@@ -879,8 +889,7 @@ void log_request_marker(fr_log_type_t type, fr_log_lvl_t lvl, request_t *request
 			ssize_t marker_idx, char const *marker_fmt, ...)
 {
 	char const		*ellipses = "";
-	uint8_t			unlang_indent;
-	uint8_t			module_indent;
+	rindent_t		indent;
 	va_list			ap;
 	char			*error;
 	static char const	marker_spaces[] = "                                                            "; /* 60 */
@@ -901,10 +910,9 @@ void log_request_marker(fr_log_type_t type, fr_log_lvl_t lvl, request_t *request
 	/*
 	 *  Don't want format markers being indented
 	 */
-	unlang_indent = request->log.unlang_indent;
-	module_indent = request->log.module_indent;
-	request->log.unlang_indent = 0;
-	request->log.module_indent = 0;
+	indent = request->log.indent;
+	request->log.indent.module = 0;
+	request->log.indent.unlang = 0;
 
 	va_start(ap, marker_fmt);
 	error = fr_vasprintf(request, marker_fmt, ap);
@@ -914,8 +922,7 @@ void log_request_marker(fr_log_type_t type, fr_log_lvl_t lvl, request_t *request
 	log_request(type, lvl, request, file, line, "%s%.*s^ %s", ellipses, (int) marker_idx, marker_spaces, error);
 	talloc_free(error);
 
-	request->log.unlang_indent = unlang_indent;
-	request->log.module_indent = module_indent;
+	request->log.indent = indent;
 }
 
 void log_request_hex(fr_log_type_t type, fr_log_lvl_t lvl, request_t *request,
@@ -1056,6 +1063,8 @@ static void log_register_dst(char const *name, fr_log_t *log, CONF_SECTION *cs)
 
 	if (log->dst != L_DST_FILES) return;
 
+	fr_assert(log->file != NULL);
+
 	fr_rb_insert(filename_tree, dst);
 }
 
@@ -1064,12 +1073,13 @@ static void log_register_dst(char const *name, fr_log_t *log, CONF_SECTION *cs)
  */
 fr_log_t *log_dst_by_name(char const *name)
 {
-	fr_log_track_t find;
+	fr_log_track_t find, *found;
 
 	memset(&find, 0, sizeof(find));
 	find.name = name;
 
-	return fr_rb_find(dst_tree, &find);
+	found = fr_rb_find(dst_tree, &find);
+	return (found) ? found->log : NULL;
 }
 
 static int _log_free(fr_log_t *log)
@@ -1088,7 +1098,7 @@ static bool log_timestamp_is_set;
  *	Parse an fr_log_t configuration.
  */
 static const conf_parser_t log_config[] = {
-	{ FR_CONF_POINTER("destination", FR_TYPE_STRING, 0, &log_destination), .dflt = "files" },
+	{ FR_CONF_POINTER("destination", FR_TYPE_STRING, 0, &log_destination), .dflt = "file" },
 #if 0
 	/*
 	 *	@todo - once we allow this, also check that there's only _one_ destination
@@ -1126,7 +1136,7 @@ int log_parse_section(CONF_SECTION *cs)
 	char const *name;
 
 	name = cf_section_name2(cs);
-	if (!name) name = cf_section_name1(cs);
+	if (!name) name = "DEFAULT";
 
 	dst = fr_rb_find(dst_tree, &(fr_log_track_t) {
 			.name = name,

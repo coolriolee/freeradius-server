@@ -166,9 +166,9 @@ static struct in_addr fr_inaddr_mask(struct in_addr const *ipaddr, uint8_t prefi
  */
 static struct in6_addr fr_in6addr_mask(struct in6_addr const *ipaddr, uint8_t prefix)
 {
-	uint64_t const *p = (uint64_t const *) ipaddr;
 	uint64_t addr;					/* Needed for alignment */
 	uint64_t ret[2], *o = ret;
+	uint8_t i = 0;
 
 	if (prefix > 128) prefix = 128;
 
@@ -177,16 +177,30 @@ static struct in6_addr fr_in6addr_mask(struct in6_addr const *ipaddr, uint8_t pr
 
 	if (prefix >= 64) {
 		prefix -= 64;
-		memcpy(&addr, p, sizeof(addr));		/* Needed for aligned access (ubsan) */
+		addr = (uint64_t)ipaddr->s6_addr[i] |
+			((uint64_t)ipaddr->s6_addr[i + 1] << 8) |
+			((uint64_t)ipaddr->s6_addr[i + 2] << 16) |
+			((uint64_t)ipaddr->s6_addr[i + 3] << 24) |
+			((uint64_t)ipaddr->s6_addr[i + 4] << 32) |
+			((uint64_t)ipaddr->s6_addr[i + 5] << 40) |
+			((uint64_t)ipaddr->s6_addr[i + 6] << 48) |
+			((uint64_t)ipaddr->s6_addr[i + 7] << 56);
 		*o++ = 0xffffffffffffffffULL & addr;	/* lhs portion masked */
-		p++;
+		i += 8;
 	} else {
 		ret[1] = 0;				/* rhs portion zeroed */
 	}
 
 	/* Max left shift is 63 else we get overflow */
 	if (prefix > 0) {
-		memcpy(&addr, p, sizeof(addr));		/* Needed for aligned access (ubsan) */
+		addr = (uint64_t)ipaddr->s6_addr[i] |
+			((uint64_t)ipaddr->s6_addr[i + 1] << 8) |
+			((uint64_t)ipaddr->s6_addr[i + 2] << 16) |
+			((uint64_t)ipaddr->s6_addr[i + 3] << 24) |
+			((uint64_t)ipaddr->s6_addr[i + 4] << 32) |
+			((uint64_t)ipaddr->s6_addr[i + 5] << 40) |
+			((uint64_t)ipaddr->s6_addr[i + 6] << 48) |
+			((uint64_t)ipaddr->s6_addr[i + 7] << 56);
 		*o = htonll(~((uint64_t)(0x0000000000000001ULL << (64 - prefix)) - 1)) & addr;
 	} else {
 		*o = 0;
@@ -897,7 +911,7 @@ int fr_inet_pton(fr_ipaddr_t *out, char const *value, ssize_t inlen, int af, boo
 	/*
 	 *	No idea what it is...
 	 */
-	fr_strerror_printf("Invalid address family %i", af);
+	fr_strerror_printf("Invalid address family %d", af);
 	return -1;
 }
 
@@ -1357,7 +1371,7 @@ int8_t fr_ipaddr_cmp(fr_ipaddr_t const *a, fr_ipaddr_t const *b)
 #endif
 
 	default:
-		fr_strerror_printf("Invalid address family %u", a->af);
+		fr_strerror_printf("Invalid address family %d", a->af);
 		return -2;
 	}
 }
@@ -1468,6 +1482,50 @@ int fr_ipaddr_from_sockaddr(fr_ipaddr_t *ipaddr, uint16_t *port,
 
 	return 0;
 }
+
+void  fr_ipaddr_get_scope_id(fr_ipaddr_t *ipaddr)
+{
+	struct ifaddrs *list = NULL;
+	struct ifaddrs *i;
+
+	/*
+	 *	This should be set already for IPv6.  We should only need to do this for IPv4.
+	 */
+	if (ipaddr->scope_id != 0) return;
+
+	/*
+	 *	Bind manually to an IP used by the named interface.
+	 */
+	if (getifaddrs(&list) < 0) return;
+
+	for (i = list; i != NULL; i = i->ifa_next) {
+		fr_ipaddr_t my_ipaddr;
+
+		if (!i->ifa_addr || !i->ifa_name || (ipaddr->af != i->ifa_addr->sa_family)) continue;
+
+		fr_ipaddr_from_sockaddr(&my_ipaddr, NULL,
+					(struct sockaddr_storage *)i->ifa_addr, sizeof(struct sockaddr_in6));
+		my_ipaddr.scope_id = 0;
+
+		/*
+		 *	my_ipaddr will have a scope_id, but the input
+		 *	ipaddr won't have one.  We therefore set the
+		 *	local one to zero, so that we can do correct
+		 *	IP address comparisons.
+		 *
+		 *	If the comparison succeeds, then we return
+		 *	both the interface name, and we update the
+		 *	input ipaddr with the correct scope_id.
+		 */
+		if (fr_ipaddr_cmp(ipaddr, &my_ipaddr) == 0) {
+			ipaddr->scope_id = if_nametoindex(i->ifa_name);
+			break;
+		}
+	}
+
+	freeifaddrs(list);
+}
+
 
 char *fr_ipaddr_to_interface(TALLOC_CTX *ctx, fr_ipaddr_t *ipaddr)
 {

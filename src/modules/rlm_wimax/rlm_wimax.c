@@ -163,7 +163,7 @@ static unlang_action_t CC_HINT(nonnull) mod_preacct(rlm_rcode_t *p_result, modul
  */
 static unlang_action_t CC_HINT(nonnull) mod_post_auth(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_wimax_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_wimax_t);
+	rlm_wimax_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_wimax_t);
 	fr_pair_t		*msk, *emsk, *vp;
 	fr_pair_t		*mn_nai, *ip, *fa_rk;
 	EVP_MD_CTX		*hmac_ctx;
@@ -457,15 +457,15 @@ module_rlm_t rlm_wimax = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "wimax",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_wimax_t),
 		.config		= module_config,
 	},
-	.dict		= &dict_radius,
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_preacct },
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize },
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("recv", "accounting-request"), .method = mod_preacct },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize },
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

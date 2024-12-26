@@ -83,6 +83,18 @@ struct cf_pair {
 	bool			referenced;	//!< Was this item referenced in the config?
 };
 
+typedef enum {
+	CF_UNLANG_NONE = 0,			//!< no unlang
+	CF_UNLANG_ALLOW,			//!< allow unlang in this section
+	CF_UNLANG_SERVER,			//!< this section is a virtual server, allow unlang 2 down
+	CF_UNLANG_POLICY,			//!< this section is a policy, allow unlang 2 down
+	CF_UNLANG_MODULES,			//!< this section is in "modules", allow unlang 2 down
+	CF_UNLANG_EDIT,				//!< only edit commands
+	CF_UNLANG_ASSIGNMENT,  			//!< only assignments inside of map / update
+	CF_UNLANG_DICTIONARY,  			//!< only local variable definitions
+	CF_UNLANG_CAN_HAVE_UPDATE,		//!< can have "update"
+} cf_unlang_t;
+
 /** A section grouping multiple #CONF_PAIR
  *
  */
@@ -100,8 +112,7 @@ struct cf_section {
 
 	void			*base;
 	int			depth;
-	int			allow_unlang;	//!< depth at which we allow unlang
-	bool			attr;		//!< is this thing an attribute definition?
+	cf_unlang_t    		unlang;
 	bool			allow_locals;	//!< allow local variables
 
 	CONF_SECTION		*template;
@@ -145,8 +156,18 @@ typedef struct {
  *				Will be declared in the scope of the loop.
  * @param[in] _prev		previous pointer
  */
-#define cf_item_foreach_prev(_ci, _iter, _prev) \
+#define cf_item_foreach_next(_ci, _iter, _prev) \
 	for (CONF_ITEM *_iter = fr_dlist_next(&(_ci)->children, _prev); _iter; _iter = fr_dlist_next(&(_ci)->children, _iter))
+
+/** Iterate over the contents of a list in reverse order
+ *
+ * @param[in] _ci		to iterate over.
+ * @param[in] _iter		Name of iteration variable.
+ *				Will be declared in the scope of the loop.
+ * @param[in] _prev		previous pointer
+ */
+#define cf_item_foreach_prev(_ci, _iter, _prev) \
+	for (CONF_ITEM *_iter = fr_dlist_prev(&(_ci)->children, _prev); _iter; _iter = fr_dlist_prev(&(_ci)->children, _iter))
 
 /** Check if the CONF_ITEM has no children.
  *

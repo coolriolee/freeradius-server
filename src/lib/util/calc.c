@@ -1252,11 +1252,11 @@ static int calc_ipv4_addr(UNUSED TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_
 		/*
 		 *	Trying to add a number outside of the given prefix.  That's not allowed.
 		 */
-		if (b->vb_uint32 >= (((uint32_t) 1) << a->vb_ip.prefix)) return ERR_OVERFLOW;
+		if (b->vb_uint32 >= (((uint32_t) 1) << (32 - a->vb_ip.prefix))) return ERR_OVERFLOW;
 
 		dst->vb_ip.af = AF_INET;
 		dst->vb_ip.addr.v4.s_addr = htonl(ntohl(a->vb_ip.addr.v4.s_addr) | b->vb_uint32);
-		dst->vb_ip.prefix = 0;
+		dst->vb_ip.prefix = 32;
 		break;
 
 	default:
@@ -1330,6 +1330,7 @@ static int calc_ipv4_prefix(UNUSED TALLOC_CTX *ctx, fr_value_box_t *dst, fr_valu
 				if (mask == b->vb_uint32) break;
 
 				prefix--;
+				/* coverity[overflow_const] */
 				mask <<= 1;
 			}
 			fr_assert(prefix > 0);
@@ -2128,6 +2129,16 @@ int fr_value_calc_binary_op(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_type_t hint
 					fr_assert(upcast_cmp[b->type][a->type] == FR_TYPE_NULL);
 				}
 
+				/*
+				 *	time_deltas have a scale in the enumv, but default to "seconds" if
+				 *	there's no scale.  As a result, if we compare time_delta(ms) to integer,
+				 *	then the integer is interpreted as seconds, and the scale is wrong.
+				 *
+				 *	The solution is to use the appropriate scale.
+				 */
+				if (hint == a->type) enumv = a->enumv;
+				if (hint == b->type) enumv = b->enumv;
+
 				if (hint == FR_TYPE_NULL) {
 					fr_strerror_printf("Cannot compare incompatible types (%s)... %s (%s)...",
 							   fr_type_to_str(a->type),
@@ -2250,13 +2261,14 @@ int fr_value_calc_nary_op(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_type_t type, 
 
 		FR_SBUFF_TALLOC_THREAD_LOCAL(&sbuff, 1024, (1 << 16));
 
-		if (fr_value_box_list_concat_as_string(&tainted, &secret, sbuff, UNCONST(fr_value_box_list_t *, &group->vb_group), NULL, 0, NULL, FR_VALUE_BOX_LIST_NONE, false) < 0) return -1;
+		if (fr_value_box_list_concat_as_string(&tainted, &secret, sbuff, UNCONST(fr_value_box_list_t *, &group->vb_group),
+						       NULL, 0, NULL, FR_VALUE_BOX_LIST_NONE, 0, false) < 0) return -1;
 
 		if (fr_value_box_bstrndup(ctx, dst, NULL, fr_sbuff_start(sbuff), fr_sbuff_used(sbuff), tainted) < 0) return -1;
 
 		fr_value_box_set_secret(dst, secret);
 
-		return 0;		
+		return 0;
 	}
 
 	if (type == FR_TYPE_OCTETS) {
@@ -2274,7 +2286,7 @@ int fr_value_calc_nary_op(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_type_t type, 
 
 		fr_value_box_set_secret(dst, secret);
 
-		return 0;		
+		return 0;
 	}
 
 	/*
@@ -2635,6 +2647,37 @@ brute_force:
 	return 0;
 }
 
+/*
+ *	Empty lists are empty:
+ *
+ *		{}
+ *		{{}}
+ *		{''}
+ *		{{},''}
+ *
+ *		etc.
+ */
+static bool fr_value_calc_list_empty(fr_value_box_list_t const *list)
+{
+	fr_value_box_list_foreach(list, item) {
+		switch (item->type) {
+		default:
+			return false;
+
+		case FR_TYPE_GROUP:
+			if (!fr_value_calc_list_empty(&item->vb_group)) return false;
+			break;
+
+		case FR_TYPE_STRING:
+		case FR_TYPE_OCTETS:
+			if (item->vb_length != 0) return false;
+			break;
+		}
+	}
+
+	return true;
+}
+
 
 /*
  *	Loop over input lists, calling fr_value_calc_binary_op()
@@ -2646,6 +2689,7 @@ int fr_value_calc_list_cmp(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_box_li
 {
 	int rcode;
 	bool invert = false;
+	bool a_empty, b_empty;
 
 	/*
 	 *	v3 hack.  != really means !( ... == ... )
@@ -2656,10 +2700,19 @@ int fr_value_calc_list_cmp(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_box_li
 	}
 
 	/*
+	 *	It's annoying when the debug prints out cmp({},{}) and says "not equal".
+	 *
+	 *	What's happening behind the scenes is that one side is an empty value-box group, such as when
+	 *	an xlat expansion fails.  And the other side is an empty string.  If we believe that strings
+	 *	are actually sets of characters, then {}=='', and we're all OK
+	 */
+	a_empty = fr_value_box_list_empty(list1) || fr_value_calc_list_empty(list1);
+	b_empty = fr_value_box_list_empty(list2) || fr_value_calc_list_empty(list2);
+
+	/*
 	 *	Both lists are empty, they should be equal when checked for equality.
 	 */
-	if ((fr_value_box_list_num_elements(list1) == 0) &&
-	    (fr_value_box_list_num_elements(list2) == 0)) {
+	if (a_empty && b_empty) {
 		switch (op) {
 		case T_OP_CMP_EQ:
 		case T_OP_LE:

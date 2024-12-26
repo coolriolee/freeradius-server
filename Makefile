@@ -43,7 +43,7 @@ endif
 #  there's no point in requiring the developer to run configure
 #  *before* making packages.
 #
-ifeq "$(filter deb rpm pkg_version crossbuild freeradius-server-%,$(MAKECMDGOALS))" ""
+ifeq "$(filter deb rpm pkg_version dist-check% crossbuild.% docker.% freeradius-server-%,$(MAKECMDGOALS))" ""
   $(if $(wildcard Make.inc),,$(error Missing 'Make.inc' Run './configure [options]' and retry))
   include Make.inc
 else
@@ -114,9 +114,7 @@ PROTOCOLS    := \
 #  If we're building packages or crossbuilding, just do that.
 #  Don't try to do a local build.
 #
-ifeq "$(filter deb rpm pkg_version freeradius-server-%,$(MAKECMDGOALS))" ""
-  ifeq "$(findstring crossbuild,$(MAKECMDGOALS))" ""
-
+ifeq "$(filter deb rpm pkg_version dist-check% crossbuild.% docker.% freeradius-server-%,$(MAKECMDGOALS))" ""
 
 #
 #  Include all of the autoconf definitions into the Make variable space
@@ -129,56 +127,57 @@ build/autoconf.mk: src/include/autoconf.h
 	@mkdir -p build
 	${Q}grep '^#define' $^ | sed 's/#define /AC_/;s/ / := /' > $@
 
-      -include build/autoconf.mk
+  -include build/autoconf.mk
+
+  #
+  #  Autoload the various libraries needed for building.
+  #
+  #  If the build is targeting these explicitly, then we are OK if their
+  #  features don't exist.  If we're building everything else, then
+  #  build these first, and then load the libraries.
+  #
+  #  Ensure that these libraries are built ONLY when doing a full build,
+  #  AND that they are built and loaded before using the rest of the
+  #  boilermake framework, UNLESS we're doing "make clean", in which case
+  #  don't include the magic libraries.
+  #
+  ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
+    ifeq "$(findstring libfreeradius-make,$(MAKECMDGOALS))" ""
 
       #
-      #  Autoload the various libraries needed for building.
+      #  Avoid calling shell if we don't need to build support libraries
       #
-      #  If the build is targeting these explicitly, then we are OK if their
-      #  features don't exist.  If we're building everything else, then
-      #  build these first, and then load the libraries.
-      #
-      #  Ensure that these libraries are built ONLY when doing a full build,
-      #  AND that they are built and loaded before using the rest of the
-      #  boilermake framework, UNLESS we're doing "make clean", in which case
-      #  don't include the magic libraries.
-      #
-      ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
-        ifeq "$(findstring libfreeradius-make,$(MAKECMDGOALS))" ""
-
-          #
-          #  Avoid calling shell if we don't need to build support libraries
-          #
-          ifeq "$(wildcard build/lib/.libs/libfreeradius-make-dlopen.${BUILD_LIB_EXT})" ""
-            BUILD_MAKE_LIBS=yes
-          endif
-          ifeq "$(wildcard build/lib/.libs/libfreeradius-make-version.${BUILD_LIB_EXT})" ""
-            BUILD_MAKE_LIBS=yes
-          endif
-          ifeq "$(wildcard build/lib/.libs/libfreeradius-make-util.${BUILD_LIB_EXT})" ""
-            BUILD_MAKE_LIBS=yes
-          endif
-
-          ifdef BUILD_MAKE_LIBS
-            define n
-          endef
-          $(info $(subst CC,$nCC,$(shell $(MAKE) VERBOSE=$(VERBOSE) libfreeradius-make-dlopen.${BUILD_LIB_EXT} libfreeradius-make-version.${BUILD_LIB_EXT} libfreeradius-make-util.${BUILD_LIB_EXT})))
-        endif
-
-        load build/lib/.libs/libfreeradius-make-dlopen.${BUILD_LIB_EXT}(dlopen_gmk_setup)
-        load build/lib/.libs/libfreeradius-make-version.${BUILD_LIB_EXT}(version_gmk_setup)
-        load build/lib/.libs/libfreeradius-make-util.${BUILD_LIB_EXT}(util_gmk_setup)
-      else
-        BUILD_DIR:=${top_srcdir}/build
-        top_builddir:=${top_srcdir}/scripts/build
+      ifeq "$(wildcard build/lib/.libs/libfreeradius-make-dlopen.${BUILD_LIB_EXT})" ""
+        BUILD_MAKE_LIBS=yes
       endif
-    endif
+      ifeq "$(wildcard build/lib/.libs/libfreeradius-make-version.${BUILD_LIB_EXT})" ""
+        BUILD_MAKE_LIBS=yes
+      endif
+      ifeq "$(wildcard build/lib/.libs/libfreeradius-make-util.${BUILD_LIB_EXT})" ""
+        BUILD_MAKE_LIBS=yes
+      endif
 
-    #
-    #  Load the huge boilermake framework.
-    #
-    include scripts/boiler.mk
+      ifdef BUILD_MAKE_LIBS
+        define n
+
+
+        endef
+        $(info $(subst CC,$nCC,$(shell $(MAKE) VERBOSE=$(VERBOSE) libfreeradius-make-dlopen.${BUILD_LIB_EXT} libfreeradius-make-version.${BUILD_LIB_EXT} libfreeradius-make-util.${BUILD_LIB_EXT})))
+      endif
+
+      load build/lib/.libs/libfreeradius-make-dlopen.${BUILD_LIB_EXT}(dlopen_gmk_setup)
+      load build/lib/.libs/libfreeradius-make-version.${BUILD_LIB_EXT}(version_gmk_setup)
+      load build/lib/.libs/libfreeradius-make-util.${BUILD_LIB_EXT}(util_gmk_setup)
+    else
+      BUILD_DIR:=${top_srcdir}/build
+      top_builddir:=${top_srcdir}/scripts/build
+    endif
   endif
+
+  #
+  #  Load the huge boilermake framework.
+  #
+  include scripts/boiler.mk
 endif
 
 #
@@ -464,13 +463,15 @@ freeradius-server-$(PKG_VERSION).tar.bz2: freeradius-server-$(PKG_VERSION).tar
 	gpg --default-key packages@freeradius.org -b $<
 
 # high-level targets
-.PHONY: dist-check
-dist-check: redhat/freeradius.spec debian/changelog
+.PHONY: dist-check-rpm
+dist-check-rpm: redhat/freeradius.spec
 	@if [ `grep '^%global _version' redhat/freeradius.spec | cut -d' ' -f3` != "$(PKG_VERSION)" ]; then \
 		sed 's/^%global _version .*/%global _version $(PKG_VERSION)/' redhat/freeradius.spec > redhat/.foo; \
 		mv redhat/.foo redhat/freeradius.spec; \
 		echo Updated redhat/freeradius.spec '_version' to $(PKG_VERSION); \
 	fi
+.PHONY: dist-check
+dist-check: dist-check-rpm debian/changelog
 	@if [ `head -n 1 doc/ChangeLog | awk '/^FreeRADIUS/{print $$2}'` != "$(PKG_VERSION)" ]; then \
 		echo doc/ChangeLog needs to be updated; \
 		exit 1; \
@@ -526,8 +527,8 @@ rpmbuild/SOURCES/freeradius-server-$(PKG_VERSION).tar.bz2: freeradius-server-$(P
 	@cp $< $@
 
 rpm: rpmbuild/SOURCES/freeradius-server-$(PKG_VERSION).tar.bz2
-	@if ! $(SUDO) yum-builddep ${YUM_BUILDDEP_FLAGS} -q -C --assumeno redhat/freeradius.spec 1> rpmbuild/builddep.log 2>&1; then \
-		echo "ERROR: Required dependencies not found, install them with: yum-builddep redhat/freeradius.spec"; \
+	@if ! $(SUDO) dnf builddep ${YUM_BUILDDEP_FLAGS} -q -C --assumeno redhat/freeradius.spec 1> rpmbuild/builddep.log 2>&1; then \
+		echo "ERROR: Required dependencies not found, install them with: dnf builddep redhat/freeradius.spec"; \
 		cat rpmbuild/builddep.log; \
 		exit 1; \
 	fi
@@ -552,7 +553,14 @@ whitespace:
 #  Include the crossbuild make file only if we're cross building
 #
 ifneq "$(findstring crossbuild,$(MAKECMDGOALS))" ""
-  include scripts/docker/crossbuild/crossbuild.mk
+  include scripts/docker/crossbuild.mk
+endif
+
+#
+#  Conditionally include the docker make file
+#
+ifneq "$(findstring docker,$(MAKECMDGOALS))" ""
+  include scripts/docker/docker.mk
 endif
 
 #

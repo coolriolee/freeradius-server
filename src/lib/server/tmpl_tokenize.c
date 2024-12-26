@@ -41,6 +41,13 @@ RCSID("$Id$")
 
 #include <ctype.h>
 
+/*
+ *	Migration flag for enum prefixes.
+ */
+extern bool tmpl_require_enum_prefix;
+
+bool tmpl_require_enum_prefix = false;
+
 /** Define a global variable for specifying a default request reference
  *
  * @param[in] _name	what the global variable should be called.
@@ -976,6 +983,7 @@ static tmpl_attr_t *tmpl_attr_add(tmpl_t *vpt, tmpl_attr_type_t type)
 	*ar = (tmpl_attr_t){
 		.type = type,
 		.filter = {
+			.type = TMPL_ATTR_FILTER_TYPE_NONE,
 			.num = NUM_UNSPEC
 		}
 	};
@@ -1046,7 +1054,7 @@ int tmpl_attr_copy(tmpl_t *dst, tmpl_t const *src)
 			break;
 
 	 	case TMPL_ATTR_TYPE_UNKNOWN:
-	 		dst_ar->ar_unknown = fr_dict_unknown_copy(dst_ar, src_ar->ar_unknown);
+	 		dst_ar->ar_unknown = fr_dict_attr_unknown_copy(dst_ar, src_ar->ar_unknown);
 	 		break;
 
 	 	case TMPL_ATTR_TYPE_UNRESOLVED:
@@ -1094,7 +1102,7 @@ int tmpl_attr_set_da(tmpl_t *vpt, fr_dict_attr_t const *da)
 	 */
 	if (da->flags.is_unknown) {
 		ref = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_UNKNOWN);
-		ref->da = ref->ar_unknown = fr_dict_unknown_copy(vpt, da);
+		ref->da = ref->ar_unknown = fr_dict_attr_unknown_copy(vpt, da);
 	} else {
 		ref = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_NORMAL);
 		ref->da = da;
@@ -1136,6 +1144,13 @@ int tmpl_attr_set_leaf_da(tmpl_t *vpt, fr_dict_attr_t const *da)
 		 *	Free old unknown and unresolved attributes...
 		 */
 		talloc_free_children(ref);
+
+		/*
+		 *
+		 */
+		ref->ar_filter_type = TMPL_ATTR_FILTER_TYPE_NONE;
+		ref->ar_num = NUM_UNSPEC;
+
 	} else {
 		ref = tmpl_attr_add(vpt, da->flags.is_unknown ? TMPL_ATTR_TYPE_UNKNOWN : TMPL_ATTR_TYPE_NORMAL);
 	}
@@ -1145,12 +1160,11 @@ int tmpl_attr_set_leaf_da(tmpl_t *vpt, fr_dict_attr_t const *da)
 	 *	Unknown attributes get copied
 	 */
 	if (da->flags.is_unknown) {
-		ref->type = TMPL_ATTR_TYPE_UNKNOWN;
-		ref->da = ref->ar_unknown = fr_dict_unknown_copy(vpt, da);
+		ref->da = ref->ar_unknown = fr_dict_attr_unknown_copy(vpt, da);
 	} else {
-		ref->type = TMPL_ATTR_TYPE_NORMAL;
 		ref->da = da;
 	}
+
 	/*
 	 *	FIXME - Should be calculated from existing ar
 	 */
@@ -1161,27 +1175,16 @@ int tmpl_attr_set_leaf_da(tmpl_t *vpt, fr_dict_attr_t const *da)
 	return 0;
 }
 
-void tmpl_attr_set_leaf_num(tmpl_t *vpt, int16_t num)
-{
-	tmpl_attr_t *ar;
-
-	tmpl_assert_type(tmpl_is_attr(vpt) || tmpl_is_attr_unresolved(vpt));
-
-	if (tmpl_attr_list_num_elements(tmpl_attr(vpt)) == 0) {
-		ar = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_UNKNOWN);
-	} else {
-		ar = tmpl_attr_list_tail(tmpl_attr(vpt));
-	}
-
-	ar->ar_num = num;
-
-	TMPL_ATTR_VERIFY(vpt);
-}
-
 /** Rewrite the leaf's instance number
  *
+ *  This function is _only_ called from the compiler, for "update" and "foreach" keywords.  In those cases,
+ *  the user historically did "&foo-bar", but really meant "&foo-bar[*]".  We silently update that for
+ *  "update" sections, and complain about it in "foreach" sections.
+ *
+ *  As the server now supports multiple types of leaf references, we do the rewrite _only_ from "none" (no
+ *  filter), OR where it's a numerical index, AND the index hasn't been specified.
  */
-void tmpl_attr_rewrite_leaf_num(tmpl_t *vpt, int16_t from, int16_t to)
+void tmpl_attr_rewrite_leaf_num(tmpl_t *vpt, int16_t to)
 {
 	tmpl_attr_t *ref = NULL;
 
@@ -1190,21 +1193,17 @@ void tmpl_attr_rewrite_leaf_num(tmpl_t *vpt, int16_t from, int16_t to)
 	if (tmpl_attr_list_num_elements(tmpl_attr(vpt)) == 0) return;
 
 	ref = tmpl_attr_list_tail(tmpl_attr(vpt));
-	if (ref->ar_num == from) ref->ar_num = to;
 
-	TMPL_ATTR_VERIFY(vpt);
-}
+	if (ref->ar_filter_type == TMPL_ATTR_FILTER_TYPE_NONE) {
+		ref->ar_filter_type = TMPL_ATTR_FILTER_TYPE_INDEX;
+		ref->ar_num = to;
 
-/** Rewrite all instances of an array number
- *
- */
-void tmpl_attr_rewrite_num(tmpl_t *vpt, int16_t from, int16_t to)
-{
-	tmpl_attr_t *ref = NULL;
+	} else if (ref->ar_filter_type != TMPL_ATTR_FILTER_TYPE_INDEX) {
+		return;
 
-	tmpl_assert_type(tmpl_is_attr(vpt) || tmpl_is_attr_unresolved(vpt));
-
-	while ((ref = tmpl_attr_list_next(tmpl_attr(vpt), ref))) if (ref->ar_num == from) ref->ar_num = to;
+	} else if (ref->ar_num == NUM_UNSPEC) {
+		ref->ar_num = to;
+	}
 
 	TMPL_ATTR_VERIFY(vpt);
 }
@@ -1251,11 +1250,17 @@ int tmpl_attr_afrom_list(TALLOC_CTX *ctx, tmpl_t **out, tmpl_t const *list, fr_d
 	 *	Copies request refs and the list ref
 	 */
 	tmpl_attr_copy(vpt, list);
-	tmpl_attr_set_list(vpt, tmpl_list(list));	/* Remove when lists are attributes */
-	ar = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_NORMAL);
-	ar->ar_da = da;
+	tmpl_attr_set_list(vpt, tmpl_list(list));
+
+	if (da->flags.is_unknown) {
+		ar = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_UNKNOWN);
+		ar->da = ar->ar_unknown = fr_dict_attr_unknown_copy(vpt, da);
+	} else {
+		ar = tmpl_attr_add(vpt, TMPL_ATTR_TYPE_NORMAL);
+		ar->ar_da = da;
+	}
+
 	ar->ar_parent = fr_dict_root(fr_dict_by_da(da));
-	tmpl_attr_set_leaf_num(vpt, tmpl_attr_tail_num(list));
 
 	/*
 	 *	We need to rebuild the attribute name, to be the
@@ -1354,55 +1359,64 @@ static fr_slen_t tmpl_attr_parse_filter(tmpl_attr_error_t *err, tmpl_attr_t *ar,
 		fr_sbuff_next(&our_name);
 		break;
 
-	case 'n':
-		ar->ar_num = NUM_LAST;
-		fr_sbuff_next(&our_name);
+	case '0':
+	case '1':
+	case '2':
+	case '3':
+	case '4':
+	case '5':
+	case '6':
+	case '7':
+	case '8':
+	case '9':
+	{
+		ssize_t rcode;
+		fr_sbuff_parse_error_t	sberr = FR_SBUFF_PARSE_OK;
+		fr_sbuff_t tmp = FR_SBUFF(&our_name);
+
+		/*
+		 *	All digits (not hex).
+		 */
+		rcode = fr_sbuff_out(&sberr, &ar->ar_num, &tmp);
+		if ((rcode < 0) || !fr_sbuff_is_char(&tmp, ']')) goto parse_tmpl;
+
+		if ((ar->ar_num > 1000) || (ar->ar_num < 0)) {
+			fr_strerror_printf("Invalid array index '%hi' (should be between 0-1000)", ar->ar_num);
+			ar->ar_num = 0;
+			goto error;
+		}
+
+		fr_sbuff_set(&our_name, &tmp);	/* Advance name _AFTER_ doing checks */
 		break;
+	}
+
+	case '"':
+	case '\'':
+	case '`':
+	case '/':
+		fr_strerror_const("Invalid data type for array index");
+		goto error;
 
 	/* Used as EOB here */
 	missing_closing:
 	case '\0':
 		fr_strerror_const("No closing ']' for array index");
-		if (err) *err = TMPL_ATTR_ERROR_INVALID_ARRAY_INDEX;
 	error:
+		if (err) *err = TMPL_ATTR_ERROR_INVALID_ARRAY_INDEX;
 		FR_SBUFF_ERROR_RETURN(&our_name);
 
-	default:
+	case '(':		/* (...) expression */
 	{
-		fr_sbuff_parse_error_t	sberr = FR_SBUFF_PARSE_OK;
 		fr_sbuff_t tmp = FR_SBUFF(&our_name);
-		ssize_t rcode;
 		fr_slen_t slen;
 		tmpl_rules_t t_rules;
 		fr_sbuff_parse_rules_t p_rules;
 		fr_sbuff_term_t const filter_terminals = FR_SBUFF_TERMS(L("]"));
 
-		rcode = fr_sbuff_out(&sberr, &ar->ar_num, &tmp);
-		if ((rcode > 0) && (fr_sbuff_is_char(&tmp, ']'))) {
-			if ((ar->ar_num > 1000) || (ar->ar_num < 0)) {
-				fr_strerror_printf("Invalid array index '%hi' (should be between 0-1000)", ar->ar_num);
-				ar->ar_num = 0;
-				if (err) *err = TMPL_ATTR_ERROR_INVALID_ARRAY_INDEX;
-				goto error;
-			}
-
-			fr_sbuff_set(&our_name, &tmp);	/* Advance name _AFTER_ doing checks */
-			break;
-		}
-
-		/*
-		 *	Temporary parsing hack: &User-Name[a] does _not_ match a condition 'a'.
-		 */
-		if (!fr_sbuff_is_char(&tmp, '&')) {
-			fr_strerror_const("Invalid array index");
-			if (err) *err = TMPL_ATTR_ERROR_INVALID_ARRAY_INDEX;
-			goto error;
-		}
-
 		/*
 		 *	For now, we don't allow filtering on leaf values. e.g.
 		 *
-		 *		&User-Name[&User-Name == foo]
+		 *		&User-Name[(&User-Name == foo)]
 		 *
 		 *	@todo - find some sane way of allowing this, without mangling the xlat expression
 		 *	parser too badly.  The simplest way is likely to just parse the expression, and then
@@ -1425,20 +1439,16 @@ static fr_slen_t tmpl_attr_parse_filter(tmpl_attr_error_t *err, tmpl_attr_t *ar,
 		 *
 		 *	In order to fix that, we have to
 		 */
-		if (!fr_type_is_structural(ar->ar_da->type)) {
-				fr_strerror_printf("Invalid filter - cannot use filter on leaf attributes");
-				ar->ar_num = 0;
-				if (err) *err = TMPL_ATTR_ERROR_INVALID_ARRAY_INDEX;
-				goto error;
+		if (!ar->ar_da || !fr_type_is_structural(ar->ar_da->type)) {
+			fr_strerror_printf("Invalid filter - cannot use filter on leaf attributes");
+			ar->ar_num = 0;
+			goto error;
 		}
-
-		fr_assert(ar->ar_da != NULL);
-		fr_assert(fr_type_is_structural(ar->ar_da->type));
 
 		tmp = FR_SBUFF(&our_name);
 		t_rules = (tmpl_rules_t) {};
 		t_rules.attr = *at_rules;
-		t_rules.attr.namespace = ar->ar_da;
+		t_rules.attr.namespace = ar->ar_da; /* @todo - parent? */
 
 		p_rules = (fr_sbuff_parse_rules_t) {
 			.terminals = &filter_terminals,
@@ -1449,11 +1459,115 @@ static fr_slen_t tmpl_attr_parse_filter(tmpl_attr_error_t *err, tmpl_attr_t *ar,
 		 *	Check if it's a condition.
 		 */
 		slen = xlat_tokenize_condition(ar, &ar->ar_cond, &tmp, &p_rules, &t_rules);
-		if (slen < 0) {
+		if (slen < 0) goto error;
+
+		fr_assert(!xlat_impure_func(ar->ar_cond));
+
+		ar->ar_filter_type = TMPL_ATTR_FILTER_TYPE_CONDITION;
+		fr_sbuff_set(&our_name, &tmp);	/* Advance name _AFTER_ doing checks */
+		break;
+	}
+
+	case '%':		/* ${...} expansion */
+	{
+		fr_sbuff_t tmp = FR_SBUFF(&our_name);
+		fr_slen_t slen;
+		tmpl_rules_t t_rules;
+		fr_sbuff_parse_rules_t p_rules;
+		fr_sbuff_term_t const filter_terminals = FR_SBUFF_TERMS(L("]"));
+
+		if (!fr_sbuff_is_str(&our_name, "%{", 2)) {
+			fr_strerror_const("Invalid expression in attribute index");
 			goto error;
 		}
 
-		ar->ar_filter_type = TMPL_ATTR_FILTER_TYPE_CONDITION;
+		tmp = FR_SBUFF(&our_name);
+		t_rules = (tmpl_rules_t) {};
+		t_rules.attr = *at_rules;
+
+		p_rules = (fr_sbuff_parse_rules_t) {
+			.terminals = &filter_terminals,
+			.escapes = NULL
+		};
+
+		/*
+		 *	Check if it's an expression.
+		 */
+		slen = xlat_tokenize_expression(ar, &ar->ar_cond, &tmp, &p_rules, &t_rules);
+		if (slen < 0) goto error;
+
+		if (xlat_impure_func(ar->ar_expr)) {
+			fr_strerror_const("Expression in attribute index cannot depend on functions which call external databases");
+			goto error;
+		}
+
+		ar->ar_filter_type = TMPL_ATTR_FILTER_TYPE_EXPR;
+
+		fr_sbuff_set(&our_name, &tmp);	/* Advance name _AFTER_ doing checks */
+		break;
+	}
+
+	case 'n':
+		/*
+		 *	[n] is the last one
+		 *
+		 *	[nope] is a reference to "nope".
+		 */
+		if (fr_sbuff_is_str(&our_name, "n]", 2)) {
+			ar->ar_num = NUM_LAST;
+			fr_sbuff_next(&our_name);
+			break;
+		}
+		FALL_THROUGH;
+
+	default:
+	parse_tmpl:
+	{
+		fr_sbuff_t tmp = FR_SBUFF(&our_name);
+		ssize_t slen;
+		tmpl_rules_t t_rules;
+		fr_sbuff_parse_rules_t p_rules;
+		fr_sbuff_term_t const filter_terminals = FR_SBUFF_TERMS(L("]"));
+
+		tmp = FR_SBUFF(&our_name);
+		t_rules = (tmpl_rules_t) {};
+		t_rules.attr = *at_rules;
+
+		/*
+		 *	Don't reset namespace, we always want to start searching from the top level of the
+		 *	dictionaries.
+		 */
+
+		p_rules = (fr_sbuff_parse_rules_t) {
+			.terminals = &filter_terminals,
+			.escapes = NULL
+		};
+
+		/*
+		 *	@todo - for some reason, the tokenize_condition code allows for internal
+		 *	vs protocol vs local attributes, whereas the tmpl function only accepts
+		 *	internal ones.
+		 */
+		slen = tmpl_afrom_substr(ar, &ar->ar_tmpl, &tmp, T_BARE_WORD, &p_rules, &t_rules);
+		if (slen <= 0) goto error;
+
+		if (!tmpl_is_attr(ar->ar_tmpl)) {
+			fr_strerror_const("Invalid array index");
+			goto error;
+		}
+
+		/*
+		 *	Arguably we _could_ say &User-Name["foo"] matches all user-name with value "foo",
+		 *	but that would confuse the issue for &Integer-Thing[4].
+		 *
+		 *	For matching therefore, we really need to have a way to define "self".
+		 */
+		if (!fr_type_numeric[tmpl_attr_tail_da(ar->ar_tmpl)->type]) {
+			fr_strerror_const("Invalid data type for array index (must be numeric)");
+			goto error;
+		}
+
+		ar->ar_filter_type = TMPL_ATTR_FILTER_TYPE_TMPL;
 		fr_sbuff_set(&our_name, &tmp);	/* Advance name _AFTER_ doing checks */
 		break;
 	}
@@ -1825,6 +1939,8 @@ static inline int tmpl_attr_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t
 	 *	.<oid>
 	 */
 	if (fr_sbuff_out(NULL, &oid, name) > 0) {
+		namespace = fr_dict_unlocal(namespace);
+
 		fr_strerror_clear();	/* Clear out any existing errors */
 
 		if (fr_dict_by_da(namespace) == fr_dict_internal()) goto disallow_unknown;
@@ -1856,11 +1972,11 @@ static inline int tmpl_attr_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t
 		 */
 		switch (namespace->type) {
 		case FR_TYPE_VSA:
-			da = fr_dict_unknown_vendor_afrom_num(ar, namespace, oid);
+			da = fr_dict_attr_unknown_vendor_afrom_num(ar, namespace, oid);
 			break;
 
 		default:
-			da  = fr_dict_unknown_attr_afrom_num(ar, namespace, oid);
+			da  = fr_dict_attr_unknown_raw_afrom_num(ar, namespace, oid);
 			break;
 		}
 
@@ -2067,7 +2183,7 @@ do_suffix:
  *				- list_def		The default list to set if no #fr_pair_list_t
  *							qualifiers are found in the name.
  *				- allow_unknown		If true attributes in the format accepted by
- *							#fr_dict_unknown_afrom_oid_substr will be allowed,
+ *							#fr_dict_attr_unknown_afrom_oid_substr will be allowed,
  *							even if they're not in the main dictionaries.
  *							If an unknown attribute is found a #TMPL_TYPE_ATTR
  *							#tmpl_t will be produced.
@@ -2100,7 +2216,6 @@ ssize_t tmpl_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t *err,
 	int				ret;
 	tmpl_t				*vpt;
 	fr_sbuff_t			our_name = FR_SBUFF(name);	/* Take a local copy in case we need to back track */
-	bool				ref_prefix = false;
 	bool				is_raw = false;
 	tmpl_attr_rules_t const		*at_rules;
 	fr_sbuff_marker_t		m_l;
@@ -2123,12 +2238,21 @@ ssize_t tmpl_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t *err,
 	 */
 	switch (at_rules->prefix) {
 	case TMPL_ATTR_REF_PREFIX_YES:
-		if (!fr_sbuff_next_if_char(&our_name, '&')) {
-			fr_strerror_const("Invalid attribute reference, missing '&' prefix");
-			if (err) *err = TMPL_ATTR_ERROR_BAD_PREFIX;
-			FR_SBUFF_ERROR_RETURN(&our_name);
+		if (!tmpl_require_enum_prefix) {
+			if (!fr_sbuff_next_if_char(&our_name, '&')) {
+				fr_strerror_const("Invalid attribute reference, missing '&' prefix");
+				if (err) *err = TMPL_ATTR_ERROR_BAD_PREFIX;
+				FR_SBUFF_ERROR_RETURN(&our_name);
+			}
+			break;
 		}
+		FALL_THROUGH;	/* if we do require enum prefixes, then the '&' is optional */
 
+	case TMPL_ATTR_REF_PREFIX_AUTO:
+		/*
+		 *	'&' prefix can be there, but doesn't have to be
+		 */
+		(void) fr_sbuff_next_if_char(&our_name, '&');
 		break;
 
 	case TMPL_ATTR_REF_PREFIX_NO:
@@ -2138,17 +2262,14 @@ ssize_t tmpl_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t *err,
 			FR_SBUFF_ERROR_RETURN(&our_name);
 		}
 		break;
-
-	case TMPL_ATTR_REF_PREFIX_AUTO:
-		/*
-		 *	'&' prefix can be there, but doesn't have to be
-		 */
-		(void) fr_sbuff_next_if_char(&our_name, '&');
-		break;
 	}
 
+	/*
+	 *	We parsed the tmpl as &User-Name, or just User-Name, but NOT %{User-Name}.
+	 *	Mark it up as having a prefix.
+	 */
 	MEM(vpt = tmpl_alloc(ctx, TMPL_TYPE_ATTR, T_BARE_WORD, NULL, 0));
-	vpt->data.attribute.ref_prefix = ref_prefix;
+	vpt->data.attribute.ref_prefix = TMPL_ATTR_REF_PREFIX_YES;
 
 	/*
 	 *	The "raw." prefix marks up the leaf attribute
@@ -2217,7 +2338,7 @@ ssize_t tmpl_afrom_attr_substr(TALLOC_CTX *ctx, tmpl_attr_error_t *err,
 		/*
 		 *	That being said, local variables are named "foo", but are always put into the local list.
 		 */
-		if (is_local) {
+		if (is_local && (at_rules->list_presence != TMPL_ATTR_LIST_FORBID)) {
 			MEM(ar = talloc(vpt, tmpl_attr_t));
 			*ar = (tmpl_attr_t){
 				.ar_type = TMPL_ATTR_TYPE_NORMAL,
@@ -2728,7 +2849,7 @@ static ssize_t tmpl_afrom_ether_substr(TALLOC_CTX *ctx, tmpl_t **out, fr_sbuff_t
 {
 	tmpl_t			*vpt;
 	fr_sbuff_t		our_in = FR_SBUFF(in);
-	uint8_t			buff[6];
+	uint8_t			buff[6] = {};
 	fr_dbuff_t		dbuff;
 	fr_value_box_t		*vb;
 	fr_sbuff_parse_error_t	err;
@@ -2948,11 +3069,18 @@ static ssize_t tmpl_afrom_enum(TALLOC_CTX *ctx, tmpl_t **out, fr_sbuff_t *in,
 	fr_sbuff_parse_error_t	sberr;
 	fr_sbuff_t	our_in = FR_SBUFF(in);
 
-	if (fr_sbuff_is_str_literal(&our_in, "::")) {
-		(void) fr_sbuff_advance(&our_in, 2);
+	/*
+	 *	If there isn't a "::" prefix, then check for migration flags, and enum.
+	 *
+	 *	If we require an enum prefix, then the input can't be an enum, and we don't do any more
+	 *	parsing.
+	 *
+	 *	Otherwise if there's no prefix and no enumv, we know this input can't be an enum name.
+	 */
+	if (!fr_sbuff_adv_past_str_literal(&our_in, "::")) {
+		if (tmpl_require_enum_prefix) return 0;
 
-	} else if (!t_rules->enumv) {
-		return 0;
+		if (!t_rules->enumv) return 0;
 	}
 
 	vpt = tmpl_alloc_null(ctx);
@@ -3357,7 +3485,7 @@ fr_slen_t tmpl_afrom_substr(TALLOC_CTX *ctx, tmpl_t **out,
 
 		vpt = tmpl_alloc_null(ctx);
 
-		slen = xlat_tokenize(vpt, &head, &our_in, p_rules, t_rules, t_rules->literals_safe_for);
+		slen = xlat_tokenize(vpt, &head, &our_in, p_rules, t_rules, FR_REGEX_SAFE_FOR);
 		if (slen < 0) FR_SBUFF_ERROR_RETURN(&our_in);
 
 		/*
@@ -3499,10 +3627,7 @@ ssize_t tmpl_cast_from_substr(tmpl_rules_t *rules, fr_sbuff_t *in)
 	fr_type_t		cast;
 	ssize_t			slen;
 
-	if (fr_sbuff_next_if_char(&our_in, '<')) {
-		close = '>';
-
-	} else if (fr_sbuff_next_if_char(&our_in, '(')) {
+	if (fr_sbuff_next_if_char(&our_in, '(')) {
 		close = ')';
 
 	} else {
@@ -3593,15 +3718,33 @@ int tmpl_cast_set(tmpl_t *vpt, fr_type_t dst_type)
 		goto check_types;
 
 	case TMPL_TYPE_ATTR:
-		src_type = tmpl_attr_tail_da(vpt)->type;
+		{
+			fr_dict_attr_t const *da = tmpl_attr_tail_da(vpt);
 
+			/*
+			 *	If the attribute has an enum, then the cast means "use the raw value, and not
+			 *	the enum name".
+			 */
+			if (da->type == dst_type) {
+				if (da->flags.has_value) goto done;
+				return 0;
+			}
+			src_type = da->type;
+		}
 
 		/*
-		 *	Suppress casts where they are duplicate.
+		 *	Suppress casts where they are duplicate, unless there's an enumv.  In which case the
+		 *	cast means "don't print the enumv value, just print the raw data".
 		 */
 	check_types:
 		if (src_type == dst_type) {
-			tmpl_rules_cast(vpt) = FR_TYPE_NULL;
+			/*
+			 *	Cast with enumv means "use the raw value, and not the enum name".
+			 */
+			if (tmpl_rules_enumv(vpt)) {
+				tmpl_rules_enumv(vpt) = NULL;
+				goto done;
+			}
 			return 0;
 		}
 
@@ -3749,6 +3892,7 @@ int tmpl_cast_in_place(tmpl_t *vpt, fr_type_t type, fr_dict_attr_t const *enumv)
 		vpt->quote = tmpl_cast_quote(vpt->quote, type, enumv,
 					     unescaped, talloc_array_length(unescaped) - 1);
 		talloc_free(unescaped);
+		fr_value_box_mark_safe_for(&vpt->data.literal, vpt->rules.literals_safe_for);
 
 		/*
 		 *	The data is now of the correct type, so we don't need to keep a cast.
@@ -4230,7 +4374,7 @@ static void attr_to_raw(tmpl_t *vpt, tmpl_attr_t *ref)
 	switch (ref->type) {
 	case TMPL_ATTR_TYPE_NORMAL:
 	{
-		ref->da = ref->ar_unknown = fr_dict_unknown_afrom_da(vpt, ref->da);
+		ref->da = ref->ar_unknown = fr_dict_attr_unknown_afrom_da(vpt, ref->da);
 		ref->ar_unknown->type = FR_TYPE_OCTETS;
 		ref->is_raw = 1;
 		ref->ar_unknown->flags.is_unknown = 1;
@@ -4304,7 +4448,7 @@ int tmpl_attr_unknown_add(tmpl_t *vpt)
 		}
 
 		unknown = ar->ar_unknown;
-		known = fr_dict_unknown_add(fr_dict_unconst(fr_dict_by_da(unknown)), unknown);
+		known = fr_dict_attr_unknown_add(fr_dict_unconst(fr_dict_by_da(unknown)), unknown);
 		if (!known) return -1;
 
 		/*
@@ -4340,7 +4484,7 @@ int tmpl_attr_unknown_add(tmpl_t *vpt)
 		 *	types for raw attributes.
 		 */
 		if (!ar_is_raw(ar)) {
-			fr_dict_unknown_free(&ar->ar_da);
+			fr_dict_attr_unknown_free(&ar->ar_da);
 			ar->ar_da = known;
 		} else if (!fr_cond_assert(!next)) {
 			fr_strerror_const("Only the leaf may be raw");
@@ -4373,9 +4517,12 @@ int tmpl_attr_unknown_add(tmpl_t *vpt)
  *	- -1 on failure.
  */
 int tmpl_attr_tail_unresolved_add(fr_dict_t *dict_def, tmpl_t *vpt,
-			     fr_type_t type, fr_dict_attr_flags_t const *flags)
+				  fr_type_t type, fr_dict_attr_flags_t const *flags)
 {
 	fr_dict_attr_t const *da;
+	fr_dict_attr_flags_t our_flags = *flags;
+
+	our_flags.name_only = true;
 
 	if (!vpt) return -1;
 
@@ -4384,7 +4531,7 @@ int tmpl_attr_tail_unresolved_add(fr_dict_t *dict_def, tmpl_t *vpt,
 	if (!tmpl_is_attr_unresolved(vpt)) return 1;
 
 	if (fr_dict_attr_add(dict_def,
-			     fr_dict_root(fr_dict_internal()), tmpl_attr_tail_unresolved(vpt), -1, type, flags) < 0) {
+			     fr_dict_root(fr_dict_internal()), tmpl_attr_tail_unresolved(vpt), 0, type, &our_flags) < 0) {
 		return -1;
 	}
 	da = fr_dict_attr_by_name(NULL, fr_dict_root(dict_def), tmpl_attr_tail_unresolved(vpt));
@@ -5194,110 +5341,36 @@ void tmpl_verify(char const *file, int line, tmpl_t const *vpt)
  * @param      in	where we start looking for the string
  * @param      inlen	length of the input string
  * @param[out] type	token type of the string.
- * @param[out] castda	NULL if casting is not allowed, otherwise the cast
- * @param   require_regex whether or not to require regular expressions
- * @param   allow_xlat  whether or not "bare" xlat's are allowed
  * @return
  *	- > 0, amount of parsed string to skip, to get to the next token
  *	- <=0, -offset in 'start' where the parse error was located
  */
 ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t inlen,
-		      fr_token_t *type,
-		      fr_dict_attr_t const **castda, bool require_regex, bool allow_xlat)
+		      fr_token_t *type)
 {
 	char const *p = in, *end = in + inlen;
 	char quote;
 	char close;
 	int depth;
+	bool triple;
 
 	*type = T_INVALID;
-	if (castda) *castda = NULL;
 
 	while (isspace((uint8_t) *p) && (p < end)) p++;
 	if (p >= end) return p - in;
-
-	if (*p == '<') {
-		fr_type_t cast;
-		char const *q;
-
-		if (!castda) {
-			fr_strerror_const("Unexpected cast");
-		return_p:
-			return -(p - in);
-		}
-
-		p++;
-		fr_skip_whitespace(p);
-
-		for (q = p; *q && !isspace((uint8_t) *q) && (*q != '>'); q++) {
-			/* nothing */
-		}
-
-		cast = fr_table_value_by_substr(fr_type_table, p, q - p, FR_TYPE_NULL);
-		if (fr_type_is_null(cast)) {
-			return_P("Unknown data type");
-		}
-
-		/*
-		 *	We can only cast to basic data types.  Complex ones
-		 *	are forbidden.
-		 */
-		if (fr_type_is_non_leaf(cast)) {
-			return_P("Forbidden data type in cast");
-		}
-
-		*castda = fr_dict_attr_child_by_num(fr_dict_root(fr_dict_internal()), FR_CAST_BASE + cast);
-		if (!*castda) {
-			return_P("Cannot cast to this data type");
-		}
-
-		p = q;
-		fr_skip_whitespace(p);
-		if (*p != '>') {
-			return_P("Expected '>'");
-		}
-		p++;
-
-		fr_skip_whitespace(p);
-	}
-
-	if (require_regex) {
-		if (castda && *castda) {
-			p++;
-			return_P("Invalid cast before regular expression");
-		}
-
-		/*
-		 *	Allow this which is sometimes clearer.
-		 */
-		if (*p == 'm') {
-			p++;
-			quote = *(p++);
-			*type = T_OP_REG_EQ;
-			goto skip_string;
-		}
-
-		if (*p != '/') {
-			return_P("Expected regular expression");
-		}
-	} /* else treat '/' as any other character */
 
 	switch (*p) {
 		/*
 		 *	Allow bare xlat's
 		 */
 	case '%':
-		if (!allow_xlat) {
-			return_P("Unexpected expansion");
-		}
-
-		if ((p[1] != '{') && (p[1] != '(')) {
+		if (p[1] != '{') {
 			char const *q;
 
 			q = p + 1;
 
 			/*
-			 *	New xlat syntax: %foo(...)
+			 *	Function syntax: %foo(...)
 			 */
 			while ((q < end) && (isalnum((int) *q) || (*q == '.') || (*q == '_') || (*q == '-'))) {
 				q++;
@@ -5305,7 +5378,9 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 
 			if (*q != '(') {
 				p++;
-				return_P("Invalid character after '%'");
+				fr_strerror_const("Invalid character after '%'");
+			return_p:
+				return -(p - in);
 			}
 
 			/*
@@ -5321,14 +5396,14 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 		}
 
 		/*
-		 *	For now, %{...} / %(...) is treated as a double-quoted
+		 *	For now, %{...} is treated as a double-quoted
 		 *	string.  Once we clean other things up, the
 		 *	xlats will be treated as strongly typed values
 		 *	/ lists on their own.
 		 */
 		if (*type == T_INVALID) *type = T_BARE_WORD;
 		depth = 0;
-		close = (p[1] == '{') ? '}' : ')';
+		close = '}';
 
 		/*
 		 *	Xlat's are quoted by %{...} / %(...) nesting, not by
@@ -5397,11 +5472,7 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 		return_P("Unterminated expansion");
 
 	case '/':
-		if (!require_regex) goto bare_word;
-
-		quote = *(p++);
-		*type = T_OP_REG_EQ;
-		goto skip_string;
+		goto bare_word;
 
 	case '\'':
 		quote = *(p++);
@@ -5426,8 +5497,17 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 		 *	more rigorous check.
 		 */
 	skip_string:
+		if ((inlen > 3) && (p[0] == quote) && (p[1] == quote)) {
+			triple = true;
+			p += 2;
+		} else {
+			triple = false;
+		}
 		*out = p;
+
 		while (*p) {
+			if (p >= end) goto unterminated;
+
 			/*
 			 *	End of string.  Tell the caller the
 			 *	length of the data inside of the
@@ -5435,9 +5515,21 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 			 *	characters to skip.
 			 */
 			if (*p == quote) {
-				*outlen = p - (*out);
+				if (!triple) {
+					*outlen = p - (*out);
+					p++;
+					return p - in;
+
+				}
+
+				if (((end - p) >= 3) && (p[1] == quote) && (p[2] == quote)) {
+					*outlen = p - (*out);
+					p += 3;
+					return p - in;
+				}
+
 				p++;
-				return p - in;
+				continue;
 			}
 
 			if (*p == '\\') {
@@ -5453,6 +5545,7 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 		 *	End of input without end of string.
 		 *	Point the error to the start of the string.
 		 */
+		unterminated:
 		p = *out;
 		return_P("Unterminated string");
 
@@ -5465,7 +5558,12 @@ ssize_t tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t i
 	default:
 	bare_word:
 		*out = p;
-		quote = '\0';
+
+		if (tmpl_require_enum_prefix) {
+			quote = '['; /* foo[1] is OK */
+		} else {
+			quote = '\0';
+		}
 
 	skip_word:
 		*type = T_BARE_WORD;
@@ -5752,4 +5850,5 @@ void tmpl_rules_debug(tmpl_rules_t const *rules)
 	FR_FAULT_LOG("\tenumv      = %s", rules->enumv ? rules->enumv->name : "");
 	FR_FAULT_LOG("\tcast       = %s", fr_type_to_str(rules->cast));
 	FR_FAULT_LOG("\tat_runtime = %u", rules->at_runtime);
+
 }

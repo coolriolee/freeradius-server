@@ -38,7 +38,10 @@ RCSID("$Id$")
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/util/base16.h>
 #include <freeradius-devel/util/misc.h>
+#include <freeradius-devel/util/sbuff.h>
+#include <freeradius-devel/util/value.h>
 #include <freeradius-devel/util/trie.h>
+#include <freeradius-devel/util/token.h>
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -249,12 +252,7 @@ bool client_add(fr_client_list_t *clients, fr_client_t *client)
 			 */
 			clients = cf_data_value(cf_data_find(cs, fr_client_list_t, NULL));
 			if (!clients) {
-				clients = client_list_init(cs);
-				if (!clients) {
-					ERROR("Out of memory");
-					return false;
-				}
-
+				MEM(clients = client_list_init(cs));
 				if (!cf_data_add(cs, clients, NULL, true)) {
 					ERROR("Failed to associate clients with virtual server %s", client->server);
 					talloc_free(clients);
@@ -305,7 +303,7 @@ bool client_add(fr_client_list_t *clients, fr_client_t *client)
 		if (namecmp(longname) && namecmp(secret) &&
 		    namecmp(shortname) && namecmp(nas_type) &&
 		    namecmp(server) &&
-		    (old->message_authenticator == client->message_authenticator)) {
+		    (old->require_message_authenticator == client->require_message_authenticator)) {
 			WARN("Ignoring duplicate client %s", client->longname);
 			client_free(client);
 			return true;
@@ -447,7 +445,15 @@ static const conf_parser_t client_config[] = {
 
 	{ FR_CONF_OFFSET("track_connections", fr_client_t, use_connected) },
 
-	{ FR_CONF_OFFSET("require_message_authenticator", fr_client_t, message_authenticator) },
+	{ FR_CONF_OFFSET_IS_SET("require_message_authenticator", FR_TYPE_UINT32, 0, fr_client_t, require_message_authenticator),
+	  .func = cf_table_parse_int,
+	  .uctx = &(cf_table_parse_ctx_t){ .table = fr_radius_require_ma_table, .len = &fr_radius_require_ma_table_len },
+	  .dflt = "no" },
+
+	{ FR_CONF_OFFSET_IS_SET("limit_proxy_state", FR_TYPE_UINT32, 0, fr_client_t, limit_proxy_state),
+	  .func = cf_table_parse_int,
+	  .uctx = &(cf_table_parse_ctx_t){ .table = fr_radius_limit_proxy_state_table, .len = &fr_radius_limit_proxy_state_table_len },
+	  .dflt = "auto" },
 
 	{ FR_CONF_OFFSET("dedup_authenticator", fr_client_t, dedup_authenticator) },
 
@@ -775,12 +781,16 @@ fr_client_t *client_afrom_cs(TALLOC_CTX *ctx, CONF_SECTION *cs, CONF_SECTION *se
 	 *	Find the virtual server for this client.
 	 */
 	if (c->server) {
+		virtual_server_t const *vs;
 		if (server_cs) {
 			cf_log_err(cs, "Clients inside of a 'server' section cannot point to a server");
 			goto error;
 		}
 
-		c->server_cs = virtual_server_find(c->server);
+		vs = virtual_server_find(c->server);
+		if (!vs) goto error;
+
+		c->server_cs = virtual_server_cs(vs);
 		if (!c->server_cs) {
 			cf_log_err(cs, "Failed to find virtual server %s", c->server);
 			goto error;
@@ -921,47 +931,59 @@ fr_client_t *client_afrom_request(TALLOC_CTX *ctx, request_t *request)
 {
 	static int	cnt;
 	CONF_SECTION	*cs;
-	char		src_buf[128], buffer[256];
 	fr_client_t	*c;
+	fr_sbuff_t	*tmp;
 
 	if (!request) return NULL;
 
-	fr_value_box_print(&FR_SBUFF_OUT(src_buf, sizeof(src_buf)), fr_box_ipaddr(request->packet->socket.inet.src_ipaddr), NULL);
+	FR_SBUFF_TALLOC_THREAD_LOCAL(&tmp, 128, SIZE_MAX);
 
-	snprintf(buffer, sizeof(buffer), "dynamic_%i_%s", cnt++, src_buf);
+	if (unlikely(fr_sbuff_in_sprintf(tmp, "dynamic_%i_", cnt++) <= 0)) {
+	name_error:
+		RERROR("Failed to generate dynamic client name");
+		return NULL;
+	}
+	if (unlikely(fr_value_box_print(tmp, fr_box_ipaddr(request->packet->socket.inet.src_ipaddr), NULL) <= 0)) goto name_error;
+	fr_sbuff_set_to_start(tmp);
 
-	cs = cf_section_alloc(ctx, NULL, "client", buffer);
+	cs = cf_section_alloc(ctx, NULL, "client", fr_sbuff_current(tmp));
 
-	RDEBUG2("Converting &request.control to client {...} section");
+	RDEBUG2("Converting &control.FreeRADIUS-Client-* to client {...} section");
 	RINDENT();
 
 	fr_pair_list_foreach(&request->control_pairs, vp) {
 		CONF_PAIR	*cp = NULL;
 		char const	*value;
 		char const	*attr;
+		fr_token_t	v_token = T_BARE_WORD;
 
 		if (!fr_dict_attr_is_top_level(vp->da)) continue;
 
 		switch (vp->da->attr) {
 		case FR_FREERADIUS_CLIENT_IP_ADDRESS:
 			attr = "ipv4addr";
-			value = fr_inet_ntop(buffer, sizeof(buffer), &vp->vp_ip);
+		vb_to_str:
+			fr_sbuff_set_to_start(tmp);
+			if (unlikely(fr_pair_print_value_quoted(tmp, vp, T_BARE_WORD) < 0)) {
+				RERROR("Failed to convert %pP to string", vp);
+			error:
+				talloc_free(cs);
+				return NULL;
+			}
+			value = fr_sbuff_start(tmp);
 			break;
 
 		case FR_FREERADIUS_CLIENT_IP_PREFIX:
 			attr = "ipv4addr";
-			value = fr_inet_ntop_prefix(buffer, sizeof(buffer), &vp->vp_ip);
-			break;
+			goto vb_to_str;
 
 		case FR_FREERADIUS_CLIENT_IPV6_ADDRESS:
 			attr = "ipv6addr";
-			value = fr_inet_ntop(buffer, sizeof(buffer), &vp->vp_ip);
-			break;
+			goto vb_to_str;
 
 		case FR_FREERADIUS_CLIENT_IPV6_PREFIX:
 			attr = "ipv6addr";
-			value = fr_inet_ntop_prefix(buffer, sizeof(buffer), &vp->vp_ip);
-			break;
+			goto vb_to_str;
 
 		case FR_FREERADIUS_CLIENT_SECRET:
 			attr = "secret";
@@ -978,30 +1000,32 @@ fr_client_t *client_afrom_request(TALLOC_CTX *ctx, request_t *request)
 			value = vp->vp_strvalue;
 			break;
 
+		case FR_FREERADIUS_CLIENT_SRC_IP_ADDRESS:
+			attr = "src_ipaddr";
+			goto vb_to_str;
+
 		case FR_FREERADIUS_CLIENT_REQUIRE_MA:
 			attr = "require_message_authenticator";
-			if (vp->vp_bool) {
-				value = "true";
-			} else {
-				value = "false";
-			}
-			break;
+			goto vb_to_str;
+
+		case FR_FREERADIUS_CLIENT_LIMIT_PROXY_STATE:
+			attr = "limit_proxy_state";
+			goto vb_to_str;
 
 		case FR_FREERADIUS_CLIENT_TRACK_CONNECTIONS:
 			attr = "track_connections";
-			if (vp->vp_bool) {
-				value = "true";
-			} else {
-				value = "false";
-			}
-			break;
+			goto vb_to_str;
 
 		default:
-			RERROR("Ignoring attribute %s", vp->da->name);
-			continue;
+			attr = vp->da->name;
+			fr_sbuff_set_to_start(tmp);
+			fr_value_box_print(tmp, &vp->data, &fr_value_escape_single);
+			value = fr_sbuff_start(tmp);
+			v_token = T_SINGLE_QUOTED_STRING;
+			break;
 		}
 
-		cp = cf_pair_alloc(cs, attr, value, T_OP_SET, T_BARE_WORD, T_BARE_WORD);
+		cp = cf_pair_alloc(cs, attr, value, T_OP_SET, T_BARE_WORD, v_token);
 		if (!cp) {
 			RERROR("Error creating equivalent conf pair for %s", vp->da->name);
 			goto error;
@@ -1017,11 +1041,7 @@ fr_client_t *client_afrom_request(TALLOC_CTX *ctx, request_t *request)
 	 *	src IP, protocol, etc.  This should all be in TLVs..
 	 */
 	c = client_afrom_cs(cs, cs, unlang_call_current(request), 0);
-	if (!c) {
-	error:
-		talloc_free(cs);
-		return NULL;
-	}
+	if (!c) goto error;
 
 	return c;
 }
@@ -1096,7 +1116,7 @@ fr_client_t *client_from_request(request_t *request)
 
 	do {
 		client = parent->client;
-	} while (!client && (parent = request->parent));
+	} while (!client && (parent = parent->parent));
 
 	return client;
 }

@@ -66,9 +66,9 @@ foreach &control.Filter-Id {
 			#  so we now need to figure out which slave each of those keys
 			#  ended up on.
 			#
-			if ((%redis(-@%(redis.node:b 1), GET, b) == %{data1}) && \
-			    (%redis(-@%(redis.node:c 1), GET, c) == %{data2}) && \
-			    (%redis(-@%(redis.node:d 1), GET, d) == %{data3})) {
+			if ((%redis("-@%redis.node(b, 1)", GET, b) == %{data1}) && \
+			    (%redis("-@%redis.node(c, 1)", GET, c) == %{data2}) && \
+			    (%redis("-@%redis.node(d, 1)", GET, d) == %{data3})) {
 				break
 			}
 		}
@@ -80,7 +80,7 @@ foreach &control.Filter-Id {
 	#
 	# The cluster tends to come up within a couple of seconds, but it takes longer
 	# for the replicas to be displayed in cluster slot output (usually ~5 seconds).
-	%(delay:0.5)
+	%delay(0.5)
 
 	#
 	#  If the cluster is still not behaving

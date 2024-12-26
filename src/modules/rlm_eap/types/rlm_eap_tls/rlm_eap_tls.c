@@ -47,7 +47,6 @@ static conf_parser_t submodule_config[] = {
 
 	{ FR_CONF_OFFSET("require_client_cert", rlm_eap_tls_t, req_client_cert), .dflt = "yes" },
 	{ FR_CONF_OFFSET("include_length", rlm_eap_tls_t, include_length), .dflt = "yes" },
-	{ FR_CONF_OFFSET("virtual_server", rlm_eap_tls_t, virtual_server) },
 	CONF_PARSER_TERMINATOR
 };
 
@@ -179,20 +178,15 @@ static unlang_action_t mod_handshake_process(UNUSED rlm_rcode_t *p_result, UNUSE
 	return eap_tls_process(request, eap_session);
 }
 
-/*
- *	Send an initial eap-tls request to the peer, using the libeap functions.
- */
-static unlang_action_t mod_session_init(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
+static unlang_action_t mod_session_init_resume(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_eap_tls_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_eap_tls_t);
+	rlm_eap_tls_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_tls_t);
 	rlm_eap_tls_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_eap_tls_thread_t);
 	eap_session_t		*eap_session = eap_session_get(request->parent);
 	eap_tls_session_t	*eap_tls_session;
 
 	fr_pair_t		*vp;
 	bool			client_cert;
-
-	eap_session->tls = true;
 
 	/*
 	 *	EAP-TLS-Require-Client-Cert attribute will override
@@ -227,9 +221,26 @@ static unlang_action_t mod_session_init(rlm_rcode_t *p_result, module_ctx_t cons
 	RETURN_MODULE_HANDLED;
 }
 
+/*
+ *	Send an initial eap-tls request to the peer, using the libeap functions.
+ */
+static unlang_action_t mod_session_init(UNUSED rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
+{
+	rlm_eap_tls_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_tls_t);
+	eap_session_t		*eap_session = eap_session_get(request->parent);
+
+	eap_session->tls = true;
+
+	(void) unlang_module_yield(request, mod_session_init_resume, NULL, 0, NULL);
+
+	if (inst->tls_conf->new_session) return fr_tls_new_session_push(request, inst->tls_conf);
+
+	return UNLANG_ACTION_CALCULATE_RESULT;
+}
+
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_eap_tls_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_eap_tls_t);
+	rlm_eap_tls_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_tls_t);
 	rlm_eap_tls_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_eap_tls_thread_t);
 
 	t->ssl_ctx = fr_tls_ctx_alloc(inst->tls_conf, false);
@@ -253,17 +264,12 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_eap_tls_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_eap_tls_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_eap_tls_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_tls_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 
 	inst->tls_conf = eap_tls_conf_parse(conf, "tls");
 	if (!inst->tls_conf) {
 		cf_log_err(conf, "Failed initializing SSL context");
-		return -1;
-	}
-
-	if (inst->virtual_server && !virtual_server_find(inst->virtual_server)) {
-		cf_log_err_by_child(conf, "virtual_server", "Unknown virtual server '%s'", inst->virtual_server);
 		return -1;
 	}
 

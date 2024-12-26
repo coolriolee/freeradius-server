@@ -32,7 +32,7 @@ RCSID("$Id$")
  */
 ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			       fr_dict_attr_t const *parent, uint8_t const *data, size_t data_len,
-			       bool nested, void *decode_ctx,
+			       void *decode_ctx,
 			       fr_pair_decode_value_t decode_value, fr_pair_decode_value_t decode_tlv)
 {
 	unsigned int		child_num;
@@ -55,23 +55,17 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 	/*
 	 *	Start a child list.
 	 */
-	if (!nested) {
-		fr_pair_list_init(&child_list_head);
-		child_list = &child_list_head;
-		child_ctx = ctx;
-	} else {
-		fr_assert(parent->type == FR_TYPE_STRUCT);
+	fr_assert(parent->type == FR_TYPE_STRUCT);
 
-		struct_vp = fr_pair_afrom_da(ctx, parent);
-		if (!struct_vp) {
-			fr_strerror_const("out of memory");
-			return -1;
-		}
-
-		fr_pair_list_init(&child_list_head); /* still used elsewhere */
-		child_list = &struct_vp->vp_group;
-		child_ctx = struct_vp;
+	struct_vp = fr_pair_afrom_da(ctx, parent);
+	if (!struct_vp) {
+		fr_strerror_const("out of memory");
+		return -1;
 	}
+
+	fr_pair_list_init(&child_list_head); /* still used elsewhere */
+	child_list = &struct_vp->vp_group;
+	child_ctx = struct_vp;
 	child_num = 1;
 	key_vp = NULL;
 
@@ -79,47 +73,51 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 	 *	Decode structs with length prefixes.
 	 */
 	if (da_is_length_field(parent)) {
-		size_t struct_len, need, new_len;
+		size_t claimed_len, field_len, calc_len;
 
+		/*
+		 *	Set how many bytes there are in the "length" field.
+		 */
 		if (parent->flags.subtype == FLAG_LENGTH_UINT8) {
-			need = 1;
+			field_len = 1;
 		} else {
-			need = 2;
+			field_len = 2;
 		}
 
-		if ((size_t) (end - p) < need) {
-			FR_PROTO_TRACE("Insufficient room for length header");
+		if ((size_t) (end - p) < field_len) {
+			FR_PROTO_TRACE("Insufficient room for length field");
 			goto unknown;
 		}
 
-		struct_len = p[0];
-		if (need > 1) {
-			struct_len <<= 8;
-			struct_len |= p[1];
+		claimed_len = p[0];
+		if (field_len > 1) {
+			claimed_len <<= 8;
+			claimed_len |= p[1];
 		}
+		p += field_len;
 
-		if (struct_len < da_length_offset(parent)) {
+		if (claimed_len < da_length_offset(parent)) {
 			FR_PROTO_TRACE("Length header (%zu) is smaller than minimum value (%u)",
-				       struct_len, parent->flags.type_size);
-			goto unknown;
-		}
-
-		if ((p + struct_len + need - da_length_offset(parent)) > end) {
-			FR_PROTO_TRACE("Length header (%zu) is larger than remaining data (%zu)",
-				       struct_len + need, (end - p));
+				       claimed_len, parent->flags.type_size);
 			goto unknown;
 		}
 
 		/*
-		 *	Skip the length field, and tell the decoder to
-		 *	stop at the end of the data we're supposed to decode.
+		 *	Get the calculated length of the actual data.
 		 */
-		p += need;
-		end = p + struct_len;
-		new_len = struct_len + need - offset;
-		if (new_len > data_len) goto unknown;
+		calc_len = claimed_len - da_length_offset(parent);
 
-		data_len = new_len;
+		if (calc_len > (size_t) (end - p)) {
+			FR_PROTO_TRACE("Length header (%zu) is larger than remaining data (%zu)",
+				       claimed_len + field_len, (size_t) (end - p));
+			goto unknown;
+		}
+
+		/*
+		 *	Limit the size of the decoded structure to the correct length.
+		 */
+		data_len = calc_len;
+		end = p + data_len;
 	}
 
 	/*
@@ -235,7 +233,7 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		 *	of the input is suspect.
 		 */
 		if (child_length > (size_t) (end - p)) {
-			FR_PROTO_TRACE("fr_struct_from_network - child length %zd overflows buffer", child_length);
+			FR_PROTO_TRACE("fr_struct_from_network - child length %zu overflows buffer", child_length);
 			goto unknown;
 		}
 
@@ -244,9 +242,10 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		 *	Eat up the rest of the data.
 		 */
 		if (!child_length || (child->flags.array)) {
-			child_length = (end - p);
+			child_length = end - p;
 
 		} else if ((size_t) (end - p) < child_length) {
+			FR_PROTO_TRACE("fr_struct_from_network - child length %zu underflows buffer", child_length);
 			goto unknown;
 		}
 
@@ -310,11 +309,7 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			FR_PROTO_TRACE("fr_struct_from_network - failed decoding child VP %s", vp->da->name);
 			talloc_free(vp);
 		unknown:
-			if (nested) {
-				TALLOC_FREE(struct_vp);
-			} else {
-				fr_pair_list_free(child_list);
-			}
+			TALLOC_FREE(struct_vp);
 
 			slen = fr_pair_raw_from_network(ctx, out, parent, data, data_len);
 			if (slen < 0) return slen;
@@ -366,16 +361,17 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			 *	incomparable.  And thus can all be
 			 *	given the same number.
 			 */
-			child = fr_dict_unknown_attr_afrom_num(child_ctx, key_vp->da, 0);
+			child = fr_dict_attr_unknown_raw_afrom_num(child_ctx, key_vp->da, 0);
 			if (!child) {
-				FR_PROTO_TRACE("failed allocating unknown child for key VP %s", key_vp->da->name);
+				FR_PROTO_TRACE("failed allocating unknown child for key VP %s - %s",
+					       key_vp->da->name, fr_strerror());
 				goto unknown;
 			}
 
 			slen = fr_pair_raw_from_network(child_ctx, child_list, child, p, end - p);
 			if (slen < 0) {
 				FR_PROTO_TRACE("Failed creating raw VP from malformed or unknown substruct for child %s", child->name);
-				fr_dict_unknown_free(&child);
+				fr_dict_attr_unknown_free(&child);
 				return slen;
 			}
 
@@ -383,7 +379,7 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		} else {
 			fr_assert(child->type == FR_TYPE_STRUCT);
 
-			slen = fr_struct_from_network(child_ctx, child_list, child, p, end - p, nested,
+			slen = fr_struct_from_network(child_ctx, child_list, child, p, end - p,
 						      decode_ctx, decode_value, decode_tlv);
 			if (slen <= 0) {
 				FR_PROTO_TRACE("substruct %s decoding failed", child->name);
@@ -392,18 +388,14 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			p += slen;
 		}
 
-		fr_dict_unknown_free(&child);
+		fr_dict_attr_unknown_free(&child);
 	}
 
 done:
-	if (!nested) {
-		fr_pair_list_append(out, child_list);	/* Wind to the end of the new pairs */
-	} else {
-		fr_assert(struct_vp != NULL);
-		fr_pair_append(out, struct_vp);
-	}
+	fr_assert(struct_vp != NULL);
+	fr_pair_append(out, struct_vp);
 
-	FR_PROTO_TRACE("used %zd bytes", data_len);
+	FR_PROTO_TRACE("used %zu bytes", data_len);
 	return p - data;
 }
 
@@ -489,6 +481,7 @@ ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 	fr_pair_t const		*vp = fr_dcursor_current(parent_cursor);
 	fr_dict_attr_t const   	*key_da, *parent, *tlv = NULL;
 	fr_dcursor_t		child_cursor, *cursor;
+	size_t			prefix_length = 0;
 
 	if (!vp) {
 		fr_strerror_printf("%s: Can't encode empty struct", __FUNCTION__);
@@ -556,11 +549,13 @@ ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 			fr_dbuff_marker(&hdr, &work_dbuff);
 
 			FR_DBUFF_ADVANCE_RETURN(&work_dbuff, 1);
+			prefix_length = 1;
 		} else {
 			work_dbuff = FR_DBUFF_MAX(dbuff, 65536);
 			fr_dbuff_marker(&hdr, &work_dbuff);
 
 			FR_DBUFF_ADVANCE_RETURN(&work_dbuff, 2);
+			prefix_length = 2;
 		}
 		do_length = true;
 	}
@@ -688,7 +683,7 @@ ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 			}
 
 			vp = fr_dcursor_next(cursor);
-			if (!vp) break;
+			/* We need to continue, there may be more fields to encode */
 
 			goto next;
 		}
@@ -840,8 +835,18 @@ done:
 	if (do_length) {
 		size_t length = fr_dbuff_used(&work_dbuff);
 
+#ifdef __COVERITY__
+		/*
+		 * 	Coverity somehow can't infer that length
+		 * 	is at least as long as the prefix, instead
+		 * 	thinkings it's zero so that it underflows.
+		 * 	We therefore add a Coverity-only check to
+		 * 	reassure it.
+		 */
+		if (length < prefix_length) return PAIR_ENCODE_FATAL_ERROR;
+#endif
 		if (parent->flags.subtype == FLAG_LENGTH_UINT8) {
-			length -= 1;
+			length -= prefix_length;
 
 			length += da_length_offset(parent);
 
@@ -849,7 +854,7 @@ done:
 
 			(void) fr_dbuff_in(&hdr, (uint8_t) length);
 		} else {
-			length -= 2;
+			length -= prefix_length;
 
 			length += da_length_offset(parent);
 

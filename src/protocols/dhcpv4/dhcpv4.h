@@ -63,22 +63,6 @@ typedef enum {
 
 #define FR_DHCP_PACKET_CODE_VALID(_code) (((_code) > 0) && ((_code) < FR_DHCP_CODE_MAX))
 
-/** subtype values for DHCPv4 and DHCPv6
- *
- */
-enum {
-	FLAG_ENCODE_NONE = 0,				//!< no particular encoding for DHCPv6 strings
-	FLAG_ENCODE_DNS_LABEL,				//!< encode as DNS label
-	FLAG_ENCODE_SPLIT_PREFIX,			//!< encode IPv4 prefixes as Policy-Filter, split into IP/mask
-	FLAG_ENCODE_BITS_PREFIX,			//!< encode IPv4 prefixes as prefix bits, followed by IP.
-	FLAG_ENCODE_BOOL_EXISTS,			//!< bool as existence checks
-};
-
-#define da_is_dns_label(_da) (!(_da)->flags.extra && ((_da)->flags.subtype == FLAG_ENCODE_DNS_LABEL))
-#define da_is_split_prefix(_da) (!(_da)->flags.extra && ((_da)->flags.subtype == FLAG_ENCODE_SPLIT_PREFIX))
-#define da_is_bits_prefix(_da) (!(_da)->flags.extra && ((_da)->flags.subtype == FLAG_ENCODE_BITS_PREFIX))
-#define da_is_bool_exists(_da) (!(_da)->flags.extra && ((_da)->flags.subtype == FLAG_ENCODE_BOOL_EXISTS))
-
 typedef struct {
 	uint8_t		opcode;
 	uint8_t		htype;
@@ -110,7 +94,6 @@ typedef struct {
 #define DHCP_FILE_FIELD	  	(1)
 #define DHCP_SNAME_FIELD  	(2)
 
-#define FR_DHCP_OPTION_82 (82)
 #define DHCP_PACK_OPTION1(x,y) ((x) | ((y) << 8))
 #define DHCP_UNPACK_OPTION1(x) (((x) & 0xff00) >> 8)
 
@@ -130,7 +113,6 @@ extern size_t			 	dhcp_header_attrs_len;
 extern char const			*dhcp_message_types[];
 extern int				dhcp_header_sizes[];
 extern uint8_t				eth_bcast[ETH_ADDR_LEN];
-extern HIDDEN fr_dict_attr_t const 	*dhcp_option_82;
 
 #ifdef HAVE_LINUX_IF_PACKET_H
 #  define ETH_HDR_SIZE   14
@@ -141,7 +123,7 @@ extern HIDDEN fr_dict_attr_t const 	*dhcp_option_82;
 		fprintf(stdout, ## __VA_ARGS__); \
 		fprintf(stdout, "\n"); \
 	} \
-	fr_radius_packet_free(&packet); \
+	fr_packet_free(&packet); \
 	return NULL; \
 }
 #endif
@@ -154,13 +136,38 @@ typedef struct {
 	TALLOC_CTX	*tmp_ctx;		//!< for temporary things cleaned up during decoding
 } fr_dhcpv4_ctx_t;
 
+typedef enum {
+	DHCPV4_FLAG_PREFIX_INVALID = -1,
+	DHCPV4_FLAG_PREFIX_NONE = 0,
+	DHCPV4_FLAG_PREFIX_BITS = 1,
+	DHCPV4_FLAG_PREFIX_SPLIT = 2,
+} fr_dhcpv4_attr_flags_prefix_t;
+
+typedef struct {
+	bool				exists;
+	bool				dns_label;
+	fr_dhcpv4_attr_flags_prefix_t	prefix;
+} fr_dhcpv4_attr_flags_t;
+
+static inline fr_dhcpv4_attr_flags_t const *fr_dhcpv4_attr_flags(fr_dict_attr_t const *da)
+{
+	return fr_dict_attr_ext(da, FR_DICT_ATTR_EXT_PROTOCOL_SPECIFIC);
+}
+
+#define fr_dhcpv4_flag_dns_label(_da)		(fr_dhcpv4_attr_flags(_da)->dns_label)
+#define fr_dhcpv4_flag_exists(_da)		(fr_dhcpv4_attr_flags(_da)->exists)
+
+#define fr_dhcpv4_flag_prefix(_da)		fr_dhcpv4_attr_flags(_da)->prefix
+#define fr_dhcpv4_flag_prefix_bits(_da)		(fr_dhcpv4_attr_flags(_da)->prefix == DHCPV4_FLAG_PREFIX_BITS)
+#define fr_dhcpv4_flag_prefix_split(_da)	(fr_dhcpv4_attr_flags(_da)->prefix == DHCPV4_FLAG_PREFIX_SPLIT)
+
 /*
  *	base.c
  */
 int8_t		fr_dhcpv4_attr_cmp(void const *a, void const *b);
 
 bool		fr_dhcpv4_ok(uint8_t const *data, ssize_t data_len, uint8_t *message_type, uint32_t *xid);
-fr_radius_packet_t	*fr_dhcpv4_packet_alloc(uint8_t const *data, ssize_t data_len);
+fr_packet_t	*fr_dhcpv4_packet_alloc(uint8_t const *data, ssize_t data_len);
 bool 		fr_dhcpv4_is_encodable(void const *item, void const *uctx);
 void		*fr_dhcpv4_next_encodable(fr_dlist_head_t *list, void *to_eval, void *uctx);
 ssize_t		fr_dhcpv4_encode(uint8_t *buffer, size_t buflen, dhcp_packet_t *original, int code, uint32_t xid, fr_pair_list_t *vps);
@@ -192,7 +199,7 @@ uint8_t const	*fr_dhcpv4_packet_get_option(dhcp_packet_t const *packet, size_t p
 int		fr_dhcpv4_decode(TALLOC_CTX *ctx, fr_pair_list_t *out,
 				 uint8_t const *data, size_t data_len, unsigned int *code);
 
-int		fr_dhcpv4_packet_encode(fr_radius_packet_t *packet, fr_pair_list_t *list);
+int		fr_dhcpv4_packet_encode(fr_packet_t *packet, fr_pair_list_t *list);
 
 #ifdef HAVE_LINUX_IF_PACKET_H
 /*
@@ -202,10 +209,10 @@ int		fr_dhcpv4_packet_encode(fr_radius_packet_t *packet, fr_pair_list_t *list);
 int		fr_dhcpv4_raw_socket_open(struct sockaddr_ll *p_ll, int iface_index);
 
 int		fr_dhcpv4_raw_packet_send(int sockfd, struct sockaddr_ll *p_ll,
-					  fr_radius_packet_t *packet, fr_pair_list_t *list);
+					  fr_packet_t *packet, fr_pair_list_t *list);
 
-fr_radius_packet_t	*fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *p_ll,
-						  fr_radius_packet_t *request, fr_pair_list_t *list);
+fr_packet_t	*fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *p_ll,
+						  fr_packet_t *request, fr_pair_list_t *list);
 #endif
 
 /*
@@ -215,16 +222,16 @@ fr_radius_packet_t	*fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *p_
 /*
  *	Use fr_pcap_init and fr_pcap_open to create/open handles.
  */
-fr_radius_packet_t	*fr_dhcpv4_pcap_recv(fr_pcap_t *pcap);
+fr_packet_t	*fr_dhcpv4_pcap_recv(fr_pcap_t *pcap);
 
-int		fr_dhcpv4_pcap_send(fr_pcap_t *pcap, uint8_t *dst_ether_addr, fr_radius_packet_t *packet);
+int		fr_dhcpv4_pcap_send(fr_pcap_t *pcap, uint8_t *dst_ether_addr, fr_packet_t *packet);
 #endif
 
 /*
  *	udp.c
  */
-fr_radius_packet_t	*fr_dhcpv4_udp_packet_recv(int sockfd);
-int		fr_dhcpv4_udp_packet_send(fr_radius_packet_t *packet);
+fr_packet_t	*fr_dhcpv4_udp_packet_recv(int sockfd);
+int		fr_dhcpv4_udp_packet_send(fr_packet_t *packet);
 
 #ifdef __cplusplus
 }

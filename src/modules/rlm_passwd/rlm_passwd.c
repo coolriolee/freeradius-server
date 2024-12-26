@@ -393,8 +393,8 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	size_t			len;
 	int			i;
 	fr_dict_attr_t const	*da;
-	rlm_passwd_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_passwd_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	rlm_passwd_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_passwd_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 
 	fr_assert(inst->filename && *inst->filename);
 	fr_assert(inst->format && *inst->format);
@@ -502,7 +502,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_passwd_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_passwd_t);
+	rlm_passwd_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_passwd_t);
 	if (inst->ht) {
 		release_ht(inst->ht);
 		inst->ht = NULL;
@@ -562,7 +562,7 @@ static void result_add(TALLOC_CTX *ctx, rlm_passwd_t const *inst, request_t *req
 
 static unlang_action_t CC_HINT(nonnull) mod_passwd_map(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_passwd_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_passwd_t);
+	rlm_passwd_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_passwd_t);
 
 	char			buffer[1024];
 	fr_pair_t		*key, *i;
@@ -616,9 +616,11 @@ module_rlm_t rlm_passwd = {
 		.instantiate	= mod_instantiate,
 		.detach		= mod_detach
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_passwd_map },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_passwd_map },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };
 #endif /* TEST */

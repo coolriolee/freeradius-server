@@ -131,7 +131,7 @@ static void mruby_parse_config(mrb_state *mrb, CONF_SECTION *cs, int lvl, mrb_va
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_mruby_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_mruby_t);
+	rlm_mruby_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_mruby_t);
 	mrb_state *mrb;
 	CONF_SECTION *cs;
 	FILE *f;
@@ -181,7 +181,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 	/* Convert a FreeRADIUS config structure into a mruby hash */
 	inst->mrubyconf_hash = mrb_hash_new(mrb);
-	cs = cf_section_find(mctx->inst->conf, "config", NULL);
+	cs = cf_section_find(mctx->mi->conf, "config", NULL);
 	if (cs) mruby_parse_config(mrb, cs, 0, inst->mrubyconf_hash);
 
 	/* Define the Request class */
@@ -473,7 +473,7 @@ DIAG_ON(DIAG_UNKNOWN_PRAGMAS)
 	{ \
 		return do_mruby(p_result, \
 			       request,	\
-			       (rlm_mruby_t const *)mctx->inst->data, \
+			       (rlm_mruby_t const *)mctx->mi->data, \
 			       #foo); \
 	}
 
@@ -490,7 +490,7 @@ RLM_MRUBY_FUNC(accounting)
  */
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_mruby_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_mruby_t);
+	rlm_mruby_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_mruby_t);
 
 	mrb_close(inst->mrb);
 
@@ -517,17 +517,20 @@ module_rlm_t rlm_mruby = {
 		.instantiate	= mod_instantiate,
 		.detach		= mod_detach,
 	},
-	.method_names = (module_method_name_t[]){
-		/*
-		 *	Hack to support old configurations
-		 */
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			/*
+			 *	Hack to support old configurations
+			 */
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting	},
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate },
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY), .method = mod_authorize },
 
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_preacct		},
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting	},
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate	},
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth		},
-		MODULE_NAME_TERMINATOR
+			{ .section = SECTION_NAME("recv", "accounting-request"), .method = mod_preacct },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize },
+
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

@@ -27,7 +27,6 @@
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/unlang/xlat_func.h>
-#include <ctype.h>
 #include <time.h>
 
 typedef struct {
@@ -170,7 +169,7 @@ static xlat_action_t xlat_date_convert(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				       xlat_ctx_t const *xctx,
 				       request_t *request, fr_value_box_list_t *in)
 {
-	rlm_date_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_date_t);
+	rlm_date_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_date_t);
 	struct tm 		tminfo;
 	fr_value_box_t		*arg = fr_value_box_list_head(in);
 
@@ -193,7 +192,7 @@ static xlat_action_t xlat_date_convert(TALLOC_CTX *ctx, fr_dcursor_t *out,
 		}
 
 		/*
-		 *	%{date:'+%A'} == "Monday", to mirror the behavior of the `date` command.
+		 *	%date('+%A') == "Monday", to mirror the behavior of the `date` command.
 		 */
 		if (arg->vb_strvalue[0] == '+') {
 			return date_encode_strftime(ctx, out, inst, request, arg->vb_strvalue + 1, fr_time_to_sec(fr_time()));
@@ -232,10 +231,9 @@ static xlat_action_t xlat_date_convert(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_date_t 	*inst = talloc_get_type_abort(mctx->inst->data, rlm_date_t );
 	xlat_t 		*xlat;
 
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_date_convert, FR_TYPE_VOID);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, xlat_date_convert, FR_TYPE_VOID);
 	xlat_func_args_set(xlat, xlat_date_convert_args);
 
 	return 0;

@@ -30,6 +30,8 @@ RCSIDH(clients_h, "$Id$")
 extern "C" {
 #endif
 
+#include <freeradius-devel/server/cf_util.h>
+
 typedef struct fr_client_s fr_client_t;
 typedef struct fr_client_list_s fr_client_list_t;
 
@@ -70,6 +72,7 @@ typedef int (*client_value_cb_t)(char **out, CONF_PAIR const *cp, void *data);
 #include <freeradius-devel/server/socket.h>
 #include <freeradius-devel/server/stats.h>
 #include <freeradius-devel/util/inet.h>
+#include <freeradius-devel/radius/radius.h>
 
 /** Describes a host allowed to send packets to the server
  *
@@ -86,7 +89,32 @@ struct fr_client_s {
 
 	char const		*secret;		//!< Secret PSK.
 
-	bool			message_authenticator;	//!< Require RADIUS message authenticator in requests.
+	/** Require RADIUS message authenticator for incoming packets
+	 */
+	fr_radius_require_ma_t	require_message_authenticator;
+
+	/** Whether require_message_authenticator is set in the configuration.
+	 */
+	bool			require_message_authenticator_is_set;
+
+	/** Whether to allow Proxy-State in incoming packets that don't contain a message authenticator.
+	 *
+	 * If Proxy-State is included, but Message-Authenticator is not, then an
+	 * attacker can potentially forge responses.
+	 */
+	fr_radius_limit_proxy_state_t			limit_proxy_state;
+
+	/** Whether limit_proxy_state is set in the configuration.
+	 */
+	bool			limit_proxy_state_is_set;
+
+	bool			received_message_authenticator;	//!< Whether we've seen a message authenticator
+								///< from this client in any previous packets.
+
+	bool			seen_first_packet;		//!< Whether we've seen a packet from this client.
+	bool			first_packet_no_proxy_state;	//!< Whether that first packet contained a Proxy-State
+								///< attribute.
+
 	bool			dynamic;		//!< Whether the client was dynamically defined.
 	bool			active;			//!< for dynamic clients
 	bool			use_connected;		//!< do we use connected sockets for this client

@@ -47,8 +47,6 @@ RCSID("$Id$")
 #  include <getopt.h>
 #endif
 
-#include <ctype.h>
-
 #define EXIT_WITH_FAILURE \
 do { \
 	ret = EXIT_FAILURE; \
@@ -119,7 +117,7 @@ static fr_client_t *client_alloc(TALLOC_CTX *ctx, char const *ip, char const *na
 static void pair_mutable(fr_pair_t *vp)
 {
 	if (fr_type_is_leaf(vp->vp_type)) {
-		vp->data.immutable = false;
+		vp->vp_immutable = false;
 
 		return;
 	}
@@ -137,8 +135,8 @@ static request_t *request_from_internal(TALLOC_CTX *ctx)
 	 *	Create and initialize the new request.
 	 */
 	request = request_alloc_internal(ctx, NULL);
-	if (!request->packet) request->packet = fr_radius_packet_alloc(request, false);
-	if (!request->reply) request->reply = fr_radius_packet_alloc(request, false);
+	if (!request->packet) request->packet = fr_packet_alloc(request, false);
+	if (!request->reply) request->reply = fr_packet_alloc(request, false);
 
 	request->packet->socket = (fr_socket_t){
 		.type = SOCK_DGRAM,
@@ -209,14 +207,14 @@ static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, fr_client_t *clie
 		return NULL;
 	}
 
-	request->packet = fr_radius_packet_alloc(request, false);
+	request->packet = fr_packet_alloc(request, false);
 	if (!request->packet) {
 		fr_strerror_const("No memory");
 		goto error;
 	}
 	request->packet->timestamp = fr_time();
 
-	request->reply = fr_radius_packet_alloc(request, false);
+	request->reply = fr_packet_alloc(request, false);
 	if (!request->reply) {
 		fr_strerror_const("No memory");
 		goto error;
@@ -291,7 +289,7 @@ static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, fr_client_t *clie
 	vp = fr_pair_find_by_da(&request->request_pairs, NULL,  attr_packet_type);
 	if (vp) request->packet->code = vp->vp_uint32;
 
-	fr_packet_pairs_to_packet(request->packet, &request->request_pairs);
+	fr_packet_net_from_pairs(request->packet, &request->request_pairs);
 
 	/*
 	 *	The input might have updated only some of the Net.*
@@ -364,7 +362,7 @@ static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, fr_client_t *clie
 }
 
 
-static void print_packet(FILE *fp, fr_radius_packet_t *packet, fr_pair_list_t *list)
+static void print_packet(FILE *fp, fr_packet_t *packet, fr_pair_list_t *list)
 {
 	fr_dict_enum_value_t *dv;
 	fr_log_t log;
@@ -412,7 +410,7 @@ static bool do_xlats(fr_event_list_t *el, request_t *request, char const *filena
 	char		output_buff[8192];
 	char		unescaped[sizeof(output_buff)];
 	fr_sbuff_t	line;
-	fr_sbuff_t	out = FR_SBUFF_OUT(output_buff, sizeof(output_buff));
+	fr_sbuff_t	out;
 
 	static fr_sbuff_escape_rules_t unprintables = {
 		.name = "unprintables",
@@ -429,7 +427,6 @@ static bool do_xlats(fr_event_list_t *el, request_t *request, char const *filena
 		lineno++;
 
 		line = FR_SBUFF_IN(line_buff, sizeof(line_buff));
-		fr_sbuff_set_to_start(&out);
 		if (!fr_sbuff_adv_to_chr(&line, SIZE_MAX, '\n')) {
 			if (!feof(fp)) {
 				fprintf(stderr, "%s[%d] Line too long\n", filename, lineno);
@@ -506,7 +503,7 @@ static bool do_xlats(fr_event_list_t *el, request_t *request, char const *filena
 			if (len < 0) {
 				char const *err = fr_strerror();
 				talloc_free(xlat_ctx);
-				fr_sbuff_in_sprintf(&out, "ERROR expanding xlat: %s", *err ? err : "no error provided");
+				(void) fr_sbuff_in_sprintf(&out, "ERROR expanding xlat: %s", *err ? err : "no error provided");
 				continue;
 			}
 
@@ -555,7 +552,7 @@ static bool do_xlats(fr_event_list_t *el, request_t *request, char const *filena
 
 			if (xlat_resolve(head, NULL) < 0) {
 				talloc_free(xlat_ctx);
-				fr_sbuff_in_sprintf(&out, "ERROR resolving xlat: %s", fr_strerror());
+				(void) fr_sbuff_in_sprintf(&out, "ERROR resolving xlat: %s", fr_strerror());
 				continue;
 			}
 
@@ -586,7 +583,7 @@ static bool do_xlats(fr_event_list_t *el, request_t *request, char const *filena
 /*
  *	Verify the result of the map.
  */
-static int map_proc_verify(CONF_SECTION *cs, UNUSED void *mod_inst, UNUSED void *proc_inst,
+static int map_proc_verify(CONF_SECTION *cs, UNUSED void const *mod_inst, UNUSED void *proc_inst,
 			   tmpl_t const *src, UNUSED map_list_t const *maps)
 {
 	if (!src) {
@@ -598,7 +595,7 @@ static int map_proc_verify(CONF_SECTION *cs, UNUSED void *mod_inst, UNUSED void 
 	return 0;
 }
 
-static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, UNUSED void *mod_inst, UNUSED void *proc_inst,
+static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, UNUSED void const *mod_inst, UNUSED void *proc_inst,
 				    UNUSED request_t *request, UNUSED fr_value_box_list_t *src,
 				    UNUSED map_list_t const *maps)
 {
@@ -612,8 +609,8 @@ static request_t *request_clone(request_t *old, int number, CONF_SECTION *server
 	request = request_alloc_internal(NULL, NULL);
 	if (!request) return NULL;
 
-	if (!request->packet) request->packet = fr_radius_packet_alloc(request, false);
-	if (!request->reply) request->reply = fr_radius_packet_alloc(request, false);
+	if (!request->packet) request->packet = fr_packet_alloc(request, false);
+	if (!request->reply) request->reply = fr_packet_alloc(request, false);
 
 	memcpy(request->packet, old->packet, sizeof(*request->packet));
 	(void) fr_pair_list_copy(request->request_ctx, &request->request_pairs, &old->request_pairs);
@@ -672,7 +669,7 @@ int main(int argc, char *argv[])
 	size_t			memory_used_before = 0;
 	size_t			memory_used_after = 0;
 #endif
-
+	virtual_server_t const	*vs;
 
 	fr_pair_list_init(&filter_vps);
 
@@ -882,7 +879,7 @@ int main(int argc, char *argv[])
 		EXIT_WITH_FAILURE;
 	}
 
-	if (map_proc_register(NULL, "test-fail", mod_map_proc, map_proc_verify, 0, 0) < 0) {
+	if (map_proc_register(NULL, NULL, "test-fail", mod_map_proc, map_proc_verify, 0, 0) < 0) {
 		EXIT_WITH_FAILURE;
 	}
 
@@ -929,19 +926,21 @@ int main(int argc, char *argv[])
 		client_add(NULL, client);
 	}
 
-	if (server_init(config->root_cs) < 0) EXIT_WITH_FAILURE;
+	if (server_init(config->root_cs, config->raddb_dir, dict) < 0) EXIT_WITH_FAILURE;
 
-	server_cs = virtual_server_find("default");
-	if (!server_cs) {
+	vs = virtual_server_find("default");
+	if (!vs) {
 		ERROR("Cannot find virtual server 'default'");
 		EXIT_WITH_FAILURE;
 	}
+
+	server_cs = virtual_server_cs(vs);
 
 	/*
 	 *	Do some sanity checking.
 	 */
 	dict_check = virtual_server_dict_by_name("default");
-	if (!dict_check || (dict_check != dict_protocol)) {
+	if (!dict_check || !fr_dict_compatible(dict_check, dict_protocol)) {
 		ERROR("Virtual server namespace does not match requested namespace '%s'", PROTOCOL_NAME);
 		EXIT_WITH_FAILURE;
 	}
@@ -1148,7 +1147,7 @@ int main(int argc, char *argv[])
 
 
 		if (!fr_pair_validate(failed, &filter_vps, &request->reply_pairs)) {
-			fr_pair_validate_debug(request, failed);
+			fr_pair_validate_debug(failed);
 			fr_perror("Output file %s does not match attributes in filter %s",
 				  output_file ? output_file : "-", filter_file);
 			ret = EXIT_FAILURE;
@@ -1171,6 +1170,8 @@ cleanup:
 		       memory_used_after, memory_used_before, memory_used_after - memory_used_before);
 	}
 #endif
+
+	map_proc_unregister("test-fail");
 
 	/*
 	 *	Free thread data
@@ -1204,11 +1205,6 @@ cleanup:
 	fr_atexit_thread_trigger_all();
 
 	server_free();
-
-	/*
-	 *	Free any resources used by the unlang interpreter.
-	 */
-	unlang_global_free();
 
 	/*
 	 *	Virtual servers need to be freed before modules

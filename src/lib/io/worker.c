@@ -46,6 +46,7 @@
  *
  * @copyright 2016 Alan DeKok (aland@freeradius.org)
  */
+
 RCSID("$Id$")
 
 #define LOG_PREFIX worker->name
@@ -54,11 +55,12 @@ RCSID("$Id$")
 #include <freeradius-devel/io/channel.h>
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/io/message.h>
-#include <freeradius-devel/io/time_tracking.h>
 #include <freeradius-devel/io/worker.h>
 #include <freeradius-devel/unlang/base.h>
 #include <freeradius-devel/unlang/call.h>
 #include <freeradius-devel/unlang/interpret.h>
+#include <freeradius-devel/server/request.h>
+#include <freeradius-devel/server/time_tracking.h>
 #include <freeradius-devel/util/dlist.h>
 #include <freeradius-devel/util/minmax_heap.h>
 
@@ -532,7 +534,7 @@ static void worker_max_request_time(UNUSED fr_event_list_t *el, UNUSED fr_time_t
 	 *	Look at the oldest requests, and see if they need to
 	 *	be deleted.
 	 */
-	while ((request = fr_minmax_heap_max_pop(worker->time_order)) != NULL) {
+	while ((request = fr_minmax_heap_min_peek(worker->time_order)) != NULL) {
 		fr_time_t cleanup;
 
 		REQUEST_VERIFY(request);
@@ -544,6 +546,7 @@ static void worker_max_request_time(UNUSED fr_event_list_t *el, UNUSED fr_time_t
 		 *	Waiting too long, delete it.
 		 */
 		REDEBUG("Request has reached max_request_time - signalling it to stop");
+		(void) fr_minmax_heap_extract(worker->time_order, request);
 		worker_stop_request(&request);
 	}
 
@@ -595,6 +598,7 @@ static void worker_request_time_tracking_start(fr_worker_t *worker, request_t *r
 	 *	Bootstrap the async state machine with the initial
 	 *	state of the request.
 	 */
+	RDEBUG3("Time tracking started in yielded state");
 	fr_time_tracking_start(&worker->tracking, &request->async->tracking, now);
 	fr_time_tracking_yield(&request->async->tracking, now);
 	worker->num_active++;
@@ -607,6 +611,7 @@ static void worker_request_time_tracking_start(fr_worker_t *worker, request_t *r
 
 static void worker_request_time_tracking_end(fr_worker_t *worker, request_t *request, fr_time_t now)
 {
+	RDEBUG3("Time tracking ended");
 	fr_time_tracking_end(&worker->predicted, &request->async->tracking, now);
 	fr_assert(worker->num_active > 0);
 	worker->num_active--;
@@ -775,8 +780,8 @@ void worker_request_init(fr_worker_t *worker, request_t *request, fr_time_t now)
 	 *	For internal requests request->packet
 	 *	and request->reply are already populated.
 	 */
-	if (!request->packet) MEM(request->packet = fr_radius_packet_alloc(request, false));
-	if (!request->reply) MEM(request->reply = fr_radius_packet_alloc(request, false));
+	if (!request->packet) MEM(request->packet = fr_packet_alloc(request, false));
+	if (!request->reply) MEM(request->reply = fr_packet_alloc(request, false));
 
 	request->packet->timestamp = now;
 	request->async = talloc_zero(request, fr_async_t);
@@ -830,6 +835,7 @@ static void worker_request_bootstrap(fr_worker_t *worker, fr_channel_data_t *cd,
 
 	request->async->listen = cd->listen;
 	request->async->packet_ctx = cd->packet_ctx;
+	request->async->priority = cd->priority;
 	listen = request->async->listen;
 
 	/*
@@ -951,13 +957,14 @@ nak:
 
 /**
  *  Track a request_t in the "runnable" heap.
+ *  Higher priorities take precedence, followed by lower sequence numbers
  */
 static int8_t worker_runnable_cmp(void const *one, void const *two)
 {
 	request_t const *a = one, *b = two;
 	int ret;
 
-	ret = CMP(a->async->priority, b->async->priority);
+	ret = CMP(b->async->priority, a->async->priority);
 	if (ret != 0) return ret;
 
 	ret = CMP(a->async->sequence, b->async->sequence);
@@ -1104,8 +1111,8 @@ static void _worker_request_done_external(request_t *request, UNUSED rlm_rcode_t
 	 *	@todo - check that the stack is at frame 0, otherwise
 	 *	more things have gone wrong.
 	 */
-	fr_assert_msg(request_is_internal(request) || request_is_detached(request) || (request->log.unlang_indent == 0),
-		      "Request %s bad log indentation - expected 0 got %u", request->name, request->log.unlang_indent);
+	fr_assert_msg(request_is_internal(request) || request_is_detached(request) || (request->log.indent.unlang == 0),
+		      "Request %s bad log indentation - expected 0 got %u", request->name, request->log.indent.unlang);
 	fr_assert_msg(!unlang_interpret_is_resumable(request),
 		      "Request %s is marked as yielded at end of processing", request->name);
 	fr_assert_msg(unlang_interpret_stack_depth(request) == 0,
@@ -1195,19 +1202,28 @@ static void _worker_request_done_detached(request_t *request, UNUSED rlm_rcode_t
 /** Make us responsible for running the request
  *
  */
-static void _worker_request_detach(request_t *request, UNUSED void *uctx)
+static void _worker_request_detach(request_t *request, void *uctx)
 {
-//	fr_worker_t	*worker = talloc_get_type_abort(uctx, fr_worker_t);
+	fr_worker_t	*worker = talloc_get_type_abort(uctx, fr_worker_t);
 
-	RDEBUG3("Request is detached");
-	fr_assert(request_is_detached(request));
+	if (request_is_detachable(request)) {
+		/*
+		*	End the time tracking...  We don't track detached requests,
+		*	because they don't contribute for the time consumed by an
+		*	external request.
+		*/
+		if (request->async->tracking.state == FR_TIME_TRACKING_YIELDED) {
+			RDEBUG3("Forcing time tracking to running state, from yielded, for request detach");
+			fr_time_tracking_resume(&request->async->tracking, fr_time());
+		}
+		worker_request_time_tracking_end(worker, request, fr_time());
 
-	/*
-	 *	End the time tracking...  We don't track detached requests,
-	 *	because they don't contribute for the time consumed by an
-	 *	external request.
-	 */
-//	worker_request_time_tracking_end(worker, request, fr_time());
+		if (request_detach(request) < 0) RPEDEBUG("Failed detaching request");
+
+		RDEBUG3("Request is detached");
+	} else {
+		fr_assert_msg(0, "Request is not detachable");
+	}
 
 	return;
 }
@@ -1229,6 +1245,7 @@ static void _worker_request_stop(request_t *request, void *uctx)
 	 *	as done.
 	 */
 	if (request->async->tracking.state == FR_TIME_TRACKING_YIELDED) {
+		RDEBUG3("Forcing time tracking to running state, from yielded, for request stop");
 		fr_time_tracking_resume(&request->async->tracking, fr_time());
 	}
 
@@ -1498,14 +1515,14 @@ void fr_worker(fr_worker_t *worker)
 		 *	Check the event list.  If there's an error
 		 *	(e.g. exit), we stop looping and clean up.
 		 */
-		DEBUG3("Gathering events - %s", wait_for_event ? "will wait" : "Will not wait");
+		DEBUG4("Gathering events - %s", wait_for_event ? "will wait" : "Will not wait");
 		num_events = fr_event_corral(worker->el, fr_time(), wait_for_event);
 		if (num_events < 0) {
 			PERROR("Failed retrieving events");
 			break;
 		}
 
-		DEBUG3("%u event(s) pending%s",
+		DEBUG4("%u event(s) pending%s",
 		       num_events == -1 ? 0 : num_events, num_events == -1 ? " - event loop exiting" : "");
 
 		/*

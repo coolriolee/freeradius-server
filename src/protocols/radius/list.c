@@ -42,7 +42,7 @@ RCSID("$Id$")
  */
 int8_t fr_packet_cmp(void const *a_v, void const *b_v)
 {
-	fr_radius_packet_t const *a = a_v, *b = b_v;
+	fr_packet_t const *a = a_v, *b = b_v;
 	int8_t ret;
 
 	/*
@@ -69,8 +69,8 @@ int8_t fr_packet_cmp(void const *a_v, void const *b_v)
 /*
  *	Create a fake "request" from a reply, for later lookup.
  */
-void fr_request_from_reply(fr_radius_packet_t *request,
-			   fr_radius_packet_t const *reply)
+void fr_request_from_reply(fr_packet_t *request,
+			   fr_packet_t const *reply)
 {
 	fr_socket_addr_swap(&request->socket, &reply->socket);
 	request->id = reply->id;
@@ -280,7 +280,7 @@ fr_packet_list_t *fr_packet_list_create(int alloc_id)
 
 	pl = talloc_zero(NULL, fr_packet_list_t);
 	if (!pl) return NULL;
-	pl->tree = fr_rb_inline_alloc(pl, fr_radius_packet_t, node, fr_packet_cmp, NULL);	/* elements not talloc safe */
+	pl->tree = fr_rb_inline_alloc(pl, fr_packet_t, node, fr_packet_cmp, NULL);	/* elements not talloc safe */
 	if (!pl->tree) {
 		fr_packet_list_free(pl);
 		return NULL;
@@ -301,14 +301,14 @@ fr_packet_list_t *fr_packet_list_create(int alloc_id)
  *	be called before inserting the packet into the list!
  */
 bool fr_packet_list_insert(fr_packet_list_t *pl,
-			    fr_radius_packet_t *request)
+			    fr_packet_t *request)
 {
 	if (!pl || !request) return 0;
 
 	return fr_rb_insert(pl->tree, request);
 }
 
-fr_radius_packet_t *fr_packet_list_find(fr_packet_list_t *pl, fr_radius_packet_t *request)
+fr_packet_t *fr_packet_list_find(fr_packet_list_t *pl, fr_packet_t *request)
 {
 	if (!pl || !request) return 0;
 
@@ -320,9 +320,9 @@ fr_radius_packet_t *fr_packet_list_find(fr_packet_list_t *pl, fr_radius_packet_t
  *	This presumes that the reply has dst_ipaddr && dst_port set up
  *	correctly (i.e. real IP, or "*").
  */
-fr_radius_packet_t *fr_packet_list_find_byreply(fr_packet_list_t *pl, fr_radius_packet_t *reply)
+fr_packet_t *fr_packet_list_find_byreply(fr_packet_list_t *pl, fr_packet_t *reply)
 {
-	fr_radius_packet_t my_request, *request;
+	fr_packet_t my_request, *request;
 	fr_packet_socket_t *ps;
 
 	if (!pl || !reply) return NULL;
@@ -358,7 +358,7 @@ fr_radius_packet_t *fr_packet_list_find_byreply(fr_packet_list_t *pl, fr_radius_
 }
 
 
-bool fr_packet_list_yank(fr_packet_list_t *pl, fr_radius_packet_t *request)
+bool fr_packet_list_yank(fr_packet_list_t *pl, fr_packet_t *request)
 {
 	if (!pl || !request) return false;
 
@@ -393,7 +393,7 @@ uint32_t fr_packet_list_num_elements(fr_packet_list_t *pl)
  *	should be used.
  */
 bool fr_packet_list_id_alloc(fr_packet_list_t *pl, int proto,
-			    fr_radius_packet_t *request, void **pctx)
+			    fr_packet_t *request, void **pctx)
 {
 	int i, j, k, fd, id, start_i, start_j, start_k;
 	int src_any = 0;
@@ -619,7 +619,7 @@ bool fr_packet_list_id_alloc(fr_packet_list_t *pl, int proto,
  *	any newly inserted entries don't collide with this one.
  */
 bool fr_packet_list_id_free(fr_packet_list_t *pl,
-			    fr_radius_packet_t *request, bool yank)
+			    fr_packet_t *request, bool yank)
 {
 	fr_packet_socket_t *ps;
 
@@ -669,10 +669,10 @@ int fr_packet_list_fd_set(fr_packet_list_t *pl, fd_set *set)
  *	FIXME: Add socket.fd, if -1, do round-robin, else do socket.fd
  *		IF in fdset.
  */
-fr_radius_packet_t *fr_packet_list_recv(fr_packet_list_t *pl, fd_set *set, uint32_t max_attributes, bool require_ma)
+fr_packet_t *fr_packet_list_recv(fr_packet_list_t *pl, fd_set *set, uint32_t max_attributes, bool require_message_authenticator)
 {
 	int start;
-	fr_radius_packet_t *packet;
+	fr_packet_t *packet;
 
 	if (!pl || !set) return NULL;
 
@@ -688,8 +688,8 @@ fr_radius_packet_t *fr_packet_list_recv(fr_packet_list_t *pl, fd_set *set, uint3
 		if (pl->sockets[start].socket.type == SOCK_STREAM) {
 			packet = fr_tcp_recv(pl->sockets[start].socket.fd, false);
 		} else
-			packet = fr_radius_packet_recv(NULL, pl->sockets[start].socket.fd, UDP_FLAGS_NONE,
-						       max_attributes, require_ma);
+			packet = fr_packet_recv(NULL, pl->sockets[start].socket.fd, UDP_FLAGS_NONE,
+						       max_attributes, require_message_authenticator);
 		if (!packet) continue;
 
 		/*
@@ -722,87 +722,4 @@ uint32_t fr_packet_list_num_outgoing(fr_packet_list_t *pl)
 	if (!pl) return 0;
 
 	return pl->num_outgoing;
-}
-
-/*
- *	Debug the packet if requested.
- */
-void fr_packet_header_log(fr_log_t const *log, fr_radius_packet_t *packet, bool received)
-{
-	char src_ipaddr[FR_IPADDR_STRLEN];
-	char dst_ipaddr[FR_IPADDR_STRLEN];
-#ifdef WITH_IFINDEX_NAME_RESOLUTION
-	char if_name[IFNAMSIZ];
-#endif
-
-	if (!log) return;
-	if (!packet) return;
-
-	/*
-	 *	Client-specific debugging re-prints the input
-	 *	packet into the client log.
-	 *
-	 *	This really belongs in a utility library
-	 */
-	if (FR_RADIUS_PACKET_CODE_VALID(packet->code)) {
-		fr_log(log, L_DBG, __FILE__, __LINE__,
-		       "%s %s Id %i from %s%s%s:%i to %s%s%s:%i "
-#ifdef WITH_IFINDEX_NAME_RESOLUTION
-		       "%s%s%s"
-#endif
-		       "length %zu\n",
-		        received ? "Received" : "Sent",
-		        fr_radius_packet_names[packet->code],
-		        packet->id,
-		        packet->socket.inet.src_ipaddr.af == AF_INET6 ? "[" : "",
-			fr_inet_ntop(src_ipaddr, sizeof(src_ipaddr), &packet->socket.inet.src_ipaddr),
-			packet->socket.inet.src_ipaddr.af == AF_INET6 ? "]" : "",
-		        packet->socket.inet.src_port,
-		        packet->socket.inet.dst_ipaddr.af == AF_INET6 ? "[" : "",
-			fr_inet_ntop(dst_ipaddr, sizeof(dst_ipaddr), &packet->socket.inet.dst_ipaddr),
-		        packet->socket.inet.dst_ipaddr.af == AF_INET6 ? "]" : "",
-		        packet->socket.inet.dst_port,
-#ifdef WITH_IFINDEX_NAME_RESOLUTION
-			received ? "via " : "",
-			received ? fr_ifname_from_ifindex(if_name, packet->socket.inet.ifindex) : "",
-			received ? " " : "",
-#endif
-			packet->data_len);
-	} else {
-		fr_log(log, L_DBG, __FILE__, __LINE__,
-		       "%s code %u Id %i from %s%s%s:%i to %s%s%s:%i "
-#ifdef WITH_IFINDEX_NAME_RESOLUTION
-		       "%s%s%s"
-#endif
-		       "length %zu\n",
-		        received ? "Received" : "Sent",
-		        packet->code,
-		        packet->id,
-		        packet->socket.inet.src_ipaddr.af == AF_INET6 ? "[" : "",
-			fr_inet_ntop(src_ipaddr, sizeof(src_ipaddr), &packet->socket.inet.src_ipaddr),
-		        packet->socket.inet.src_ipaddr.af == AF_INET6 ? "]" : "",
-		        packet->socket.inet.src_port,
-		        packet->socket.inet.dst_ipaddr.af == AF_INET6 ? "[" : "",
-			fr_inet_ntop(dst_ipaddr, sizeof(dst_ipaddr), &packet->socket.inet.dst_ipaddr),
-		        packet->socket.inet.dst_ipaddr.af == AF_INET6 ? "]" : "",
-		        packet->socket.inet.dst_port,
-#ifdef WITH_IFINDEX_NAME_RESOLUTION
-			received ? "via " : "",
-			received ? fr_ifname_from_ifindex(if_name, packet->socket.inet.ifindex) : "",
-			received ? " " : "",
-#endif
-		        packet->data_len);
-	}
-}
-
-/*
- *	Debug the packet header and all attributes
- */
-void fr_packet_log(fr_log_t const *log, fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
-{
-	fr_packet_header_log(log, packet, received);
-	if (fr_debug_lvl >= L_DBG_LVL_1) fr_pair_list_log(log, 4, list);
-#ifndef NDEBUG
-	if (fr_debug_lvl >= L_DBG_LVL_4) fr_radius_packet_log_hex(log, packet);
-#endif
 }

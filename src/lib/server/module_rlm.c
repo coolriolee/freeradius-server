@@ -21,7 +21,7 @@
  * @brief Defines functions for rlm module (re-)initialisation.
  *
  * @copyright 2003,2006,2016 The FreeRADIUS server project
- * @copyright 2016 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
+ * @copyright 2016,2024 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
  * @copyright 2000 Alan DeKok (aland@freeradius.org)
  * @copyright 2000 Alan Curry (pacman@world.std.com)
  */
@@ -29,14 +29,33 @@
 RCSID("$Id$")
 
 #include <freeradius-devel/server/cf_file.h>
+#include <freeradius-devel/server/cf_util.h>
+
 #include <freeradius-devel/server/global_lib.h>
 #include <freeradius-devel/server/modpriv.h>
+#include <freeradius-devel/server/module.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/server/pair.h>
+#include <freeradius-devel/server/section.h>
+#include <freeradius-devel/server/tmpl.h>
 #include <freeradius-devel/server/virtual_servers.h>
+
 #include <freeradius-devel/util/atexit.h>
+#include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/util/dlist.h>
+#include <freeradius-devel/util/rb.h>
+#include <freeradius-devel/util/sbuff.h>
+#include <freeradius-devel/util/strerror.h>
+#include <freeradius-devel/util/talloc.h>
+#include <freeradius-devel/util/token.h>
+#include <freeradius-devel/util/value.h>
+
+#include <freeradius-devel/unlang/compile.h>
+
 #include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/unlang/xlat_redundant.h>
+
+#include <pthread.h>
 
 /** Lookup virtual module by name
  */
@@ -61,18 +80,23 @@ static int8_t module_rlm_virtual_name_cmp(void const *one, void const *two)
 	return CMP(ret, 0);
 }
 
-char const *section_type_value[MOD_COUNT] = {
-	"authenticate",
-	"authorize",
-	"preacct",
-	"accounting",
-	"post-auth"
-};
-
 /** Global module list for all backend modules
  *
  */
-static module_list_t *rlm_modules;
+static module_list_t *rlm_modules_static;
+
+/** Runtime instantiated list
+ *
+ */
+static module_list_t *rlm_modules_dynamic;
+
+/** Print information on all loaded modules
+ *
+ */
+void module_rlm_list_debug(void)
+{
+	module_list_debug(rlm_modules_static);
+}
 
 /** Initialise a module specific exfile handle
  *
@@ -184,7 +208,7 @@ int module_rlm_sibling_section_find(CONF_SECTION **out, CONF_SECTION *module, ch
 	 *	instantiation order issues.
 	 */
 	inst_name = cf_pair_value(cp);
-	mi = module_by_name(rlm_modules, NULL, inst_name);
+	mi = module_instance_by_name(rlm_modules_static, NULL, inst_name);
 	if (!mi) {
 		cf_log_err(cp, "Unknown module instance \"%s\"", inst_name);
 
@@ -206,7 +230,7 @@ int module_rlm_sibling_section_find(CONF_SECTION **out, CONF_SECTION *module, ch
 			parent = tmp;
 		} while (true);
 
-		if (unlikely(module_instantiate(module_by_name(rlm_modules, NULL, inst_name)) < 0)) return -1;
+		if (unlikely(module_instantiate(module_instance_by_name(rlm_modules_static, NULL, inst_name)) < 0)) return -1;
 	}
 
 	/*
@@ -218,16 +242,52 @@ int module_rlm_sibling_section_find(CONF_SECTION **out, CONF_SECTION *module, ch
 	/*
 	 *	Check the module instances are of the same type.
 	 */
-	if (strcmp(cf_section_name1(mi->dl_inst->conf), cf_section_name1(module)) != 0) {
+	if (strcmp(cf_section_name1(mi->conf), cf_section_name1(module)) != 0) {
 		cf_log_err(cp, "Referenced module is a rlm_%s instance, must be a rlm_%s instance",
-			      cf_section_name1(mi->dl_inst->conf), cf_section_name1(module));
+			      cf_section_name1(mi->conf), cf_section_name1(module));
 
 		return -1;
 	}
 
-	*out = cf_section_find(mi->dl_inst->conf, name, NULL);
+	*out = cf_section_find(mi->conf, name, NULL);
 
 	return 1;
+}
+
+xlat_t *module_rlm_xlat_register(TALLOC_CTX *ctx, module_inst_ctx_t const *mctx,
+				 char const *name, xlat_func_t func, fr_type_t return_type)
+{
+	module_instance_t	*mi = mctx->mi;
+	module_rlm_instance_t	*mri = talloc_get_type_abort(mi->uctx, module_rlm_instance_t);
+	module_rlm_xlat_t	*mrx;
+	xlat_t			*x;
+	char 			inst_name[256];
+
+	fr_assert_msg(name != mctx->mi->name, "`name` must not be the same as the module "
+		      "instance name.  Pass a NULL `name` arg if this is required");
+
+	if (!name) {
+		name = mctx->mi->name;
+	} else {
+		if ((size_t)snprintf(inst_name, sizeof(inst_name), "%s.%s", mctx->mi->name, name) >= sizeof(inst_name)) {
+			ERROR("%s: Instance name too long", __FUNCTION__);
+			return NULL;
+		}
+		name = inst_name;
+	}
+
+	x = xlat_func_register(ctx, name, func, return_type);
+	if (unlikely(x == NULL)) return NULL;
+
+	xlat_mctx_set(x, mctx);
+
+	MEM(mrx = talloc(mi, module_rlm_xlat_t));
+	mrx->xlat = x;
+	mrx->mi = mi;
+
+	fr_dlist_insert_tail(&mri->xlats, mrx);
+
+	return x;
 }
 
 /** Initialise a module specific connection pool
@@ -358,36 +418,6 @@ fr_pool_t *module_rlm_connection_pool_init(CONF_SECTION *module,
 	return pool;
 }
 
-/*
- *	Convert a string to an integer
- */
-module_method_t module_rlm_state_str_to_method(module_state_func_table_t const *table,
-					       char const *name, module_method_t def)
-{
-	module_state_func_table_t const *this;
-
-	if (!name) return def;
-
-	for (this = table; this->name != NULL; this++) {
-		if (strcasecmp(this->name, name) == 0) return this->func;
-	}
-
-	return def;
-}
-
-/*
- *	Convert an integer to a string.
- */
-char const *module_rlm_state_method_to_str(module_state_func_table_t const *table,
-					   module_method_t method, char const *def)
-{
-	module_state_func_table_t const *this;
-
-	for (this = table; this->name != NULL; this++) if (this->func == method) return this->name;
-
-	return def;
-}
-
 /** Set the next section type if it's not already set
  *
  * @param[in] request		The current request.
@@ -414,364 +444,370 @@ bool module_rlm_section_type_set(request_t *request, fr_dict_attr_t const *type_
 	}
 }
 
+/** Iterate over an array of named module methods, looking for matches
+ *
+ * @param[in] mmg		A structure containing a terminated array of
+ *				module method bindings. pre-sorted using #section_name_cmp
+ *				with name2 sublists populated.
+ * @param[in] section		name1 of the method being called can be one of the following:
+ *				- An itenfier.
+ *				- CF_IDENT_ANY if the method is a wildcard.
+ *				name2 of the method being called can be one of the following:
+ *				- An itenfier.
+ *				- NULL to match section names with only a name1.
+ *				- CF_IDENT_ANY if the method is a wildcard.
+ * @return
+ *	- The module_method_name_t on success.
+ *	- NULL on not found.
+ */
+static CC_HINT(nonnull)
+module_method_binding_t const *module_binding_find(module_method_group_t const *mmg, section_name_t const *section)
+{
+	module_method_group_t const *mmg_p = mmg;
+	module_method_binding_t const *p;
+
+	while (mmg_p) {
+		/*
+		 *	This could potentially be improved by using a binary search
+		 *	but given the small number of items, reduced branches and
+		 *	sequential access just scanning the list, it's probably not
+		 *	worth it.
+		 */
+		for (p = mmg_p->bindings; p->section; p++) {
+			switch (section_name_match(p->section, section)) {
+			case 1:		/* match */
+				return p;
+
+			case -1:	/* name1 didn't match, skip to the end of the sub-list */
+				p = fr_dlist_tail(&p->same_name1);
+				break;
+
+			case 0:		/* name1 did match - see if we can find a matching name2 */
+			{
+				fr_dlist_head_t const *same_name1 = &p->same_name1;
+
+				while ((p = fr_dlist_next(same_name1, p))) {
+					if (section_name2_match(p->section, section)) return p;
+				}
+				p = fr_dlist_tail(same_name1);
+			}
+				break;
+			}
+#ifdef __clang_analyzer__
+			/* Will never be NULL, worse case, p doesn't change*/
+			if (!p) break;
+#endif
+		}
+
+		/*
+		 *	Failed to match, search the next deepest group in the chain.
+		 */
+		mmg_p = mmg_p->next;
+	}
+
+	return NULL;
+}
+
+/** Dump the available bindings for the module into the strerror stack
+ *
+ * @note Methods from _all_ linked module method groups will be pushed onto the error stack.
+ *
+ * @param[in] mmg	module method group to evaluate.
+ */
+static void module_rlm_methods_to_strerror(module_method_group_t const *mmg)
+{
+	module_method_group_t const	*mmg_p = mmg;
+	module_method_binding_t const	*mmb_p;
+	bool				first = true;
+
+	while (mmg_p) {
+		mmb_p = mmg_p->bindings;
+
+		if (!mmb_p || !mmb_p[0].section) goto next;
+
+		if (first) {
+			fr_strerror_const_push("Available methods are:");
+			first = false;
+		}
+
+		for (; mmb_p->section; mmb_p++) {
+			char const *name1 = section_name_str(mmb_p->section->name1);
+			char const *name2 = section_name_str(mmb_p->section->name2);
+
+			fr_strerror_printf_push("  %s%s%s",
+						name1, name2 ? "." : "", name2 ? name2 : "");
+		}
+	next:
+		mmg_p = mmg_p->next;
+	}
+
+	if (first) {
+		fr_strerror_const_push("No methods available");
+	}
+}
+
 /** Find an existing module instance and verify it implements the specified method
  *
- * Extracts the method from the module name where the format is @verbatim <module>.<method> @endverbatim
+ * Extracts the method from the module name where the format is @verbatim <module>[.<method1>[.<method2>]] @endverbatim
  * and ensures the module implements the specified method.
  *
- * @param[out] method		the method function we will call
- * @param[out] method_env	the module_call_env to evaluate when compiling the method.
- * @param[out] name1		name1 of the method being called
- * @param[out] name2		name2 of the method being called
- * @param[in] name 		The name of the module we're attempting to find, possibly concatenated with the method
+ * @param[in] ctx		to allocate the dynamic module key tmpl from.
+ * @param[out] mmc_out		the result from resolving the module method,
+ *				plus the key tmpl for dynamic modules.
+ *				This is not allocated from the ctx to save the runtime
+ *				dereference.
+ * @param[in] vs		Virtual server to search for alternative module names in.
+ * @param[in] section		Section name containing the module call.
+ * @param[in] name 		The module method call i.e. module[<key>][.<method>]
+ * @param[in] t_rules		for resolving the dynamic module key.
  * @return
  *	- The module instance on success.
  *	- NULL on not found
  *
  *  If the module exists but the method doesn't exist, then `method` is set to NULL.
  */
-module_instance_t *module_rlm_by_name_and_method(module_method_t *method, call_env_method_t const **method_env,
-						 char const **name1, char const **name2,
-						 char const *name)
+fr_slen_t module_rlm_by_name_and_method(TALLOC_CTX *ctx, module_method_call_t *mmc_out,
+				        virtual_server_t const *vs, section_name_t const *section, fr_sbuff_t *name,
+					tmpl_rules_t const *t_rules)
 {
-	char				*p, *q, *inst_name;
-	size_t				len;
-	int				j;
-	module_instance_t		*mi;
-	module_method_name_t const	*methods;
-	char const			*method_name1, *method_name2;
-	module_rlm_t const		*mrlm;
+	fr_sbuff_term_t const		*dyn_tt = &FR_SBUFF_TERMS(
+						L(""),
+						L("\t"),
+						L("\n"),
+						L(" "),
+						L("[")
+					);
 
-	if (method) *method = NULL;
+	fr_sbuff_term_t const		*elem_tt = &FR_SBUFF_TERMS(
+						L(""),
+						L("\t"),
+						L("\n"),
+						L(" "),
+						L(".")
+					);
 
-	method_name1 = method_name2 = NULL;
-	if (name1) {
-		method_name1 = *name1;
-		*name1 = NULL;
-	}
-	if (name2) {
-		method_name2 = *name2;
-		*name2 = NULL;
-	}
+	fr_sbuff_t			*elem1;
+	module_method_call_t		*mmc;
+	module_method_call_t		mmc_tmp;
+	module_method_binding_t const	*mmb;
+
+	fr_sbuff_marker_t		meth_start;
+
+	fr_slen_t			slen;
+	fr_sbuff_t 			our_name = FR_SBUFF(name);
+
+	mmc = mmc_out ? mmc_out : &mmc_tmp;
+	if (mmc_out) memset(mmc_out, 0, sizeof(*mmc_out));
 
 	/*
-	 *	Module names are allowed to contain '.'
-	 *	so we search for the bare module name first.
+	 *	Advance until the start of the dynamic selector
+	 *	(if it exists).
 	 */
-	mi = module_by_name(rlm_modules, NULL, name);
-	if (mi) {
-		virtual_server_method_t const	*allowed_list;
-
-		if (!method) return mi;
-
-		mrlm = module_rlm_from_module(mi->module);
-
-		/*
-		 *	We're not searching for a named method, OR the
-		 *	module has no named methods.  Try to return a
-		 *	method based on the component.
-		 */
-		if (!method_name1 || !mrlm->method_names) goto return_component;
-
-		/*
-		 *	Walk through the module, finding a matching
-		 *	method.
-		 */
-		for (j = 0; mrlm->method_names[j].name1 != NULL; j++) {
-			methods = &mrlm->method_names[j];
-
-			/*
-			 *	Wildcard match name1, we're
-			 *	done.
-			 */
-			if (methods->name1 == CF_IDENT_ANY) {
-			found:
-				*method = methods->method;
-				if (method_env) *method_env = methods->method_env;
-				if (name1) *name1 = method_name1;
-				if (name2) *name2 = method_name2;
-				return mi;
-			}
-
-			/*
-			 *	If name1 doesn't match, skip it.
-			 */
-			if (strcasecmp(methods->name1, method_name1) != 0) continue;
-
-			/*
-			 *	The module can declare a
-			 *	wildcard for name2, in which
-			 *	case it's a match.
-			 */
-			if (methods->name2 == CF_IDENT_ANY) goto found;
-
-			/*
-			 *	No name2 is also a match to no name2.
-			 */
-			if (!methods->name2 && !method_name2) goto found;
-
-			/*
-			 *	Don't do strcmp on NULLs
-			 */
-			if (!methods->name2 || !method_name2) continue;
-
-			if (strcasecmp(methods->name2, method_name2) == 0) goto found;
-		}
-
-		/*
-		 *	No match for "recv Access-Request", or
-		 *	whatever else the section is.  Let's see if
-		 *	the section has a list of allowed methods.
-		 */
-		allowed_list = virtual_server_section_methods(method_name1, method_name2);
-		if (!allowed_list) goto return_component;
-
-		/*
-		 *	Walk over allowed methods for this section,
-		 *	(implicitly ordered by priority), and see if
-		 *	the allowed method matches any of the module
-		 *	methods.  This process lets us reference a
-		 *	module as "foo" in the configuration.  If the
-		 *	module exports a "recv bar" method, and the
-		 *	virtual server has a "recv bar" processing
-		 *	section, then they should match.
-		 *
-		 *	Unfortunately, this process is O(N*M).
-		 *	Luckily, we only do it if all else fails, so
-		 *	it's mostly OK.
-		 *
-		 *	Note that the "allowed" list CANNOT include
-		 *	CF_IDENT_ANY.  Only the module can do that.
-		 *	If the "allowed" list exported CF_IDENT_ANY,
-		 *	then any module method would match, which is
-		 *	bad.
-		 */
-		for (j = 0; allowed_list[j].name != NULL; j++) {
-			int k;
-			virtual_server_method_t const *allowed = &allowed_list[j];
-
-			for (k = 0; mrlm->method_names[k].name1 != NULL; k++) {
-				methods = &mrlm->method_names[k];
-
-				fr_assert(methods->name1 != CF_IDENT_ANY); /* should have been caught above */
-
-				if (strcasecmp(methods->name1, allowed->name) != 0) continue;
-
-				/*
-				 *	The module matches "recv *",
-				 *	call this method.
-				 */
-				if (methods->name2 == CF_IDENT_ANY) {
-				found_allowed:
-					*method = methods->method;
-					return mi;
-				}
-
-				/*
-				 *	No name2 is also a match to no name2.
-				 */
-				if (!methods->name2 && !allowed->name2) goto found_allowed;
-
-				/*
-				 *	Don't do strcasecmp on NULLs
-				 */
-				if (!methods->name2 || !allowed->name2) continue;
-
-				if (strcasecmp(methods->name2, allowed->name2) == 0) goto found_allowed;
-			}
-		}
-
-	return_component:
-		/*
-		 *	Didn't find a matching method.  Just return
-		 *	the module.
-		 */
-		return mi;
+	if (fr_sbuff_adv_until(&our_name, SIZE_MAX, dyn_tt, '\0') == 0) {
+		fr_strerror_printf("Invalid module method name");
+		return fr_sbuff_error(&our_name);
 	}
 
-	/*
-	 *	Find out if the instance name contains
-	 *	a method, if it doesn't, then the module
-	 *	doesn't exist.
-	 */
-	p = strchr(name, '.');
-	if (!p) {
-		fr_strerror_printf("No such module '%s'", name);
-		return NULL;
-	}
+	FR_SBUFF_TALLOC_THREAD_LOCAL(&elem1, MODULE_INSTANCE_LEN_MAX, (MODULE_INSTANCE_LEN_MAX + 1) * 10);
 
 	/*
-	 *	The module name may have a '.' in it, AND it may have
-	 *	a method <sigh> So we try to find out which is which.
-	 */
-	inst_name = talloc_strdup(NULL, name);
-	p = inst_name + (p - name);
-
-	/*
-	 *	Loop over the '.' portions, gradually looking up a
-	 *	longer string, in order to find the full module name.
-	 */
-	do {
-		*p = '\0';
-
-		mi = module_by_name(rlm_modules, NULL, inst_name);
-		if (mi) break;
-
-		/*
-		 *	Find the next '.'
-		 */
-		*p = '.';
-		p = strchr(p + 1, '.');
-	} while (p);
-
-	/*
-	 *	No such module, we're done.
-	 */
-	if (!mi) {
-		fr_strerror_printf("Failed to find module '%s'", inst_name);
-		talloc_free(inst_name);
-		return NULL;
-	}
-
-	mrlm = module_rlm_from_module(mi->module);
-
-	/*
-	 *	We have a module, but the caller doesn't care about
-	 *	method or names, so just return the module.
-	 */
-	if (!method || !method_name1 || !method_name2) {
-		talloc_free(inst_name);
-		return mi;
-	}
-
-	/*
-	 *	We MAY have two names.
-	 */
-	p++;
-	q = strchr(p, '.');
-	/*
-	 *	We've found the module, but it has no named methods.
-	 */
-	if (!mrlm->method_names) {
-		*name1 = name + (p - inst_name);
-		*name2 = NULL;
-		talloc_free(inst_name);
-		return mi;
-	}
-
-	/*
-	 *	We have "module.METHOD", but METHOD doesn't match
-	 *	"authorize", "authenticate", etc.  Let's see if it
-	 *	matches anything else.
-	 */
-	if (!q) {
-		for (j = 0; mrlm->method_names[j].name1 != NULL; j++) {
-			methods = &mrlm->method_names[j];
-
-			/*
-			 *	If we do not have the second $method, then ignore it!
-			 */
-			if (methods->name2 && (methods->name2 != CF_IDENT_ANY)) continue;
-
-			/*
-			 *	Wildcard match name1, we're
-			 *	done.
-			 */
-			if (!methods->name1 || (methods->name1 == CF_IDENT_ANY)) goto found_name1;
-
-			/*
-			 *	If name1 doesn't match, skip it.
-			 */
-			if (strcasecmp(methods->name1, p) != 0) continue;
-
-		found_name1:
-			/*
-			 *	We've matched "*", or "name1" or
-			 *	"name1 *".  Return that.
-			 */
-			*name1 = p;
-			*name2 = NULL;
-			*method = methods->method;
-			if (method_env) *method_env = methods->method_env;
-			break;
-		}
-
-		/*
-		 *	Return the found module.
-		 */
-		talloc_free(inst_name);
-		return mi;
-	}
-
-	/*
-	 *	We CANNOT have '.' in method names.
-	 */
-	if (strchr(q + 1, '.') != 0) {
-		talloc_free(inst_name);
-		return mi;
-	}
-
-	len = q - p;
-
-	/*
-	 *	Trim the '.'.
-	 */
-	if (*q == '.' && *(q + 1)) q++;
-
-	/*
-	 *	We have "module.METHOD1.METHOD2".
+	 *	If the method string contains a '['
 	 *
-	 *	Loop over the method names, seeing if we have a match.
+	 *	Search for a dynamic module method, e.g. `elem1[<key>]`.
 	 */
-	for (j = 0; mrlm->method_names[j].name1 != NULL; j++) {
-		methods = &mrlm->method_names[j];
+	if (fr_sbuff_is_char(&our_name, '[')) {
+		fr_sbuff_marker_t end, s_end;
+		fr_sbuff_marker(&end, &our_name);
+
+		slen = tmpl_afrom_substr(ctx, &mmc->key, &our_name, T_BARE_WORD, NULL, t_rules);
+		if (slen < 0) {
+			fr_strerror_const_push("Invalid dynamic module selector expression");
+			talloc_free(mmc);
+			return slen;
+		}
+
+		if (!fr_sbuff_is_char(&our_name, ']')) {
+			fr_strerror_const_push("Missing terminating ']' for dynamic module selector");
+		error:
+			talloc_free(mmc);
+			return fr_sbuff_error(&our_name);
+		}
+		fr_sbuff_marker(&s_end, &our_name);
+
+		fr_sbuff_set_to_start(&our_name);
+		slen = fr_sbuff_out_bstrncpy(elem1, &our_name, fr_sbuff_ahead(&end));
+		if (slen < 0) {
+			fr_strerror_const("Module method string too long");
+			goto error;
+		}
+		mmc->mi = module_instance_by_name(rlm_modules_dynamic, NULL, elem1->start);
+		if (!mmc->mi) {
+			fr_strerror_printf("No such dynamic module '%s'", elem1->start);
+			goto error;
+		}
+		mmc->rlm = module_rlm_from_module(mmc->mi->exported);
+
+		fr_sbuff_set(&our_name, &s_end);
+		fr_sbuff_advance(&our_name, 1);	/* Skip the ']' */
+	/*
+	 *	With elem1.elem2.elem3
+	 *
+	 *	Search for a static module matching one of the following:
+	 *
+	 *	- elem1.elem2.elem3
+	 *	- elem1.elem2
+	 *	- elem1
+	 */
+	} else {
+		char *p;
+
+		fr_sbuff_set_to_start(&our_name);
+
+		slen = fr_sbuff_out_bstrncpy_until(elem1, &our_name, SIZE_MAX, dyn_tt, NULL);
+		if (slen == 0) {
+			fr_strerror_const("Invalid module name");
+			goto error;
+		}
+		if (slen < 0) {
+			fr_strerror_const("Module method string too long");
+			goto error;
+		}
 
 		/*
-		 *	If name1 doesn't match, skip it.
+		 *	Now we have a mutable buffer, we can start chopping
+		 *	it up to find the module.
 		 */
-		if (strncasecmp(methods->name1, p, len) != 0) continue;
+		for (;;) {
+			mmc->mi = (module_instance_t *)module_rlm_static_by_name(NULL, elem1->start);
+			if (mmc->mi) {
+				mmc->rlm = module_rlm_from_module(mmc->mi->exported);
+				break;	/* Done */
+			}
 
-		/*
-		 *	It may have been a partial match, like "rec",
-		 *	instead of "recv".  In which case check if it
-		 *	was a FULL match.
-		 */
-		if (strlen(methods->name1) != len) continue;
+			p = strrchr(elem1->start, '.');
+			if (!p) break;	/* No more '.' */
+			*p = '\0';	/* Chop off the last '.' */
+		}
 
-		/*
-		 *	The module can declare a
-		 *	wildcard for name2, in which
-		 *	case it's a match.
-		 */
-		if (!methods->name2 || (methods->name2 == CF_IDENT_ANY)) goto found_name2;
+		if (!mmc->mi) {
+			fr_strerror_printf("No such module '%pV'", fr_box_strvalue_len(our_name.start, slen));
+			return -1;
+		}
 
-		/*
-		 *	Don't do strcmp on NULLs
-		 */
-		if (!methods->name2) continue;
-
-		if (strcasecmp(methods->name2, q) != 0) continue;
-
-	found_name2:
-		/*
-		 *	Update name1/name2 with the methods
-		 *	that were found.
-		 */
-		*name1 = methods->name1;
-		*name2 = name + (q - inst_name);
-		*method = methods->method;
-		if (method_env) *method_env = methods->method_env;
-		break;
+		fr_sbuff_set_to_start(&our_name);
+		fr_sbuff_advance(&our_name, strlen(elem1->start));	/* Advance past the module name */
+		if (fr_sbuff_is_char(&our_name, '.')) {
+			fr_sbuff_advance(&our_name, 1);			/* Static module method, search directly */
+		} else {
+			fr_sbuff_marker(&meth_start, &our_name);	/* for the errors... */
+			goto by_section;				/* Get the method dynamically from the section*/
+		}
 	}
 
-	*name1 = name + (p - inst_name);
-	*name2 = NULL;
+	/*
+	 *	For both cases, the buffer should be pointing
+	 *	at the start of the method string.
+	 */
+	fr_sbuff_marker(&meth_start, &our_name);
 
-	talloc_free(inst_name);
-	return mi;
+	/*
+	 *	If a module method was provided, search for it in the named
+	 *	methods provided by the module.
+	 *
+	 *	The method name should be either:
+	 *
+	 *	- name1
+	 *	- name1.name2
+	 */
+	{
+		section_name_t	method;
+		fr_sbuff_t	*elem2;
+
+		fr_sbuff_set_to_start(elem1);	/* May have used this already for module lookups */
+
+		slen = fr_sbuff_out_bstrncpy_until(elem1, &our_name, SIZE_MAX, elem_tt, NULL);
+		if (slen < 0) {
+			fr_strerror_const("Module method string too long");
+			return fr_sbuff_error(&our_name);
+		}
+		if (slen == 0) goto by_section;	/* This works for both dynamic and static modules */
+
+		FR_SBUFF_TALLOC_THREAD_LOCAL(&elem2, MODULE_INSTANCE_LEN_MAX, MODULE_INSTANCE_LEN_MAX);
+
+		if (fr_sbuff_is_char(&our_name, '.')) {
+			fr_sbuff_advance(&our_name, 1);
+			if (fr_sbuff_out_bstrncpy_until(elem2, &our_name, SIZE_MAX,
+							elem_tt, NULL) == MODULE_INSTANCE_LEN_MAX) {
+				fr_strerror_const("Module method string too long");
+				goto error;
+			}
+		}
+
+		method = (section_name_t) {
+			.name1 = elem1->start,
+			.name2 = fr_sbuff_used(elem2) ? elem2->start : NULL
+		};
+
+		mmb = module_binding_find(&mmc->rlm->method_group, &method);
+		if (!mmb) {
+			fr_strerror_printf("Module \"%s\" does not have method %s%s%s",
+					   mmc->mi->name,
+					   method.name1,
+					   method.name2 ? "." : "",
+					   method.name2 ? method.name2 : ""
+					   );
+
+			module_rlm_methods_to_strerror(&mmc->rlm->method_group);
+			return fr_sbuff_error(&meth_start);
+		}
+		mmc->mmb = *mmb;	/* For locality of reference and fewer derefs */
+		if (mmc_out) section_name_dup(ctx, &mmc->asked, &method);
+
+		return fr_sbuff_set(name, &our_name);
+	}
+
+by_section:
+	/*
+	 *	First look for the section name in the module's
+	 *	bindings.  If that fails, look for the alt
+	 *	section names from the virtual server section.
+	 *
+	 *	If that fails, we're done.
+	 */
+	mmb = module_binding_find(&mmc->rlm->method_group, section);
+	if (!mmb) {
+		section_name_t const **alt_p = virtual_server_section_methods(vs, section);
+		if (alt_p) {
+			for (; *alt_p; alt_p++) {
+				mmb = module_binding_find(&mmc->rlm->method_group, *alt_p);
+				if (mmb) {
+					if (mmc_out) section_name_dup(ctx, &mmc->asked, *alt_p);
+					break;
+				}
+			}
+		}
+	} else {
+		if (mmc_out) section_name_dup(ctx, &mmc->asked, section);
+	}
+	if (!mmb) {
+		fr_strerror_printf("Module \"%s\" has no method for section %s %s { ... }, i.e. %s%s%s",
+				   mmc->mi->name,
+				   section->name1,
+				   section->name2 ? section->name2 : "",
+				   section->name1,
+				   section->name2 ? "." : "",
+				   section->name2 ? section->name2 : ""
+				   );
+		module_rlm_methods_to_strerror(&mmc->rlm->method_group);
+
+		return fr_sbuff_error(&meth_start);
+	}
+	mmc->mmb = *mmb;	/* For locality of reference and fewer derefs */
+
+	return fr_sbuff_set(name, &our_name);
 }
 
-CONF_SECTION *module_rlm_by_name_virtual(char const *asked_name)
+CONF_SECTION *module_rlm_virtual_by_name(char const *asked_name)
 {
 	module_rlm_virtual_t *inst;
 
@@ -784,14 +820,14 @@ CONF_SECTION *module_rlm_by_name_virtual(char const *asked_name)
 	return inst->cs;
 }
 
-module_thread_instance_t *module_rlm_thread_by_data(void const *data)
+module_instance_t *module_rlm_dynamic_by_name(module_instance_t const *parent, char const *asked_name)
 {
-	return module_thread_by_data(rlm_modules, data);
+	return module_instance_by_name(rlm_modules_dynamic, parent, asked_name);
 }
 
-module_instance_t *module_rlm_by_name(module_instance_t const *parent, char const *asked_name)
+module_instance_t *module_rlm_static_by_name(module_instance_t const *parent, char const *asked_name)
 {
-	return module_by_name(rlm_modules, parent, asked_name);
+	return module_instance_by_name(rlm_modules_static, parent, asked_name);
 }
 
 /** Create a virtual module.
@@ -805,7 +841,6 @@ static int module_rlm_bootstrap_virtual(CONF_SECTION *cs)
 {
 	char const		*name;
 	bool			all_same;
-	module_t const 	*last = NULL;
 	CONF_ITEM 		*sub_ci = NULL;
 	CONF_PAIR		*cp;
 	module_instance_t	*mi;
@@ -838,14 +873,14 @@ static int module_rlm_bootstrap_virtual(CONF_SECTION *cs)
 	/*
 	 *	Ensure that the module doesn't exist.
 	 */
-	mi = module_by_name(rlm_modules, NULL, name);
+	mi = module_instance_by_name(rlm_modules_static, NULL, name);
 	if (mi) {
 		ERROR("Duplicate module \"%s\" in file %s[%d] and file %s[%d]",
 		      name,
 		      cf_filename(cs),
 		      cf_lineno(cs),
-		      cf_filename(mi->dl_inst->conf),
-		      cf_lineno(mi->dl_inst->conf));
+		      cf_filename(mi->conf),
+		      cf_lineno(mi->conf));
 		return -1;
 	}
 
@@ -854,56 +889,51 @@ static int module_rlm_bootstrap_virtual(CONF_SECTION *cs)
 	 */
 	all_same = (strcmp(cf_section_name1(cs), "group") != 0);
 
-	/*
-	 *	Ensure that the modules we reference here exist.
-	 */
-	while ((sub_ci = cf_item_next(cs, sub_ci))) {
-		if (cf_item_is_pair(sub_ci)) {
-			cp = cf_item_to_pair(sub_ci);
-			if (cf_pair_value(cp)) {
-				cf_log_err(sub_ci, "Cannot set return codes in a %s block", cf_section_name1(cs));
-				return -1;
+	{
+		module_t const 		*last = NULL;
+
+		/*
+		*	Ensure that the modules we reference here exist.
+		*/
+		while ((sub_ci = cf_item_next(cs, sub_ci))) {
+			if (cf_item_is_pair(sub_ci)) {
+				cp = cf_item_to_pair(sub_ci);
+				if (cf_pair_value(cp)) {
+					cf_log_err(sub_ci, "Cannot set return codes in a %s block", cf_section_name1(cs));
+					return -1;
+				}
+
+				mi = module_rlm_static_by_name(NULL, cf_pair_attr(cp));
+				if (!mi) {
+					cf_log_perr(sub_ci, "Failed resolving module reference '%s' in %s block",
+						    cf_pair_attr(cp), cf_section_name1(cs));
+					return -1;
+				}
+
+				if (all_same) {
+					if (!last) {
+						last = mi->exported;
+					} else if (last != mi->exported) {
+						last = NULL;
+						all_same = false;
+					}
+				}
+			} else {
+				all_same = false;
 			}
 
 			/*
-			 *	Allow "foo.authorize" in subsections.
-			 *
-			 *	Note that we don't care what the method is, just that it exists.
-			 *
-			 *	This check is needed only because we
-			 *	want to know if we need to register a
-			 *	redundant xlat for the virtual module.
-			 */
-			mi = module_rlm_by_name_and_method(NULL, NULL, NULL, NULL, cf_pair_attr(cp));
-			if (!mi) {
-				cf_log_err(sub_ci, "Module instance \"%s\" referenced in %s block, does not exist",
-					   cf_pair_attr(cp), cf_section_name1(cs));
-				return -1;
-			}
-
-			if (all_same) {
-				if (!last) {
-					last = mi->module;
-				} else if (last != mi->module) {
-					last = NULL;
-					all_same = false;
-				}
-			}
-		} else {
-			all_same = false;
-		}
-
-		/*
-		 *	Don't check subsections for now.  That check
-		 *	happens later in the unlang compiler.
-		 */
-	} /* loop over things in a virtual module section */
+			*	Don't check subsections for now.  That check
+			*	happens later in the unlang compiler.
+			*/
+		} /* loop over things in a virtual module section */
+	}
 
 	inst = talloc_zero(cs, module_rlm_virtual_t);
 	if (!inst) return -1;
 
 	inst->cs = cs;
-	inst->name = talloc_strdup(inst, name);
+	MEM(inst->name = talloc_strdup(inst, name));
 	inst->all_same = all_same;
 
 	if (!fr_cond_assert(fr_rb_insert(module_rlm_virtual_name_tree, inst))) {
@@ -922,7 +952,7 @@ int module_rlm_submodule_parse(TALLOC_CTX *ctx, void *out, void *parent,
 {
 	conf_parser_t our_rule = *rule;
 
-	our_rule.uctx = &rlm_modules;
+	our_rule.uctx = &rlm_modules_static;
 
 	return module_submodule_parse(ctx, out, parent, ci, &our_rule);
 }
@@ -932,7 +962,7 @@ int module_rlm_submodule_parse(TALLOC_CTX *ctx, void *out, void *parent,
  */
 void modules_rlm_thread_detach(void)
 {
-	modules_thread_detach(rlm_modules);
+	modules_thread_detach(rlm_modules_static);
 }
 
 /** Allocates thread-specific data for all registered backend modules
@@ -945,7 +975,7 @@ void modules_rlm_thread_detach(void)
  */
 int modules_rlm_thread_instantiate(TALLOC_CTX *ctx, fr_event_list_t *el)
 {
-	return modules_thread_instantiate(ctx, rlm_modules, el);
+	return modules_thread_instantiate(ctx, rlm_modules_static, el);
 }
 
 /** Performs the instantiation phase for all backend modules
@@ -956,7 +986,220 @@ int modules_rlm_thread_instantiate(TALLOC_CTX *ctx, fr_event_list_t *el)
  */
 int modules_rlm_instantiate(void)
 {
-	return modules_instantiate(rlm_modules);
+	return modules_instantiate(rlm_modules_static);
+}
+
+/** Compare the section names of two module_method_binding_t structures
+ */
+static int8_t binding_name_cmp(void const *one, void const *two)
+{
+	module_method_binding_t const *a = one;
+	module_method_binding_t const *b = two;
+
+	return section_name_cmp(a->section, b->section);
+}
+
+static int module_method_group_validate(module_method_group_t *group)
+{
+	module_method_binding_t *p, *srt_p;
+	fr_dlist_head_t		bindings;
+	bool			in_order = true;
+
+	/*
+	 *	Not all modules export module method bindings
+	 */
+	if (!group || !group->bindings || group->validated) return 0;
+
+	fr_dlist_init(&bindings, module_method_binding_t, entry);
+
+	for (p = group->bindings; p->section; p++) {
+		if (!fr_cond_assert_msg(p->section->name1,
+					"First section identifier can't be NULL")) return -1;
+		if (!fr_cond_assert_msg(p->section->name1 || p->section->name2,
+					"Section identifiers can't both be null")) return -1;
+
+		/*
+		 *	All the bindings go in a list so we can sort them
+		 *	and produce the list in the correct order.
+		 */
+		fr_dlist_insert_tail(&bindings, p);
+	}
+
+	fr_dlist_sort(&bindings, binding_name_cmp);
+
+	/*
+	 *	Iterate over the sorted list of bindings,
+	 *	and the original list, to ensure they're
+	 *	in the correct order.
+	 */
+	for (srt_p = fr_dlist_head(&bindings), p = group->bindings;
+	     srt_p;
+	     srt_p = fr_dlist_next(&bindings, srt_p), p++) {
+		if (p != srt_p) {
+			in_order = false;
+			break;
+		}
+	}
+
+	/*
+	 *	Rebuild the binding list in the correct order.
+	 */
+	if (!in_order) {
+		module_method_binding_t *ordered;
+
+		MEM(ordered = talloc_array(NULL, module_method_binding_t, fr_dlist_num_elements(&bindings)));
+		for (srt_p = fr_dlist_head(&bindings), p = ordered;
+		     srt_p;
+		     srt_p = fr_dlist_next(&bindings, srt_p), p++) {
+			*p = *srt_p;
+		}
+		memcpy(group->bindings, ordered, fr_dlist_num_elements(&bindings) * sizeof(*ordered));
+		talloc_free(ordered);
+	}
+
+	/*
+	 *	Build the "skip" list of name1 entries
+	 */
+	{
+		module_method_binding_t *last_binding = NULL;
+
+		for (p = group->bindings; p->section; p++) {
+			if (!last_binding ||
+				(
+					(last_binding->section->name1 != p->section->name1) &&
+					(
+						(last_binding->section->name1 == CF_IDENT_ANY) ||
+						(p->section->name1 == CF_IDENT_ANY) ||
+						(strcmp(last_binding->section->name1, p->section->name1) != 0)
+					)
+				)
+			) {
+				fr_dlist_init(&p->same_name1, module_method_binding_t, entry);
+				last_binding = p;
+			}
+			fr_dlist_insert_tail(&last_binding->same_name1, p);
+		}
+	}
+	group->validated = true;
+
+	return module_method_group_validate(group->next);
+}
+
+static int module_method_validate(module_instance_t *mi)
+{
+	module_rlm_t *mrlm = module_rlm_from_module(mi->exported);
+
+	return module_method_group_validate(&mrlm->method_group);
+}
+
+/** Allocate a rlm module instance
+ *
+ * These have extra space allocated to hold the dlist of associated xlats.
+ *
+ * @param[in] ml		Module list to allocate from.
+ * @param[in] parent		Parent module instance.
+ * @param[in] type		Type of module instance.
+ * @param[in] mod_name		Name of the module.
+ * @param[in] inst_name		Name of the instance.
+ * @param[in] init_state	Initial state of the module instance.
+ * @return
+ *	- The allocated module instance on success.
+ *	- NULL on failure.
+ */
+static inline CC_HINT(always_inline)
+module_instance_t *module_rlm_instance_alloc(module_list_t *ml,
+					     module_instance_t const *parent,
+					     dl_module_type_t type, char const *mod_name, char const *inst_name,
+					     module_instance_state_t init_state)
+{
+	module_instance_t *mi;
+	module_rlm_instance_t *mri;
+
+	mi = module_instance_alloc(ml, parent, type, mod_name, inst_name, init_state);
+	if (unlikely(mi == NULL)) return NULL;
+
+	MEM(mri = talloc(mi, module_rlm_instance_t));
+	module_instance_uctx_set(mi, mri);
+
+	fr_dlist_talloc_init(&mri->xlats, module_rlm_xlat_t, entry);
+
+	return mi;
+}
+
+static int module_conf_parse(module_list_t *ml, CONF_SECTION *mod_conf)
+{
+	char const		*name;
+	char const		*inst_name;
+	module_instance_t	*mi = NULL;
+	CONF_SECTION		*actions;
+
+	/*
+	 *	name2 can't be a keyword
+	 */
+	name = cf_section_name2(mod_conf);
+	if (name && unlang_compile_is_keyword(name)) {
+	invalid_name:
+		cf_log_err(mod_conf, "Module names cannot be unlang keywords '%s'", name);
+		return -1;
+	}
+
+	name = cf_section_name1(mod_conf);
+
+	/*
+	 *	For now, ignore name1 which is a keyword.
+	 */
+	if (unlang_compile_is_keyword(name)) {
+		if (!cf_section_name2(mod_conf)) {
+			cf_log_err(mod_conf, "Missing second name at '%s'", name);
+			return -1;
+		}
+		if (module_rlm_bootstrap_virtual(mod_conf) < 0) return -1;
+		return 0;
+	}
+
+	/*
+	 *	Skip inline templates, and disallow "template { ... }"
+	 */
+	if (strcmp(name, "template") == 0) {
+		if (!cf_section_name2(mod_conf)) goto invalid_name;
+		return 0;
+	}
+
+	if (module_instance_name_from_conf(&inst_name, mod_conf) < 0) goto invalid_name;
+
+	mi = module_rlm_instance_alloc(ml, NULL, DL_MODULE_TYPE_MODULE, name, inst_name, 0);
+	if (unlikely(mi == NULL)) {
+		cf_log_perr(mod_conf, "Failed loading module");
+		return -1;
+	}
+
+	/*
+	 *	First time we've loaded the dl module, so we need to
+	 *	check the module methods to make sure they're ordered
+	 *	correctly, and to add the "skip list" style name2
+	 *	entries.
+	 */
+	if ((mi->module->refs == 1) && (module_method_validate(mi) < 0)) {
+		talloc_free(mi);
+		return -1;
+	}
+
+	if (module_instance_conf_parse(mi, mod_conf) < 0) {
+		cf_log_perr(mod_conf, "Failed parsing module config");
+		talloc_free(mi);
+		return -1;
+	}
+
+	/*
+	 *	Compile the default "actions" subsection, which includes retries.
+	 */
+	actions = cf_section_find(mod_conf, "actions", NULL);
+	if (actions && unlang_compile_actions(&mi->actions, actions, (mi->exported->flags & MODULE_TYPE_RETRY) != 0)) {
+		talloc_free(mi);
+		return -1;
+	}
+
+	return 0;
 }
 
 /** Bootstrap modules and virtual modules
@@ -970,11 +1213,9 @@ int modules_rlm_instantiate(void)
  */
 int modules_rlm_bootstrap(CONF_SECTION *root)
 {
-	CONF_ITEM		*ci;
-	CONF_SECTION		*cs, *modules;
+	CONF_SECTION		*cs, *modules, *static_cs, *dynamic_cs;
 	module_rlm_virtual_t	*vm;
 	fr_rb_iter_inorder_t	iter;
-	CONF_SECTION		*actions;
 
 	/*
 	 *	Ensure any libraries the modules depend on are instantiated
@@ -990,99 +1231,78 @@ int modules_rlm_bootstrap(CONF_SECTION *root)
 		return 0;
 	}
 
-	DEBUG2("#### Bootstrapping modules ####");
+	static_cs = cf_section_find(modules, "static", NULL);
+	if (!static_cs) {
+		static_cs = cf_section_alloc(modules, NULL, "static", NULL);
+		cf_section_foreach(modules, mod_cs) {
+			CONF_ITEM *prev;
+			char const *name1 = cf_section_name1(mod_cs);
 
+			/*
+			 *	Skip over the dynamic section
+			 */
+			if ((strcmp(name1, "dynamic") == 0) && !cf_section_name2(mod_cs)) continue;
+
+			/*
+			 *	Ignore this section if it is commented out with a magic name.
+			 */
+			if (*name1 == '-') continue;
+
+			/*
+			 *	Move all modules which are not in
+			 *	the dynamic section into the static
+			 *	section for backwards compatibility.
+			 */
+			prev = cf_item_remove(modules, mod_cs);
+			cf_item_add(static_cs, mod_cs);
+
+			/*
+			 *	Find the previous item that's a section
+			 */
+			while (prev && !cf_item_is_section(prev)) prev = cf_item_prev(modules, prev);
+
+			/*
+			 *	Resume iterating from that item
+			 */
+			mod_cs = cf_item_to_section(prev);
+		}
+		cf_item_add(modules, static_cs);
+	}
+	DEBUG2("#### Bootstrapping static modules ####");
 	cf_log_debug(modules, " modules {");
+	cf_log_debug(modules, "    static {");
+	cf_section_foreach(static_cs, mod_conf) {
+		if (module_conf_parse(rlm_modules_static, mod_conf) < 0) return -1;
+	}
+	cf_log_debug(modules, "    } # static");
 
 	/*
-	 *	Loop over module definitions, looking for duplicates.
-	 *
-	 *	This is O(N^2) in the number of modules, but most
-	 *	systems should have less than 100 modules.
+	 *	Now we have a module tree, run bootstrap on all the modules.
+	 *	This will bootstrap modules and then submodules.
 	 */
-	for (ci = cf_item_next(modules, NULL);
-	     ci != NULL;
-	     ci = cf_item_next(modules, ci)) {
-		char const *name;
-		CONF_SECTION *subcs;
-		module_instance_t *mi = NULL;
+	if (unlikely(modules_bootstrap(rlm_modules_static) < 0)) return -1;
 
-		/*
-		 *	@todo - maybe this should be a warning?
-		 */
-		if (!cf_item_is_section(ci)) continue;
-
-		subcs = cf_item_to_section(ci);
-
-		/*
-		 *	name2 can't be a keyword
-		 */
-		name = cf_section_name2(subcs);
-		if (name && unlang_compile_is_keyword(name)) {
-		invalid_name:
-			cf_log_err(subcs, "Module names cannot be unlang keywords '%s'", name);
-			return -1;
-		}
-
-		name = cf_section_name1(subcs);
-
-		/*
-		 *	For now, ignore name1 which is a keyword.
-		 */
-		if (unlang_compile_is_keyword(name)) {
-			if (!cf_section_name2(subcs)) {
-				cf_log_err(subcs, "Missing second name at '%s'", name);
-				return -1;
-			}
-			if (module_rlm_bootstrap_virtual(subcs) < 0) return -1;
-			continue;
-		}
-
-		/*
-		 *	Skip inline templates, and disallow "template { ... }"
-		 */
-		if (strcmp(name, "template") == 0) {
-			if (!cf_section_name2(subcs)) goto invalid_name;
-			continue;
-		}
-
-		mi = module_alloc(rlm_modules, NULL, DL_MODULE_TYPE_MODULE, name, dl_module_inst_name_from_conf(subcs));
-		if (unlikely(mi == NULL)) {
-			cf_log_perr(subcs, "Failed loading module");
-			return -1;
-
-		}
-
-		if (module_conf_parse(mi, subcs) < 0) {
-			cf_log_perr(subcs, "Failed parsing module config");
-		error:
-			talloc_free(mi);
-			return -1;
-		}
-
-		/*
-		 *	Compile the default "actions" subsection, which includes retries.
-		 */
-		actions = cf_section_find(subcs, "actions", NULL);
-		if (actions && unlang_compile_actions(&mi->actions, actions, (mi->module->flags & MODULE_TYPE_RETRY) != 0)) goto error;
-	}
-
-	/*
-	 *	Having parsed all the modules, bootstrap them.
-	 *	This needs to be after parsing so that submodules can access
-	 *	their parent's fully parsed data.
-	 */
-	{
-		int ret = modules_bootstrap(rlm_modules);
-
-		cf_log_debug(modules, " } # modules");
-
-		if (unlikely(ret < 0)) return -1;
-	}
-
-	if (fr_command_register_hook(NULL, NULL, modules, module_cmd_list_table) < 0) {
+	if (fr_command_register_hook(NULL, NULL, static_cs, module_cmd_list_table) < 0) {
 		PERROR("Failed registering radmin commands for modules");
 		return -1;
+	}
+
+	/*
+	 *	Build the configuration and parse dynamic modules
+	 */
+	dynamic_cs = cf_section_find(modules, "dynamic", NULL);
+	if (dynamic_cs) {
+		DEBUG2("#### Bootstrapping dynamic modules ####");
+		/*
+		*	Parse and then instantiate any dynamic modules configure
+		*/
+		cf_log_debug(modules, "    dynamic {");
+		cf_section_foreach(dynamic_cs, mod_conf) {
+			if (unlikely(module_conf_parse(rlm_modules_dynamic, mod_conf) < 0)) return -1;
+		}
+		cf_log_debug(modules, "    } # dynamic");
+		if (unlikely(modules_bootstrap(rlm_modules_dynamic) < 0)) return -1;
+		cf_log_debug(modules, " } # modules");
 	}
 
 	/*
@@ -1091,33 +1311,25 @@ int modules_rlm_bootstrap(CONF_SECTION *root)
 	 */
 	cs = cf_section_find(root, "policy", NULL);
 	if (cs) {
-		while ((ci = cf_item_next(cs, ci))) {
-			CONF_SECTION *subcs, *problemcs;
-			char const *name1;
-
-			/*
-			 *	Skip anything that isn't a section.
-			 */
-			if (!cf_item_is_section(ci)) continue;
-
-			subcs = cf_item_to_section(ci);
-			name1 = cf_section_name1(subcs);
+		cf_section_foreach(cs, policy_cs) {
+			CONF_SECTION	*problemcs;
+			char const	*name1 = cf_section_name1(policy_cs);
 
 			if (unlang_compile_is_keyword(name1)) {
-				cf_log_err(subcs, "Policy name '%s' cannot be an unlang keyword", name1);
+				cf_log_err(policy_cs, "Policy name '%s' cannot be an unlang keyword", name1);
 				return -1;
 			}
 
-			if (cf_section_name2(subcs)) {
-				cf_log_err(subcs, "Policies cannot have two names");
+			if (cf_section_name2(policy_cs)) {
+				cf_log_err(policy_cs, "Policies cannot have two names");
 				return -1;
 			}
 
-			problemcs = cf_section_find_next(cs, subcs, name1, CF_IDENT_ANY);
+			problemcs = cf_section_find_next(cs, policy_cs, name1, CF_IDENT_ANY);
 			if (!problemcs) continue;
 
 			cf_log_err(problemcs, "Duplicate policy '%s' is forbidden.",
-				   cf_section_name1(subcs));
+				   cf_section_name1(policy_cs));
 			return -1;
 		}
 	}
@@ -1144,8 +1356,8 @@ int modules_rlm_bootstrap(CONF_SECTION *root)
  */
 int modules_rlm_free(void)
 {
-	if (talloc_free(rlm_modules) < 0) return -1;
-	rlm_modules = NULL;
+	if (talloc_free(rlm_modules_static) < 0) return -1;
+	rlm_modules_static = NULL;
 	if (talloc_free(module_rlm_virtual_name_tree) < 0) return -1;
 	module_rlm_virtual_name_tree = NULL;
 
@@ -1162,7 +1374,10 @@ static int _modules_rlm_free_atexit(UNUSED void *uctx)
  */
 int modules_rlm_init(void)
 {
-	MEM(rlm_modules = module_list_alloc(NULL, "rlm"));
+	MEM(rlm_modules_static = module_list_alloc(NULL, &module_list_type_global, "rlm", true));
+	MEM(rlm_modules_dynamic = module_list_alloc(NULL, &module_list_type_thread_local, "rlm", true));
+	module_list_mask_set(rlm_modules_dynamic, MODULE_INSTANCE_INSTANTIATED);	/* Ensure we never instantiate dynamic modules */
+
 	MEM(module_rlm_virtual_name_tree = fr_rb_inline_alloc(NULL, module_rlm_virtual_t, name_node,
 							      module_rlm_virtual_name_cmp, NULL));
 	fr_atexit_global(_modules_rlm_free_atexit, NULL);

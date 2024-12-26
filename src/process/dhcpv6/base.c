@@ -194,88 +194,74 @@ static conf_parser_t dhcpv6_process_config[] = {
 
 static const virtual_server_compile_t compile_list[] = {
 	{
-		.name = "recv",
-		.name2 = "Solicit",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Solicit"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_solicit)
 	},
 	{
-		.name = "recv",
-		.name2 = "Request",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Request"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_request)
 	},
 	{
-		.name = "recv",
-		.name2 = "Confirm",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Confirm"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_confirm)
 	},
 	{
-		.name = "recv",
-		.name2 = "Renew",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Renew"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_renew)
 	},
 	{
-		.name = "recv",
-		.name2 = "Rebind",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Rebind"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_rebind)
 	},
 	{
-		.name = "recv",
-		.name2 = "Release",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Release"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_release)
 	},
 	{
-		.name = "recv",
-		.name2 = "Decline",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Decline"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_decline)
 	},
 	{
-		.name = "recv",
-		.name2 = "Reconfigure",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Reconfigure"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_reconfigure)
 	},
 	{
-		.name = "recv",
-		.name2 = "Information-Request",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Information-Request"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_information_request)
 	},
 	{
-		.name = "recv",
-		.name2 = "Relay-Forward",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Relay-Forward"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(recv_relay_forward)
 	},
 
 	{
-		.name = "send",
-		.name2 = "Advertise",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Advertise"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(send_advertise)
 	},
 	{
-		.name = "send",
-		.name2 = "Reply",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Reply"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(send_reply)
 	},
 	{
-		.name = "send",
-		.name2 = "Relay-Reply",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Relay-Reply"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(send_relay_reply)
 	},
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond)
 	},
 
@@ -287,7 +273,7 @@ static const virtual_server_compile_t compile_list[] = {
 /*
  *	Debug the packet if requested.
  */
-static void dhcpv6_packet_debug(request_t *request, fr_radius_packet_t const *packet, fr_pair_list_t const *list, bool received)
+static void dhcpv6_packet_debug(request_t *request, fr_packet_t const *packet, fr_pair_list_t const *list, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];
@@ -416,7 +402,7 @@ RECV(for_any_server)
 {
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	process_dhcpv6_t const		*inst = mctx->inst->data;
+	process_dhcpv6_t const		*inst = mctx->mi->data;
 	process_dhcpv6_client_fields_t	*rctx = NULL;
 
 	PROCESS_TRACE;
@@ -451,7 +437,7 @@ RECV(for_this_server)
 {
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	process_dhcpv6_t const		*inst = mctx->inst->data;
+	process_dhcpv6_t const		*inst = mctx->mi->data;
 	process_dhcpv6_client_fields_t	*rctx;
 
 	PROCESS_TRACE;
@@ -508,7 +494,6 @@ int restore_field_list(request_t *request, fr_pair_list_t *to_restore)
 
 	return 0;
 }
-
 
 /** Add a status code if one doesn't already exist
  *
@@ -595,7 +580,7 @@ void status_code_add(process_dhcpv6_t const *inst, request_t *request, fr_value_
  */
 RESUME(send_to_client)
 {
-	process_dhcpv6_t		*inst = talloc_get_type_abort(mctx->inst->data, process_dhcpv6_t);
+	process_dhcpv6_t		*inst = talloc_get_type_abort(mctx->mi->data, process_dhcpv6_t);
 	process_dhcpv6_client_fields_t	*fields = talloc_get_type_abort(mctx->rctx, process_dhcpv6_client_fields_t);
 	fr_process_state_t const	*state;
 
@@ -679,7 +664,7 @@ RECV(from_relay)
 {
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	process_dhcpv6_t const		*inst = mctx->inst->data;
+	process_dhcpv6_t const		*inst = mctx->mi->data;
 	process_dhcpv6_relay_fields_t	*rctx = NULL;
 
 	rctx = dhcpv6_relay_fields_store(request);
@@ -697,7 +682,7 @@ RECV(from_relay)
  */
 RESUME(send_to_relay)
 {
-	process_dhcpv6_t		*inst = talloc_get_type_abort(mctx->inst->data, process_dhcpv6_t);
+	process_dhcpv6_t		*inst = talloc_get_type_abort(mctx->mi->data, process_dhcpv6_t);
 	process_dhcpv6_relay_fields_t	*fields = talloc_get_type_abort(mctx->rctx, process_dhcpv6_relay_fields_t);
 	fr_process_state_t const	*state;
 
@@ -734,7 +719,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_dhcpv6_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_dhcpv6_t);
 	fr_assert(PROCESS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "dhcpv6";
@@ -757,11 +742,11 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 	return state->recv(p_result, mctx, request);
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	process_dhcpv6_t	*inst = talloc_get_type_abort(mctx->inst->data, process_dhcpv6_t);
+	process_dhcpv6_t	*inst = talloc_get_type_abort(mctx->mi->data, process_dhcpv6_t);
 
-	inst->server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
+	inst->server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
 	return 0;
 }
@@ -1257,7 +1242,7 @@ fr_process_module_t process_dhcpv6 = {
 		.config		= dhcpv6_process_config,
 		.inst_size	= sizeof(process_dhcpv6_t),
 
-		.bootstrap	= mod_bootstrap
+		.instantiate	= mod_instantiate
 	},
 	.process	= mod_process,
 	.compile_list	= compile_list,

@@ -413,12 +413,24 @@ typedef enum {
 	TMPL_ATTR_FILTER_TYPE_NONE = 0,			//!< No filter present.
 	TMPL_ATTR_FILTER_TYPE_INDEX,			//!< Filter is an index type.
 	TMPL_ATTR_FILTER_TYPE_CONDITION,       		//!< Filter is a condition
+	TMPL_ATTR_FILTER_TYPE_TMPL,       		//!< Filter is a tmpl
+	TMPL_ATTR_FILTER_TYPE_EXPR,              	//!< Filter is an expression
 } tmpl_attr_filter_type_t;
 
 typedef struct {
 	tmpl_attr_filter_type_t	_CONST type;		//!< Type of filter this is.
 	int16_t			_CONST num;		//!< For array references.
-	xlat_exp_head_t		_CONST *cond;		//!< xlat condition
+
+	/*
+	 *	These are "union" because they are disjoint.  The "num" field is arguably disjoint, too, but
+	 *	there is currently a lot of code in tmpl_tokenize.c which directly references ar->ar_num
+	 *	without checking the type.
+	 */
+	union {
+		xlat_exp_head_t		_CONST *cond;		//!< xlat condition
+		tmpl_t			_CONST *tmpl;		//!< tmpl
+		xlat_exp_head_t		_CONST *expr;		//!< xlat expression
+	};
 } tmpl_attr_filter_t;
 
 /** An element in a list of nested attribute references
@@ -507,11 +519,15 @@ FR_DLIST_FUNCS(tmpl_request_list, tmpl_request_t, entry)
 
 #define ar_num				filter.num
 #define ar_cond				filter.cond
+#define ar_tmpl				filter.tmpl
+#define ar_expr				filter.expr
 #define ar_filter_type			filter.type
 
 #define ar_filter_is_none(_ar)		((_ar)->ar_filter_type == TMPL_ATTR_FILTER_TYPE_NONE)
 #define ar_filter_is_num(_ar)		((_ar)->ar_filter_type == TMPL_ATTR_FILTER_TYPE_INDEX)
 #define ar_filter_is_cond(_ar)		((_ar)->ar_filter_type == TMPL_ATTR_FILTER_TYPE_CONDITION)
+#define ar_filter_is_tmpl(_ar)		((_ar)->ar_filter_type == TMPL_ATTR_FILTER_TYPE_TMPL)
+#define ar_filter_is_expr(_ar)		((_ar)->ar_filter_type == TMPL_ATTR_FILTER_TYPE_EXPR)
 /** @} */
 
 /** A source or sink of value data.
@@ -1067,7 +1083,7 @@ void			tmpl_debug(tmpl_t const *vpt) CC_HINT(nonnull);
 
 fr_pair_list_t		*tmpl_list_head(request_t *request, fr_dict_attr_t const *list);
 
-fr_radius_packet_t	*tmpl_packet_ptr(request_t *request, fr_dict_attr_t const *list) CC_HINT(nonnull);
+fr_packet_t	*tmpl_packet_ptr(request_t *request, fr_dict_attr_t const *list) CC_HINT(nonnull);
 
 TALLOC_CTX		*tmpl_list_ctx(request_t *request, fr_dict_attr_t const *list);
 
@@ -1173,11 +1189,7 @@ int			tmpl_attr_set_da(tmpl_t *vpt, fr_dict_attr_t const *da) CC_HINT(nonnull);
 
 int			tmpl_attr_set_leaf_da(tmpl_t *vpt, fr_dict_attr_t const *da) CC_HINT(nonnull);
 
-void			tmpl_attr_set_leaf_num(tmpl_t *vpt, int16_t num) CC_HINT(nonnull);
-
-void			tmpl_attr_rewrite_leaf_num(tmpl_t *vpt, int16_t from, int16_t to) CC_HINT(nonnull);
-
-void			tmpl_attr_rewrite_num(tmpl_t *vpt, int16_t from, int16_t to) CC_HINT(nonnull);
+void			tmpl_attr_rewrite_leaf_num(tmpl_t *vpt, int16_t num) CC_HINT(nonnull);
 
 void			tmpl_attr_set_request_ref(tmpl_t *vpt, FR_DLIST_HEAD(tmpl_request_list) const *request_def) CC_HINT(nonnull);
 
@@ -1211,6 +1223,10 @@ ssize_t			tmpl_cast_from_substr(tmpl_rules_t *t_rules, fr_sbuff_t *in) CC_HINT(n
 
 int			tmpl_cast_set(tmpl_t *vpt, fr_type_t type) CC_HINT(nonnull);	/* Sets cast type */
 
+static inline fr_type_t tmpl_cast_get(tmpl_t *vpt)
+{
+	return vpt->rules.cast;
+}
 
 #ifdef HAVE_REGEX
 ssize_t			tmpl_regex_flags_substr(tmpl_t *vpt, fr_sbuff_t *in,
@@ -1318,9 +1334,7 @@ int			tmpl_eval_cast_in_place(fr_value_box_list_t *out, request_t *request, tmpl
 /** @} */
 
 ssize_t			tmpl_preparse(char const **out, size_t *outlen, char const *in, size_t inlen,
-				      fr_token_t *type,
-				      fr_dict_attr_t const **castda, bool require_regex,
-				      bool allow_xlat) CC_HINT(nonnull(1,2,3,5));
+				      fr_token_t *type) CC_HINT(nonnull(1,2,3,5));
 
 bool			tmpl_async_required(tmpl_t const *vpt) CC_HINT(nonnull);
 
@@ -1331,7 +1345,6 @@ void			tmpl_rules_child_init(TALLOC_CTX *ctx, tmpl_rules_t *out, tmpl_rules_t co
 void			tmpl_rules_debug(tmpl_rules_t const *rules) CC_HINT(nonnull);
 
 int			tmpl_global_init(void);
-void			tmpl_global_free(void);
 
 #undef _CONST
 

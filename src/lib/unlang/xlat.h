@@ -44,7 +44,6 @@ typedef enum {
 
 typedef enum {
 	XLAT_INPUT_UNPROCESSED,			//!< No input argument processing
-	XLAT_INPUT_MONO,			//!< Ingests a single argument
 	XLAT_INPUT_ARGS				//!< Ingests a number of arguments
 } xlat_input_type_t;
 
@@ -53,7 +52,7 @@ typedef struct xlat_thread_inst_s xlat_thread_inst_t;
 
 #include <freeradius-devel/server/request.h>
 
-typedef size_t (*xlat_escape_legacy_t)(request_t *request, char *out, size_t outlen, char const *in, void *arg);
+typedef ssize_t (*xlat_escape_legacy_t)(request_t *request, char *out, size_t outlen, char const *in, void *arg);
 
 #include <freeradius-devel/server/cf_util.h>
 #include <freeradius-devel/server/signal.h>
@@ -111,6 +110,7 @@ typedef struct xlat_s xlat_t;
 typedef struct {
 	bool			needs_resolving;//!< Needs pass2 resolution.
 	bool			pure;		//!< has no external side effects, true for BOX, LITERAL, and some functions
+	bool			impure_func;	//!< xlat contains an impure function
 	bool			can_purify;	//!< if the xlat has a pure function with pure arguments.
 
 	bool			constant;	//!< xlat is just tmpl_attr_tail_data, or XLAT_BOX
@@ -364,8 +364,6 @@ typedef int (*xlat_thread_detach_t)(xlat_thread_inst_ctx_t const *xctx);
  */
 #define XLAT_ARGS(_list, ...) _XLAT_ARGS_X(JOIN(XLAT_ARGS_, VA_NARG(__VA_ARGS__)), _list, __VA_ARGS__)
 
-int		xlat_fmt_get_vp(fr_pair_t **out, request_t *request, char const *name);
-
 ssize_t		xlat_eval(char *out, size_t outlen, request_t *request, char const *fmt, xlat_escape_legacy_t escape,
 			  void const *escape_ctx)
 			  CC_HINT(nonnull (1 ,3 ,4));
@@ -409,9 +407,7 @@ static inline fr_slen_t xlat_aprint(TALLOC_CTX *ctx, char **out, xlat_exp_head_t
 
 bool		xlat_is_truthy(xlat_exp_head_t const *head, bool *out);
 
-int		xlat_validate_function_mono(xlat_exp_t *node);
-
-int		xlat_validate_function_args(xlat_exp_t *node);
+fr_slen_t	xlat_validate_function_args(xlat_exp_t *node);
 
 void		xlat_debug(xlat_exp_t const *node);
 
@@ -437,6 +433,8 @@ xlat_action_t	xlat_transparent(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *out,
 tmpl_t		*xlat_to_tmpl_attr(TALLOC_CTX *ctx, xlat_exp_head_t *xlat);
 
 int		xlat_from_tmpl_attr(TALLOC_CTX *ctx, xlat_exp_head_t **head, tmpl_t **vpt_p);
+
+bool		xlat_impure_func(xlat_exp_head_t const *head) CC_HINT(nonnull);
 
 /*
  *	xlat_alloc.c
@@ -491,6 +489,14 @@ int		unlang_xlat_push(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out
 				 request_t *request, xlat_exp_head_t const *head, bool top_frame)
 				 CC_HINT(warn_unused_result);
 
+int		unlang_xlat_eval(TALLOC_CTX *ctx, fr_value_box_list_t *out,
+				 request_t *request, xlat_exp_head_t const *head)
+				 CC_HINT(warn_unused_result);
+
+int		unlang_xlat_eval_type(TALLOC_CTX *ctx, fr_value_box_t *out, fr_type_t type, fr_dict_attr_t const *enumv,
+				      request_t *request, xlat_exp_head_t const *head)
+				      CC_HINT(warn_unused_result);
+
 xlat_action_t	unlang_xlat_yield(request_t *request,
 				  xlat_func_t callback, xlat_func_signal_t signal, fr_signal_t sigmask,
 				  void *rctx);
@@ -499,7 +505,7 @@ xlat_action_t	unlang_xlat_yield(request_t *request,
  *	xlat_builtin.c
  */
 int		xlat_protocols_register(void);
-int		xlat_global_init(TALLOC_CTX *ctx);
+int		xlat_global_init(void);
 void		xlat_global_free(void);
 
 #ifdef __cplusplus

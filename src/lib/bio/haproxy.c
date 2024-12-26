@@ -150,7 +150,6 @@ static ssize_t fr_bio_haproxy_v1(fr_bio_haproxy_t *my)
  */
 static ssize_t fr_bio_haproxy_read_next(fr_bio_t *bio, UNUSED void *packet_ctx, void *buffer, size_t size)
 {
-	ssize_t rcode;
 	size_t used;
 	fr_bio_haproxy_t *my = talloc_get_type_abort(bio, fr_bio_haproxy_t);
 
@@ -160,7 +159,7 @@ static ssize_t fr_bio_haproxy_read_next(fr_bio_t *bio, UNUSED void *packet_ctx, 
 
 	/*
 	 *	Somehow (magically) we can satisfy the read from our buffer.  Do so.  Note that we do NOT run
-	 *	the activation callback, as there is still data in our buffer
+	 *	the connected callback, as there is still data in our buffer
 	 */
 	if (size < used) {
 		(void) fr_bio_buf_read(&my->buffer, buffer, size);
@@ -173,12 +172,9 @@ static ssize_t fr_bio_haproxy_read_next(fr_bio_t *bio, UNUSED void *packet_ctx, 
 	(void) fr_bio_buf_read(&my->buffer, buffer, used);
 
 	/*
-	 *	Call the users activation function, which might remove us from the proxy chain.
+	 *	Call the users "socket is now usable" function, which might remove us from the proxy chain.
 	 */
-	if (my->cb.activate) {
-		rcode = my->cb.activate(bio);
-		if (rcode < 0) return rcode;
-	}
+	if (my->cb.connected) my->cb.connected(bio);
 
 	return used;
 }
@@ -228,18 +224,14 @@ static ssize_t fr_bio_haproxy_read(fr_bio_t *bio, void *packet_ctx, void *buffer
 fr_bio_t *fr_bio_haproxy_alloc(TALLOC_CTX *ctx, fr_bio_cb_funcs_t *cb, fr_bio_t *next)
 {
 	fr_bio_haproxy_t *my;
-	uint8_t *data;
 
 	my = talloc_zero(ctx, fr_bio_haproxy_t);
 	if (!my) return NULL;
 
-	data = talloc_array(my, uint8_t, HAPROXY_HEADER_V1_SIZE);
-	if (!data) {
+	if (fr_bio_buf_alloc(my, &my->buffer, HAPROXY_HEADER_V1_SIZE) < 0) {
 		talloc_free(my);
 		return NULL;
 	}
-
-	fr_bio_buf_init(&my->buffer, data, HAPROXY_HEADER_V1_SIZE);
 
 	my->bio.read = fr_bio_haproxy_read;
 	my->bio.write = fr_bio_null_write; /* can't write to this bio */

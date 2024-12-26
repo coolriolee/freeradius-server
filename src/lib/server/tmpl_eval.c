@@ -34,6 +34,8 @@ RCSID("$Id$")
 #include <freeradius-devel/server/tmpl_dcursor.h>
 #include <freeradius-devel/server/client.h>
 #include <freeradius-devel/unlang/call.h>
+
+#include <freeradius-devel/util/atexit.h>
 #include <freeradius-devel/util/dlist.h>
 #include <freeradius-devel/util/proto.h>
 #include <freeradius-devel/util/value.h>
@@ -99,8 +101,8 @@ fr_pair_list_t *tmpl_list_head(request_t *request, fr_dict_attr_t const *list)
 /** Return the correct TALLOC_CTX to alloc #fr_pair_t in, for a list
  *
  * Allocating new #fr_pair_t in the context of a #request_t is usually wrong.
- * #fr_pair_t should be allocated in the context of a #fr_radius_packet_t, so that if the
- * #fr_radius_packet_t is freed before the #request_t, the associated #fr_pair_t lists are
+ * #fr_pair_t should be allocated in the context of a #fr_packet_t, so that if the
+ * #fr_packet_t is freed before the #request_t, the associated #fr_pair_t lists are
  * freed too.
  *
  * @param[in] request containing the target lists.
@@ -128,20 +130,20 @@ TALLOC_CTX *tmpl_list_ctx(request_t *request, fr_dict_attr_t const *list)
 	return NULL;
 }
 
-/** Resolve a list to the #fr_radius_packet_t holding the HEAD pointer for a #fr_pair_t list
+/** Resolve a list to the #fr_packet_t holding the HEAD pointer for a #fr_pair_t list
  *
- * Returns a pointer to the #fr_radius_packet_t that holds the HEAD pointer of a given list,
+ * Returns a pointer to the #fr_packet_t that holds the HEAD pointer of a given list,
  * for the current #request_t.
  *
  * @param[in] request To resolve list in.
- * @param[in] list #fr_pair_list_t value to resolve to #fr_radius_packet_t.
+ * @param[in] list #fr_pair_list_t value to resolve to #fr_packet_t.
  * @return
- *	- #fr_radius_packet_t on success.
+ *	- #fr_packet_t on success.
  *	- NULL on failure.
  *
  * @see tmpl_pair_list
  */
-fr_radius_packet_t *tmpl_packet_ptr(request_t *request, fr_dict_attr_t const *list)
+fr_packet_t *tmpl_packet_ptr(request_t *request, fr_dict_attr_t const *list)
 {
 	if (list == request_attr_request) return request->packet;
 
@@ -517,7 +519,7 @@ ssize_t _tmpl_to_type(void *out,
 	}
 
 	RDEBUG4("Copying %zu bytes to %p from offset %zu",
-		fr_value_box_field_sizes[dst_type], *((void **)out), fr_value_box_offsets[dst_type]);
+		fr_value_box_field_sizes[dst_type], out, fr_value_box_offsets[dst_type]);
 
 	fr_value_box_memcpy_out(out, from_cast);
 
@@ -996,8 +998,23 @@ int pair_append_by_tmpl_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t 
 		/*
 		 *	We're not at the leaf, look for a potential parent
 		 */
-		if (ar != leaf) vp = fr_pair_find_by_da(list, NULL, ar->da);
-
+		if (ar != leaf) {
+			vp = fr_pair_find_by_da(list, NULL, ar->da);
+			/*
+			 *	HACK - Pretend we didn't see this stupid key field
+			 *
+			 *	If we don't have this, the code creates a key pair
+			 *	and then horribly mangles its data by adding children
+			 *	to it.
+			 *
+			 *	We just skip one level down an don't create or update
+			 *	the key pair.
+			 */
+			if (vp && fr_dict_attr_is_key_field(ar->da) && fr_type_is_leaf(vp->data.type)) {
+				ar = tmpl_attr_list_next(ar_list, ar);
+				continue;
+			}
+		}
 		/*
 		 *	Nothing found, create the pair
 		 */
@@ -1155,7 +1172,10 @@ int tmpl_eval_pair(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *request
 		break;
 
 	default:
-		fr_assert(fr_type_is_leaf(vp->vp_type));
+		if (!fr_type_is_leaf(vp->vp_type)) {
+			fr_strerror_const("Invalid data type for evaluation");
+			goto fail;
+		}
 
 		value = fr_value_box_alloc(ctx, vp->data.type, vp->da);
 		if (!value) goto oom;
@@ -1435,7 +1455,16 @@ int tmpl_eval_cast_in_place(fr_value_box_list_t *list, request_t *request, tmpl_
 	goto success;
 }
 
-int tmpl_global_init(void)
+static int _tmpl_global_free(UNUSED void *uctx)
+{
+	fr_dict_autofree(tmpl_dict);
+
+	fr_dict_attr_unknown_free(&tmpl_attr_unspec);
+
+	return 0;
+}
+
+static int _tmpl_global_init(UNUSED void *uctx)
 {
 	fr_dict_attr_t *da;
 
@@ -1444,7 +1473,7 @@ int tmpl_global_init(void)
 		return -1;
 	}
 
-	da = fr_dict_unknown_attr_afrom_num(NULL, fr_dict_root(dict_freeradius), 0);
+	da = fr_dict_attr_unknown_raw_afrom_num(NULL, fr_dict_root(dict_freeradius), 0);
 	fr_assert(da != NULL);
 
 	da->type = FR_TYPE_NULL;
@@ -1453,9 +1482,11 @@ int tmpl_global_init(void)
 	return 0;
 }
 
-void tmpl_global_free(void)
+int tmpl_global_init(void)
 {
-	fr_dict_autofree(tmpl_dict);
+	int ret;
 
-	fr_dict_unknown_free(&tmpl_attr_unspec);
+	fr_atexit_global_once_ret(&ret, _tmpl_global_init, _tmpl_global_free, NULL);
+
+	return 0;
 }

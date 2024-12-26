@@ -136,7 +136,7 @@ static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buf
 		RDEBUG("WARNING: Sender-Hardware-Address of zeros will likely cause problems");
 	}
 
-	fr_packet_pairs_to_packet(request->reply, &request->reply_pairs);
+	fr_packet_net_from_pairs(request->reply, &request->reply_pairs);
 
 	if (RDEBUG_ENABLED) {
 		RDEBUG("Sending %d via socket %s",
@@ -181,23 +181,23 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
 	li->default_message_size = FR_ARP_PACKET_SIZE;
 	li->num_messages = inst->num_messages;
 
-	li->app_io = inst->app_io;
-	li->app_io_instance = inst->app_io_instance;
+	li->app_io = (fr_app_io_t const *)inst->io_submodule->exported;
+	li->app_io_instance = inst->io_submodule->data;
 	if (li->app_io->common.thread_inst_size) {
 		li->thread_instance = talloc_zero_array(NULL, uint8_t, li->app_io->common.thread_inst_size);
-		talloc_set_name(li->thread_instance, "proto_%s_thread_t", inst->app_io->common.name);
+		talloc_set_name(li->thread_instance, "proto_%s_thread_t", li->app_io->common.name);
 	}
 
 	/*
 	 *	Open the raw socket.
 	 */
-	if (inst->app_io->open(li) < 0) {
+	if (li->app_io->open(li) < 0) {
 		talloc_free(li);
 		return -1;
 	}
 	fr_assert(li->fd >= 0);
 
-	li->name = inst->app_io->get_name(li);
+	li->name = li->app_io->get_name(li);
 
 	/*
 	 *	Watch the directory for changes.
@@ -223,40 +223,8 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_arp_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_arp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-	/*
-	 *	Instantiate the I/O module. But DON'T instantiate the
-	 *	work submodule.  We leave that until later.
-	 */
-	if (inst->app_io->common.instantiate &&
-	    (inst->app_io->common.instantiate(MODULE_INST_CTX(inst->io_submodule)) < 0)) {
-		cf_log_err(conf, "Instantiation failed for \"%s\"", inst->app_io->common.name);
-		return -1;
-	}
-
-	if (!inst->num_messages) inst->num_messages = 256;
-
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
-
-	return 0;
-}
-
-
-/** Bootstrap the application
- *
- * Bootstrap I/O and type submodules.
- *
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_arp_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_arp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-	dl_module_inst_t	*parent_inst;
+	proto_arp_t 		*inst = talloc_get_type_abort(mctx->mi->data, proto_arp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 
 	/*
 	 *	Ensure that the server CONF_SECTION is always set.
@@ -264,32 +232,10 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	inst->server_cs = cf_item_to_section(cf_parent(conf));
 	inst->cs = conf;
 
-	parent_inst = cf_data_value(cf_data_find(inst->cs, dl_module_inst_t, "proto_arp"));
-	fr_assert(parent_inst);
+	if (!inst->num_messages) inst->num_messages = 256;
 
-	if (dl_module_instance(inst->cs, &inst->io_submodule,
-			       parent_inst,
-			       DL_MODULE_TYPE_SUBMODULE, "ethernet", dl_module_inst_name_from_conf(inst->cs)) < 0) {
-		cf_log_perr(inst->cs, "Failed to load proto_arp_ethernet");
-		return -1;
-	}
-
-	if (dl_module_conf_parse(inst->io_submodule, inst->cs) < 0) {
-		TALLOC_FREE(inst->io_submodule);
-		return -1;
-	}
-
-	/*
-	 *	Bootstrap the I/O module
-	 */
-	inst->app_io = (fr_app_io_t const *) inst->io_submodule->module->common;
-	inst->app_io_instance = inst->io_submodule->data;
-	inst->app_io_conf = conf;
-
-	if (inst->app_io->common.bootstrap && (inst->app_io->common.bootstrap(MODULE_INST_CTX(inst->io_submodule)) < 0)) {
-		cf_log_err(inst->app_io_conf, "Bootstrap failed for \"%s\"", inst->app_io->common.name);
-		return -1;
-	}
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
 
 	return 0;
 }
@@ -316,7 +262,6 @@ fr_app_t proto_arp = {
 		.inst_size		= sizeof(proto_arp_t),
 		.onload			= mod_load,
 		.unload			= mod_unload,
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.dict			= &dict_arp,

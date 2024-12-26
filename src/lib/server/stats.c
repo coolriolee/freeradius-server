@@ -23,7 +23,9 @@
 
 RCSID("$Id$")
 
-#include <freeradius-devel/server/base.h>
+#include <freeradius-devel/server/client.h>
+#include <freeradius-devel/server/request.h>
+#include <freeradius-devel/server/stats.h>
 #include <freeradius-devel/util/debug.h>
 
 #include <freeradius-devel/util/misc.h>
@@ -47,7 +49,7 @@ fr_stats_t radius_acct_stats = FR_STATS_INIT;
 
 void request_stats_final(request_t *request)
 {
-	if (request->master_state == REQUEST_COUNTED) return;
+	if (request->counted) return;
 
 #if 0
 	if (!request->listener) return;
@@ -143,7 +145,7 @@ void request_stats_final(request_t *request)
 		break;
 	}
 
-	request->master_state = REQUEST_COUNTED;
+	request->counted = true;
 }
 
 void radius_stats_init(int flag)

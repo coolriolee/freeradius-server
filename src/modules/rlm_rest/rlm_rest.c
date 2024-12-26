@@ -21,8 +21,6 @@
  *
  * @copyright 2012-2019,2024 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
  */
-
-#include <talloc.h>
 RCSID("$Id$")
 
 #include <freeradius-devel/curl/base.h>
@@ -46,6 +44,10 @@ RCSID("$Id$")
 #include <freeradius-devel/unlang/call_env.h>
 #include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/unlang/xlat.h>
+
+#include <curl/curl.h>
+
+#include <talloc.h>
 
 #include "rest.h"
 
@@ -200,7 +202,7 @@ static const call_env_method_t _var = { \
 	.env = (call_env_parser_t[]){ \
 		{ FR_CALL_ENV_SUBSECTION(_section, NULL, CALL_ENV_FLAG_NONE, \
 			((call_env_parser_t[]) { \
-				{ FR_CALL_ENV_SUBSECTION("request", NULL, CALL_ENV_FLAG_NONE, \
+				{ FR_CALL_ENV_SUBSECTION("request", NULL, CALL_ENV_FLAG_REQUIRED, \
 							((call_env_parser_t[]) { \
 								{ FR_CALL_ENV_OFFSET("uri", FR_TYPE_STRING, CALL_ENV_FLAG_REQUIRED | CALL_ENV_FLAG_CONCAT, rlm_rest_call_env_t, request.uri), \
 										     .pair.escape = { \
@@ -495,8 +497,10 @@ finish:
 }
 
 static xlat_arg_parser_t const rest_xlat_args[] = {
-	{ .required = true, .safe_for = CURL_URI_SAFE_FOR, .type = FR_TYPE_STRING },
-	{ .variadic = XLAT_ARG_VARIADIC_EMPTY_KEEP, .type = FR_TYPE_STRING },
+	{ .required = true, .single = true, .type = FR_TYPE_STRING },			/* HTTP Method */
+	{ .required = true, .safe_for = CURL_URI_SAFE_FOR, .type = FR_TYPE_STRING },	/* URL */
+	{ .concat = true, .type = FR_TYPE_STRING },					/* Data */
+	{ .type = FR_TYPE_STRING },							/* Headers */
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -504,7 +508,7 @@ static xlat_arg_parser_t const rest_xlat_args[] = {
  *
  * Example:
 @verbatim
-%rest(http://example.com/)
+%rest(POST, http://example.com/, "{ \"key\": \"value\" }", [<headers>])
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -513,17 +517,23 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx, request_t *request,
 			       fr_value_box_list_t *in)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(xctx->mctx->thread, rlm_rest_thread_t);
 
 	fr_curl_io_request_t		*randle = NULL;
 	int				ret;
 	http_method_t			method;
-	fr_value_box_t			*in_vb = fr_value_box_list_pop_head(in), *uri_vb = NULL;
+
+	fr_value_box_t			*method_vb;
+	fr_value_box_t			*uri_vb;
+	fr_value_box_t			*data_vb;
+	fr_value_box_t			*header_vb;
 
 	/* There are no configurable parameters other than the URI */
 	rlm_rest_xlat_rctx_t		*rctx;
 	rlm_rest_section_t		*section;
+
+	XLAT_ARGS(in, &method_vb, &uri_vb, &data_vb, &header_vb);
 
 	MEM(rctx = talloc(request, rlm_rest_xlat_rctx_t));
 	section = &rctx->section;
@@ -533,37 +543,39 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 */
 	memcpy(&rctx->section, &inst->xlat, sizeof(*section));
 
-	fr_assert(in_vb->type == FR_TYPE_GROUP);
+	/*
+	 *	Set the HTTP verb
+	 */
+	method = fr_table_value_by_substr(http_method_table, method_vb->vb_strvalue, -1, REST_HTTP_METHOD_UNKNOWN);
+	if (method != REST_HTTP_METHOD_UNKNOWN) {
+		section->request.method = method;
+	/*
+	 *	If the method is unknown, it's a custom verb
+	 */
+	} else {
+		section->request.method = REST_HTTP_METHOD_CUSTOM;
+		MEM(section->request.method_str = talloc_bstrndup(rctx, method_vb->vb_strvalue, method_vb->vb_length));
+	}
 
 	/*
-	 *	If we have more than 1 argument, then the first is the method
+	 *	Handle URI component escaping
 	 */
-	if  ((fr_value_box_list_head(in))) {
-		uri_vb = fr_value_box_list_head(&in_vb->vb_group);
-		if (fr_value_box_list_concat_in_place(uri_vb,
-						      uri_vb, &in_vb->vb_group, FR_TYPE_STRING,
-						      FR_VALUE_BOX_LIST_FREE, true,
-						      SIZE_MAX) < 0) {
-			REDEBUG("Failed concatenating argument");
-			return XLAT_ACTION_FAIL;
-		}
-		method = fr_table_value_by_substr(http_method_table, uri_vb->vb_strvalue, -1, REST_HTTP_METHOD_UNKNOWN);
+	if (fr_uri_escape_list(&uri_vb->vb_group, rest_uri_parts, NULL) < 0) {
+		RPEDEBUG("Failed escaping URI");
+	error:
+		talloc_free(section);
+		return XLAT_ACTION_FAIL;
+	}
 
-		if (method != REST_HTTP_METHOD_UNKNOWN) {
-			section->request.method = method;
-		/*
-	 	 *  If the method is unknown, it's a custom verb
-	 	 */
-		} else {
-			section->request.method = REST_HTTP_METHOD_CUSTOM;
-			MEM(section->request.method_str = talloc_bstrndup(rctx, uri_vb->vb_strvalue, uri_vb->vb_length));
-		}
-		/*
-		 *	Move to next argument
-		 */
-		in_vb = fr_value_box_list_pop_head(in);
-	} else {
-		section->request.method = REST_HTTP_METHOD_GET;
+	/*
+	 *	Smush all the URI components together
+	 */
+	if (fr_value_box_list_concat_in_place(uri_vb,
+					      uri_vb, &uri_vb->vb_group, FR_TYPE_STRING,
+					      FR_VALUE_BOX_LIST_FREE, true,
+					      SIZE_MAX) < 0) {
+		REDEBUG("Concatenating URI");
+		goto error;
 	}
 
 	/*
@@ -573,53 +585,23 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	randle = rctx->handle = rest_slab_reserve(t->slab);
 	if (!randle) return XLAT_ACTION_FAIL;
 
-	/*
-	 *	Walk the incoming boxes, assessing where each is in the URI,
-	 *	escaping tainted ones where needed.  Following each space in the
-	 *	input a new VB group is started.
-	 */
-
-	fr_assert(in_vb->type == FR_TYPE_GROUP);
-
 	randle->request = request;	/* Populate the request pointer for escape callbacks */
-
-	if (fr_uri_escape_list(&in_vb->vb_group, rest_uri_parts, NULL) < 0) {
-		RPEDEBUG("Failed escaping URI");
-
-	error:
-		rest_slab_release(randle);
-		talloc_free(section);
-
-		return XLAT_ACTION_FAIL;
-	}
-
-	uri_vb = fr_value_box_list_head(&in_vb->vb_group);
-	if (fr_value_box_list_concat_in_place(uri_vb,
-					      uri_vb, &in_vb->vb_group, FR_TYPE_STRING,
-					      FR_VALUE_BOX_LIST_FREE, true,
-					      SIZE_MAX) < 0) {
-		REDEBUG("Concatenating URI");
-		goto error;
-	}
-
-	/*
-	 *	Any additional arguments are freeform data
-	 */
-	if ((in_vb = fr_value_box_list_head(in))) {
-		if (fr_value_box_list_concat_in_place(in_vb,
-						      in_vb, in, FR_TYPE_STRING,
-						      FR_VALUE_BOX_LIST_FREE, true,
-						      SIZE_MAX) < 0) {
-			REDEBUG("Failed to concatenate freeform data");
-			goto error;
-		}
-		section->request.body = REST_HTTP_BODY_CUSTOM;
-	}
+	if (data_vb) section->request.body = REST_HTTP_BODY_CUSTOM;
 
 	RDEBUG2("Sending HTTP %s to \"%pV\"",
 	       (section->request.method == REST_HTTP_METHOD_CUSTOM) ?
 	       	section->request.method_str : fr_table_str_by_value(http_method_table, section->request.method, NULL),
 	        uri_vb);
+
+	if (header_vb) {
+		fr_value_box_list_foreach(&header_vb->vb_group, header) {
+			if (unlikely(rest_request_config_add_header(request, randle, header->vb_strvalue, true) < 0)) {
+			error_release:
+				rest_slab_release(randle);
+				goto error;
+			}
+		}
+	}
 
 	/*
 	 *  Configure various CURL options, and initialise the read/write
@@ -627,11 +609,11 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 *
 	 *  @todo We could extract the User-Name and password from the URL string.
 	 */
-	ret = rest_request_config(MODULE_CTX(dl_module_instance_by_data(inst), t, xctx->env_data, NULL),
+	ret = rest_request_config(MODULE_CTX(xctx->mctx->mi, t, xctx->env_data, NULL),
 				  section, request, randle, section->request.method,
 				  section->request.body,
-				  uri_vb->vb_strvalue, in_vb ? in_vb->vb_strvalue : NULL);
-	if (ret < 0) goto error;
+				  uri_vb->vb_strvalue, data_vb ? data_vb->vb_strvalue : NULL);
+	if (ret < 0) goto error_release;
 
 	/*
 	 *  Send the CURL request, pre-parse headers, aggregate incoming
@@ -640,14 +622,14 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 * @fixme need to pass in thread to all xlat functions
 	 */
 	ret = fr_curl_io_request_enqueue(t->mhandle, request, randle);
-	if (ret < 0) goto error;
+	if (ret < 0) goto error_release;
 
 	return unlang_xlat_yield(request, rest_xlat_resume, rest_io_xlat_signal, ~FR_SIGNAL_CANCEL, rctx);
 }
 
 static unlang_action_t mod_authorize_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -733,7 +715,7 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const	*section = &inst->authorize;
 
@@ -761,7 +743,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 static unlang_action_t mod_authenticate_result(rlm_rcode_t *p_result,
 					       module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -844,7 +826,7 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_call_env_t 		*call_env = talloc_get_type_abort(mctx->env_data, rlm_rest_call_env_t);
 	rlm_rest_section_t const	*section = &inst->authenticate;
@@ -903,7 +885,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 
 static unlang_action_t mod_accounting_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -954,7 +936,7 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const	*section = &inst->accounting;
 
@@ -981,7 +963,7 @@ static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, mo
 
 static unlang_action_t mod_post_auth_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -1032,7 +1014,7 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_post_auth(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const	*section = &inst->post_auth;
 
@@ -1177,12 +1159,6 @@ static int parse_sub_section(rlm_rest_t *inst, CONF_SECTION *parent, conf_parser
 	return 0;
 }
 
-static int _mod_conn_free(fr_curl_io_request_t *randle)
-{
-	curl_easy_cleanup(randle->candle);
-	return 0;
-}
-
 /** Cleans up after a REST request.
  *
  * Resets all options associated with a CURL handle, and frees any headers
@@ -1194,7 +1170,7 @@ static int _mod_conn_free(fr_curl_io_request_t *randle)
  * @param[in] randle to cleanup.
  * @param[in] uctx unused.
  */
-static int rest_request_cleanup(fr_curl_io_request_t *randle, UNUSED void *uctx)
+static int _rest_request_cleanup(fr_curl_io_request_t *randle, UNUSED void *uctx)
 {
 	rlm_rest_curl_context_t *ctx = talloc_get_type_abort(randle->uctx, rlm_rest_curl_context_t);
 	CURL			*candle = randle->candle;
@@ -1212,6 +1188,22 @@ static int rest_request_cleanup(fr_curl_io_request_t *randle, UNUSED void *uctx)
 		ctx->headers = NULL;
 	}
 
+#ifndef NDEBUG
+	{
+		CURLcode ret;
+		/*
+		 *  With curl 7.61 when a request in cancelled we get a result
+		 *  with a NULL (invalid) pointer to private data.  This lets
+		 *  us know that the request was returned to the slab.
+		 */
+		ret = curl_easy_setopt(candle, CURLOPT_PRIVATE, (void *)0xdeadc341);
+		if (unlikely(ret != CURLE_OK)) {
+			ERROR("Failed to set private data on curl easy handle %p: %s",
+			      candle, curl_easy_strerror(ret));
+		}
+	}
+#endif
+
 	/*
 	 *  Free response data
 	 */
@@ -1222,6 +1214,12 @@ static int rest_request_cleanup(fr_curl_io_request_t *randle, UNUSED void *uctx)
 	ctx->response.header = NULL;	/* This is owned by the parsed call env and must not be freed */
 
 	randle->request = NULL;
+	return 0;
+}
+
+static int _mod_conn_free(fr_curl_io_request_t *randle)
+{
+	curl_easy_cleanup(randle->candle);
 	return 0;
 }
 
@@ -1244,7 +1242,7 @@ static int rest_conn_alloc(fr_curl_io_request_t *randle, void *uctx)
 	randle->uctx = curl_ctx;
 	talloc_set_destructor(randle, _mod_conn_free);
 
-	rest_slab_element_set_destructor(randle, rest_request_cleanup, NULL);
+	rest_slab_element_set_destructor(randle,  _rest_request_cleanup, NULL);
 
 	return 0;
 }
@@ -1261,7 +1259,7 @@ static int rest_conn_alloc(fr_curl_io_request_t *randle, void *uctx)
  */
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_rest_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
+	rlm_rest_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_rest_t);
 	rlm_rest_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	fr_curl_handle_t	*mhandle;
 
@@ -1311,8 +1309,8 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
  */
 static int instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_rest_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_rest_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_rest_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 
 	inst->xlat.request.method_str = "GET";
 	inst->xlat.request.body = REST_HTTP_BODY_NONE;
@@ -1325,13 +1323,13 @@ static int instantiate(module_inst_ctx_t const *mctx)
 	if (
 		(parse_sub_section(inst, conf, xlat_config, &inst->xlat, "xlat") < 0) ||
 		(parse_sub_section(inst, conf, section_config, &inst->authorize,
-				   section_type_value[MOD_AUTHORIZE]) < 0) ||
+				   "authorize") < 0) ||
 		(parse_sub_section(inst, conf, section_config, &inst->authenticate,
-				   section_type_value[MOD_AUTHENTICATE]) < 0) ||
+				   "authenticate") < 0) ||
 		(parse_sub_section(inst, conf, section_config, &inst->accounting,
-				   section_type_value[MOD_ACCOUNTING]) < 0) ||
+				   "accounting") < 0) ||
 		(parse_sub_section(inst, conf, section_config, &inst->post_auth,
-				   section_type_value[MOD_POST_AUTH]) < 0))
+				   "post-auth") < 0))
 	{
 		return -1;
 	}
@@ -1344,10 +1342,9 @@ static int instantiate(module_inst_ctx_t const *mctx)
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_rest_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
-	xlat_t		*xlat;
+	xlat_t	*xlat;
 
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, rest_xlat, FR_TYPE_STRING);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, rest_xlat, FR_TYPE_STRING);
 	xlat_func_args_set(xlat, rest_xlat_args);
 	xlat_func_call_env_set(xlat, &rest_call_env_xlat);
 
@@ -1393,7 +1390,6 @@ module_rlm_t rlm_rest = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "rest",
-		.flags			= MODULE_TYPE_THREAD_SAFE,
 		.inst_size		= sizeof(rlm_rest_t),
 		.thread_inst_size	= sizeof(rlm_rest_thread_t),
 		.config			= module_config,
@@ -1403,17 +1399,19 @@ module_rlm_t rlm_rest = {
 		.thread_instantiate	= mod_thread_instantiate,
 		.thread_detach		= mod_thread_detach
 	},
-	.method_names = (module_method_name_t[]){
-		/*
-		 *	Hack to support old configurations
-		 */
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize,	.method_env = &rest_call_env_authorize		},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			/*
+			 *	Hack to support old configurations
+			 */
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY), .method = mod_authorize, .method_env = &rest_call_env_authorize },
 
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_accounting,	.method_env = &rest_call_env_accounting		},
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize,	.method_env = &rest_call_env_authorize		},
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting,	.method_env = &rest_call_env_accounting		},
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate,	.method_env = &rest_call_env_authenticate 	},
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth,	.method_env = &rest_call_env_post_auth		},
-		MODULE_NAME_TERMINATOR
+			{ .section = SECTION_NAME("recv", "accounting-request"), .method = mod_accounting, .method_env = &rest_call_env_accounting },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize, .method_env = &rest_call_env_authorize },
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting, .method_env = &rest_call_env_accounting },
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate, .method_env = &rest_call_env_authenticate },
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth, .method_env = &rest_call_env_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

@@ -36,11 +36,10 @@ extern "C" {
 
 typedef struct {
 	CONF_SECTION			*server_cs;			//!< server CS for this listener
-	CONF_SECTION			*cs;				//!< my configuration
 	fr_app_t			*self;				//!< child / parent linking issues
 	char const			*type;				//!< packet type name
 
-	dl_module_inst_t		*io_submodule;			//!< As provided by the transport_parse
+	module_instance_t		*io_submodule;			//!< As provided by the transport_parse
 									///< callback.  Broken out into the
 									///< app_io_* fields below for convenience.
 
@@ -49,7 +48,7 @@ typedef struct {
 	CONF_SECTION			*app_io_conf;			//!< Easy access to the app_io's config section.
 //	proto_detail_app_io_t		*app_io_private;		//!< Internal interface for proto_radius.
 
-	dl_module_inst_t		*work_submodule;		//!< the worker
+	module_instance_t		*work_submodule;		//!< the worker
 
 	fr_app_io_t const		*work_io;			//!< Easy access to the app_io handle.
 	void				*work_io_instance;		//!< Easy access to the app_io instance.
@@ -133,6 +132,7 @@ struct proto_detail_work_thread_s {
 
 	size_t				last_search;		//!< where we last searched in the buffer
 								//!< MUST be offset, as the buffers can change.
+	unsigned int			last_line;		//!< line number of the last record read.
 
 	off_t				file_size;		//!< size of the file
 	off_t				header_offset;		//!< offset of the current header we're reading

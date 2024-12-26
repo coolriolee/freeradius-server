@@ -3,6 +3,7 @@
 #
 string redismaster
 string redisreplica
+string takeoverresult
 
 $INCLUDE cluster_reset.inc
 
@@ -12,7 +13,7 @@ if (!(%redis(SET, b, 'boom') == 'OK')) {
 }
 
 #  Leave some time (500ms) for the synchronisation
-%(delay:0.5)
+%delay(0.5)
 
 #  Note the current master
 &redismaster := %redis.node(b, 0)
@@ -26,7 +27,16 @@ if (%redis(@%redis.node(b, 0), DEBUG, SEGFAULT)) {
 }
 
 #  Forcefully failover the slave for that node
-if (!(%redis(@%{redisreplica}, CLUSTER, FAILOVER, TAKEOVER) == 'OK')) {
+#  If the failover has happened automatically, then there is no result
+#  which sometimes happens when running tests with sanitizers, due to
+#  slowness introduced by the sanitizers.
+try {
+	&takeoverresult = %redis(@%{redisreplica}, CLUSTER, FAILOVER, TAKEOVER)
+}
+catch fail {
+	&takeoverresult = 'OK'
+}
+if (&takeoverresult != 'OK') {
 	test_fail
 }
 
@@ -38,7 +48,7 @@ foreach &control.Filter-Id {
 	if (%redis.node(b, 0) == &redisreplica) {
 		break
 	}
-	%(delay:0.5)
+	%delay(0.5)
 }
 
 if (!(%redis(GET, b) == 'boom')) {
@@ -51,7 +61,7 @@ if (%redis(@%redis.node(b), DEBUG, SEGFAULT)) {
 }
 
 # No alternatives...
-%(delay:0.5)
+%delay(0.5)
 if (%redis(GET, b) == 'boom') {
 	test_fail
 }

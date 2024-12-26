@@ -43,6 +43,10 @@ RCSID("$Id$")
 #define XDEBUG DEBUG2
 #endif
 
+#define RDEBUG_ASSIGN(_name, _op, _box) do { \
+	RDEBUG2(((_box)->type == FR_TYPE_STRING) ? "%s %s \"%pV\"" : "%s %s %pV", _name, fr_tokens[_op], _box); \
+} while (0)
+
 typedef struct {
 	fr_value_box_list_t	result;			//!< result of expansion
 	tmpl_t const		*vpt;			//!< expanded tmpl
@@ -171,6 +175,7 @@ static int tmpl_to_values(TALLOC_CTX *ctx, edit_result_t *out, request_t *reques
 		 *	The other tmpl types MUST have already been
 		 *	converted to the "realized" types.
 		 */
+		tmpl_debug(vpt);
 		fr_assert(0);
 		break;
 	}
@@ -195,7 +200,7 @@ static void edit_debug_attr_vp(request_t *request, fr_pair_t *vp, map_t const *m
 			break;
 
 		default:
-			RDEBUG2("%s %s %pV", map->lhs->name, fr_tokens[vp->op], &vp->data);
+			RDEBUG_ASSIGN(map->lhs->name, vp->op, &vp->data);
 			break;
 		}
 	} else {
@@ -209,7 +214,7 @@ static void edit_debug_attr_vp(request_t *request, fr_pair_t *vp, map_t const *m
 			break;
 
 		default:
-			RDEBUG2("&%s %s %pV", vp->da->name, fr_tokens[vp->op], &vp->data);
+			RDEBUG_ASSIGN(vp->da->name, vp->op, &vp->data);
 			break;
 		}
 	}
@@ -265,7 +270,6 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 {
 	fr_pair_t *vp;
 	fr_pair_list_t *children;
-	bool copy_vps = true;
 	int rcode;
 	map_t const *map = current->map;
 	tmpl_dcursor_ctx_t cc;
@@ -278,7 +282,6 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 	 */
 	if (!map->rhs) {
 		children = &current->rhs.pair_list;
-		copy_vps = false;
 		goto apply_list;
 	}
 
@@ -342,7 +345,6 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 			return -1;
 		}
 
-		copy_vps = false;
 		goto apply_list;
 	}
 
@@ -387,6 +389,11 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 				continue;
 			}
 
+			if (vp->vp_edit) {
+				RWDEBUG("Attribute cannot be removed, as it is being used in a 'foreach' loop - %pP", vp);
+				continue;
+			}
+
 			if (fr_edit_list_pair_delete(current->el, list, vp) < 0) {
 				tmpl_dcursor_clear(&cc);
 				return -1;
@@ -409,7 +416,6 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 		}
 
 		children = &vp->vp_group;
-		copy_vps = true;
 		goto apply_list;
 	}
 
@@ -433,7 +439,6 @@ static int apply_edits_to_list(request_t *request, unlang_frame_state_edit_t *st
 	tmpl_dcursor_clear(&cc);
 
 	children = &current->rhs.pair_list;
-	copy_vps = false;
 
 	/*
 	 *	Apply structural thingies!
@@ -457,13 +462,15 @@ apply_list:
 	/*
 	 *	Print the children before we do the modifications.
 	 */
-	RDEBUG2("%s %s {", current->lhs.vpt->name, fr_tokens[map->op]);
-	if (fr_debug_lvl >= L_DBG_LVL_2) {
-		RINDENT();
-		edit_debug_attr_list(request, children, map);
-		REXDENT();
+	if (!current->parent) {
+		RDEBUG2("%s %s {", current->lhs.vpt->name, fr_tokens[map->op]);
+		if (fr_debug_lvl >= L_DBG_LVL_2) {
+			RINDENT();
+			edit_debug_attr_list(request, children, map);
+			REXDENT();
+		}
+		RDEBUG2("}");
 	}
-	RDEBUG2("}");
 
 	fr_pair_list_foreach(children, child) {
 		if (!fr_dict_attr_can_contain(current->lhs.vp->da, child->da)) {
@@ -474,27 +481,27 @@ apply_list:
 		}
 	}
 
-	if (current->el) {
-		rcode = fr_edit_list_apply_list_assignment(current->el, current->lhs.vp, map->op, children, copy_vps);
+	if (map->op != T_OP_EQ) {
+		fr_assert(current->el != NULL);
+
+		rcode = fr_edit_list_apply_list_assignment(current->el, current->lhs.vp, map->op, children,
+							   (children != &current->rhs.pair_list));
 		if (rcode < 0) RPEDEBUG("Failed performing list '%s' operation", fr_tokens[map->op]);
 
 	} else {
-		fr_assert(map->op == T_OP_EQ);
+#if 0
+		/*
+		 *	The RHS list _should_ be a copy of the LHS list.  But for some cases it's not.  We
+		 *	should spend time tracking this down, but not today.
+		 *
+		 *	For now, brute-force copy isn't wrong.
+		 */
+		if (children == &current->rhs.pair_list) {
+			fr_pair_list_append(&current->lhs.vp->vp_group, children);
+		} else
+#endif
+		(void) fr_pair_list_copy(current->lhs.vp, &current->lhs.vp->vp_group, children);
 
-		if (copy_vps) {
-			fr_assert(children != &current->rhs.pair_list);
-			fr_assert(fr_pair_list_empty(&current->rhs.pair_list));
-
-			if (fr_pair_list_copy(current->lhs.vp, &current->rhs.pair_list, children) < 0) {
-				rcode = -1;
-				goto done;
-			}
-			children = &current->rhs.pair_list;
-		} else {
-			copy_vps = true; /* the  */
-		}
-
-		fr_pair_list_append(&current->lhs.vp->vp_group, children);
 		PAIR_VERIFY(current->lhs.vp);
 		rcode = 0;
 	}
@@ -503,8 +510,24 @@ apply_list:
 	 *	If the child list wasn't copied, then we just created it, and we need to free it.
 	 */
 done:
-	if (!copy_vps) fr_pair_list_free(children);
+	if (children == &current->rhs.pair_list) fr_pair_list_free(children);
 	return rcode;
+}
+
+static bool pair_is_editable(request_t *request, fr_pair_t *vp)
+{
+	if (vp->vp_edit) {
+		RWDEBUG("Attribute cannot be removed, as it is being used in a 'foreach' loop - %s", vp->da->name);
+		return false;
+	}
+
+	if (!fr_type_is_structural(vp->vp_type)) return true;
+
+	fr_pair_list_foreach(&vp->vp_group, child) {
+		if (!pair_is_editable(request, child)) return false;
+	}
+
+	return true;
 }
 
 static int edit_delete_lhs(request_t *request, edit_map_t *current, bool delete)
@@ -546,8 +569,14 @@ static int edit_delete_lhs(request_t *request, edit_map_t *current, bool delete)
 		parent = fr_pair_parent(vp);
 		fr_assert(parent != NULL);
 
+		if (!pair_is_editable(request, vp)) {
+			tmpl_dcursor_clear(&cc);
+			return -1;
+		}
+
 		if (!delete) {
 			if (fr_type_is_structural(vp->vp_type)) {
+
 				if (fr_edit_list_free_pair_children(current->el, vp) < 0) return -1;
 			} else {
 				/*
@@ -756,7 +785,7 @@ static int apply_edits_to_leaf(request_t *request, unlang_frame_state_edit_t *st
 		/*
 		 *	There's always at least one LHS vp created.  So we apply that first.
 		 */
-		RDEBUG2("%s %s %pV", current->lhs.vpt->name, fr_tokens[map->op], box);
+		RDEBUG_ASSIGN(current->lhs.vpt->name, map->op, box);
 
 		/*
 		 *	The VP has already been inserted into the edit list, so we don't need to edit it's
@@ -786,7 +815,7 @@ static int apply_edits_to_leaf(request_t *request, unlang_frame_state_edit_t *st
 		 *	Loop over the remaining items, adding the VPs we've just created.
 		 */
 		while ((box = fr_dcursor_next(&cursor)) != NULL) {
-			RDEBUG2("%s %s %pV", current->lhs.vpt->name, fr_tokens[map->op], box);
+			RDEBUG_ASSIGN(current->lhs.vpt->name, map->op, box);
 
 			MEM(vp = fr_pair_afrom_da(current->lhs.vp_parent, da));
 			if (fr_value_box_cast(vp, &vp->data, vp->vp_type, vp->da, box) < 0) goto fail;
@@ -816,7 +845,7 @@ apply_op:
 	 *	All other operators are "modify in place", of the existing current->lhs.vp
 	 */
 	while (box) {
-		RDEBUG2("%s %s %pV", current->lhs.vpt->name, fr_tokens[map->op], box);
+		RDEBUG_ASSIGN(current->lhs.vpt->name, map->op, box);
 
 		/*
 		 *	The apply function also takes care of doing data type upcasting and conversion.  So we don't
@@ -956,7 +985,7 @@ static int check_rhs(request_t *request, unlang_frame_state_edit_t *state, edit_
 	    ((tmpl_attr_tail_num(current->lhs.vpt) == NUM_UNSPEC) || (tmpl_attr_tail_num(current->lhs.vpt) > 0) ||
 	     !current->map->rhs)) {
 		if (edit_delete_lhs(request, current,
-				(tmpl_attr_tail_num(current->lhs.vpt) == NUM_UNSPEC) || !current->map->rhs) < 0) return -1;
+				    (tmpl_attr_tail_num(current->lhs.vpt) == NUM_UNSPEC) || !current->map->rhs) < 0) return -1;
 	}
 
 	/*
@@ -1530,7 +1559,7 @@ static unlang_action_t process_edit(rlm_rcode_t *p_result, request_t *request, u
 
 			rcode = state->current->func(request, state, state->current);
 			if (rcode < 0) {
-				RINDENT_RESTORE(request, &state->indent);
+				RINDENT_RESTORE(request, state);
 
 				/*
 				 *	Expansions, etc. failures are SOFT failures, which undo the edit
@@ -1567,6 +1596,8 @@ static unlang_action_t process_edit(rlm_rcode_t *p_result, request_t *request, u
 	 *	Freeing the edit list will automatically commit the edits.  i.e. trash the undo list, and
 	 *	leave the edited pairs in place.
 	 */
+
+	RINDENT_RESTORE(request, state);
 
 	*p_result = RLM_MODULE_NOOP;
 	if (state->success) *state->success = true;
@@ -1605,7 +1636,7 @@ static void edit_state_init_internal(request_t *request, unlang_frame_state_edit
 	/*
 	 *	Save current indentation for the error path.
 	 */
-	RINDENT_SAVE(&state->indent, request);
+	RINDENT_SAVE(state, request);
 }
 
 /** Execute an update block

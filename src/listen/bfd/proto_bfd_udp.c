@@ -230,7 +230,7 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t req
 	return rcode;
 }
 
-static void mod_network_get(void *instance, int *ipproto, bool *dynamic_clients, fr_trie_t const **trie)
+static void mod_network_get(int *ipproto, bool *dynamic_clients, fr_trie_t const **trie, void *instance)
 {
 	proto_bfd_udp_t *inst = talloc_get_type_abort(instance, proto_bfd_udp_t);
 
@@ -353,10 +353,10 @@ static char const *mod_name(fr_listen_t *li)
 }
 
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_bfd_udp_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_bfd_udp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_bfd_udp_t		*inst = talloc_get_type_abort(mctx->mi->data, proto_bfd_udp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	size_t			num;
 	CONF_ITEM		*ci;
 	CONF_SECTION		*server_cs;
@@ -420,7 +420,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
-	ci = cf_parent(inst->cs); /* listen { ... } */
+	ci = cf_section_to_item(mctx->mi->parent->conf); /* listen { ... } */
 	fr_assert(ci != NULL);
 	ci = cf_parent(ci);
 	fr_assert(ci != NULL);
@@ -520,7 +520,7 @@ fr_app_io_t proto_bfd_udp = {
 		.config			= udp_listen_config,
 		.inst_size		= sizeof(proto_bfd_udp_t),
 		.thread_inst_size	= sizeof(proto_bfd_udp_thread_t),
-		.bootstrap		= mod_bootstrap
+		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= FR_BFD_HEADER_LENGTH + 64, /* enough for some auth packets */
 	.track_duplicates	= false,

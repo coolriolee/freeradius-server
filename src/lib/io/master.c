@@ -143,10 +143,11 @@ struct fr_io_connection_s {
 	fr_listen_t			*child;		//!< child listener (app_io) for this socket
 	fr_io_client_t			*client;	//!< our local client (pending or connected).
 	fr_io_client_t			*parent;	//!< points to the parent client.
-	dl_module_inst_t   		*dl_inst;	//!< for submodule
+	module_instance_t   		*mi;		//!< for submodule
 
 	bool				dead;		//!< roundabout way to get the network side to close a socket
 	bool				paused;		//!< event filter doesn't like resuming something that isn't paused
+	bool				in_parent_hash;	//!< for tracking thread issues
 	fr_event_list_t			*el;		//!< event list for this connection
 	fr_network_t			*nr;		//!< network for this connection
 };
@@ -391,7 +392,10 @@ static fr_client_t *radclient_clone(TALLOC_CTX *ctx, fr_client_t const *parent)
 	DUP_FIELD(server);
 	DUP_FIELD(nas_type);
 
-	COPY_FIELD(message_authenticator);
+	COPY_FIELD(require_message_authenticator);
+	COPY_FIELD(limit_proxy_state);
+	COPY_FIELD(received_message_authenticator);
+	COPY_FIELD(first_packet_no_proxy_state);
 	/* dynamic MUST be false */
 	COPY_FIELD(server_cs);
 	COPY_FIELD(cs);
@@ -478,7 +482,7 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 {
 	int ret;
 	fr_io_connection_t *connection;
-	dl_module_inst_t *dl_inst = NULL;
+	module_instance_t *mi = NULL;
 	fr_listen_t *li;
 	fr_client_t *radclient;
 
@@ -492,6 +496,7 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 	 *	called when the instance data is freed.
 	 */
 	if (!nak) {
+		CONF_SECTION *cs;
 		char *inst_name;
 
 		if (inst->max_connections || client->radclient->limit.max_connections) {
@@ -510,7 +515,6 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 				if ((thread->num_connections + 1) >= max_connections) {
 					DEBUG("proto_%s - Ignoring connection from client %s - 'max_connections' limit reached.",
 					      inst->app->common.name, client->radclient->shortname);
-				close_and_return:
 					if (fd >= 0) close(fd);
 					return NULL;
 				}
@@ -518,33 +522,45 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 		}
 
 		/*
-		 *	FIXME - This is not at all thread safe
+		 *	Add a client module into a sublist
 		 */
-		inst_name = talloc_asprintf(NULL, "%s%"PRIu64, inst->transport, thread->client_id++);
-		if (dl_module_instance(NULL, &dl_inst, inst->dl_inst,
-				       DL_MODULE_TYPE_SUBMODULE, inst->transport, inst_name) < 0) {
-			talloc_free(inst_name);
-			DEBUG("Failed to find proto_%s_%s", inst->app->common.name, inst->transport);
-			goto close_and_return;
-		}
-		talloc_free(inst_name);
+		inst_name = talloc_asprintf(NULL, "%"PRIu64, thread->client_id++);
+		mi = module_instance_copy(inst->clients, inst->submodule, inst_name);
 
-/*
-		if (dl_module_conf_parse(dl_inst, inst->server_cs) < 0) {
+		cs = cf_section_dup(mi, NULL, inst->submodule->conf,
+				    cf_section_name1(inst->submodule->conf),
+				    cf_section_name2(inst->submodule->conf), false);
+		if (module_instance_conf_parse(mi, cs) < 0) {
+			cf_log_err(inst->server_cs, "Failed parsing module config");
 			goto cleanup;
 		}
-*/
-		fr_assert(dl_inst != NULL);
+
+		/* Thread local module lists never run bootstrap */
+		if (module_instantiate(mi) < 0) {
+			cf_log_err(inst->server_cs, "Failed instantiating module");
+			goto cleanup;
+		}
+
+		if (module_thread_instantiate(mi, mi, thread->el) < 0) {
+			cf_log_err(inst->server_cs, "Failed instantiating module");
+			goto cleanup;
+		}
+
+		/*
+		 *	FIXME - Instantiate the new module?!
+		 */
+		talloc_free(inst_name);
+		fr_assert(mi != NULL);
 	} else {
-		dl_inst = talloc_init_const("nak");
+		mi = talloc_init_const("nak");
 	}
 
-	MEM(connection = talloc_zero(dl_inst, fr_io_connection_t));
+	MEM(connection = talloc_zero(mi, fr_io_connection_t));
 	MEM(connection->address = talloc_memdup(connection, address, sizeof(*address)));
 	(void) talloc_set_name_const(connection->address, "fr_io_address_t");
 
 	connection->parent = client;
-	connection->dl_inst = dl_inst;
+	connection->mi = mi;
 
 	MEM(connection->client = talloc_named(NULL, sizeof(fr_io_client_t), "fr_io_client_t"));
 	memset(connection->client, 0, sizeof(*connection->client));
@@ -657,7 +673,7 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 		li->connected = true;
 		li->app_io = thread->child->app_io;
 		li->thread_instance = connection;
-		li->app_io_instance = dl_inst->data;
+		li->app_io_instance = mi->data;
 		li->track_duplicates = thread->child->app_io->track_duplicates;
 
 		/*
@@ -732,13 +748,13 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 						  &connection->address->socket.inet.src_ipaddr,
 						  connection->address->socket.inet.src_port) < 0) {
 				DEBUG("proto_%s - Failed getting IP address", inst->app->common.name);
-				talloc_free(dl_inst);
+				talloc_free(mi);
 				return NULL;
 			}
 
 			if (inst->app_io->open(connection->child) < 0) {
 				DEBUG("proto_%s - Failed opening connected socket.", inst->app->common.name);
-				talloc_free(dl_inst);
+				talloc_free(mi);
 				return NULL;
 			}
 
@@ -790,6 +806,7 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 		if (nak) (void) fr_hash_table_delete(client->ht, nak);
 		ret = fr_hash_table_insert(client->ht, connection);
 		client->ready_to_delete = false;
+		connection->in_parent_hash = true;
 
 		if (!ret) {
 			pthread_mutex_unlock(&client->mutex);
@@ -824,7 +841,7 @@ static fr_io_connection_t *fr_io_connection_alloc(fr_io_instance_t const *inst,
 
 	cleanup:
 		if (fd >= 0) close(fd);
-		talloc_free(dl_inst);
+		talloc_free(mi);
 		return NULL;
 	}
 
@@ -1995,11 +2012,12 @@ static void client_expiry_timer(fr_event_list_t *el, fr_time_t now, void *uctx)
 		 *	parents list of connections, and delete it.
 		 */
 		if (connection) {
-			fr_io_client_t *parent = connection->parent;
-
-			pthread_mutex_lock(&parent->mutex);
-			if (parent->ht) (void) fr_hash_table_delete(parent->ht, connection);
-			pthread_mutex_unlock(&parent->mutex);
+			pthread_mutex_lock(&connection->parent->mutex);
+			if (connection->in_parent_hash) {
+				connection->in_parent_hash = false;
+				(void) fr_hash_table_delete(connection->parent->ht, connection);
+			}
+			pthread_mutex_unlock(&connection->parent->mutex);
 
 			/*
 			 *	Mark the connection as dead, and tell
@@ -2443,8 +2461,11 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, fr_time_t request_ti
 	DUP_FIELD(nas_type);
 
 	COPY_FIELD(ipaddr);
-	COPY_FIELD(message_authenticator);
+	COPY_FIELD(src_ipaddr);
+	COPY_FIELD(require_message_authenticator);
+	COPY_FIELD(limit_proxy_state);
 	COPY_FIELD(use_connected);
+	COPY_FIELD(cs);
 
 	// @todo - fill in other fields?
 
@@ -2453,7 +2474,12 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, fr_time_t request_ti
 	radclient = client->radclient; /* laziness */
 	radclient->server_cs = inst->server_cs;
 	radclient->server = cf_section_name2(inst->server_cs);
-	radclient->cs = NULL;
+
+	/*
+	 *	Re-parent the conf section used to build this client
+	 *	so its lifetime is linked to the client
+	 */
+	talloc_steal(radclient, radclient->cs);
 
 	/*
 	 *	This is a connected socket, and it's just been
@@ -2498,7 +2524,7 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, fr_time_t request_ti
 	 */
 	if (radclient->use_connected && !inst->app_io->connection_set) {
 		DEBUG("proto_%s - cannot use connected sockets as underlying 'transport = %s' does not support it.",
-		      inst->app_io->common.name, inst->transport);
+		      inst->app_io->common.name, inst->submodule->module->exported->name);
 		goto error;
 	}
 
@@ -2580,7 +2606,6 @@ static int mod_close(fr_listen_t *li)
 	fr_io_instance_t const *inst;
 	fr_io_connection_t *connection;
 	fr_listen_t *child;
-	fr_io_client_t *parent;
 
 	get_inst(li, &inst, NULL, &connection, &child);
 
@@ -2608,32 +2633,29 @@ static int mod_close(fr_listen_t *li)
 	/*
 	 *	Remove connection from parent hash table
 	 */
-	parent = connection->parent;
-	pthread_mutex_lock(&parent->mutex);
-	if (parent->ht) (void) fr_hash_table_delete(parent->ht, connection);
-	pthread_mutex_unlock(&parent->mutex);
+	pthread_mutex_lock(&connection->parent->mutex);
+	if (connection->in_parent_hash) {
+		connection->in_parent_hash = false;
+		(void) fr_hash_table_delete(connection->parent->ht, connection);
+	}
+	pthread_mutex_unlock(&connection->parent->mutex);
 
 	/*
 	 *	Clean up listener
 	 */
 	fr_network_listen_delete(connection->nr, child);
 
-	talloc_free(connection->dl_inst);
+	talloc_free(connection->mi);
 
 	return 0;
 }
 
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	fr_io_instance_t *inst = mctx->inst->data;
-	CONF_SECTION *conf = mctx->inst->conf;
+	fr_io_instance_t *inst = mctx->mi->data;
+	CONF_SECTION *conf = mctx->mi->conf;
 
-	/*
-	 *	Find and bootstrap the application IO handler.
-	 */
-	inst->app_io = (fr_app_io_t const *) inst->submodule->module->common;
-
+	inst->app_io = (fr_app_io_t const *) inst->submodule->exported;
 	inst->app_io_conf = inst->submodule->conf;
 	inst->app_io_instance = inst->submodule->data;
 
@@ -2655,17 +2677,12 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
-	if (inst->app_io->common.bootstrap && (inst->app_io->common.bootstrap(MODULE_INST_CTX(inst->submodule)) < 0)) {
-		cf_log_err(inst->app_io_conf, "Bootstrap failed for proto_%s", inst->app_io->common.name);
-		return -1;
-	}
-
 	/*
 	 *	Get various information after bootstrapping the
 	 *	application IO module.
 	 */
 	if (inst->app_io->network_get) {
-		inst->app_io->network_get(inst->app_io_instance, &inst->ipproto, &inst->dynamic_clients, &inst->networks);
+		inst->app_io->network_get(&inst->ipproto, &inst->dynamic_clients, &inst->networks, inst->app_io_instance);
 	}
 
 	if ((inst->ipproto == IPPROTO_TCP) && !inst->app_io->connection_set) {
@@ -2695,6 +2712,15 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
+	/*
+	 *	Create a list of client modules.
+	 *
+	 *	FIXME - Probably only want to do this for connected sockets?
+	 *
+	 *	FIXME - We probably want write protect enabled?
+	 */
+	inst->clients = module_list_alloc(inst, &module_list_type_thread_local, "clients", false);
+	module_list_mask_set(inst->clients, MODULE_INSTANCE_BOOTSTRAPPED);
 
 	return 0;
 }
@@ -2711,23 +2737,6 @@ static char const *mod_name(fr_listen_t *li)
 
 	fr_assert(child != NULL);
 	return child->app_io->get_name(child);
-}
-
-
-static int mod_instantiate(module_inst_ctx_t const *mctx)
-{
-	fr_io_instance_t	*inst = mctx->inst->data;
-	CONF_SECTION		*conf = mctx->inst->conf;
-
-	fr_assert(inst->app_io != NULL);
-
-	if (inst->app_io->common.instantiate &&
-	    (inst->app_io->common.instantiate(MODULE_INST_CTX(inst->submodule)) < 0)) {
-		cf_log_err(conf, "Instantiation failed for \"proto_%s\"", inst->app_io->common.name);
-		return -1;
-	}
-
-	return 0;
 }
 
 /** Create a trie from arrays of allow / deny IP addresses
@@ -2919,7 +2928,7 @@ int fr_io_listen_free(fr_listen_t *li)
 	return 0;
 }
 
-int fr_master_io_listen(TALLOC_CTX *ctx, fr_io_instance_t *inst, fr_schedule_t *sc,
+int fr_master_io_listen(fr_io_instance_t *inst, fr_schedule_t *sc,
 			size_t default_message_size, size_t num_messages)
 {
 	fr_listen_t	*li, *child;
@@ -2943,7 +2952,7 @@ int fr_master_io_listen(TALLOC_CTX *ctx, fr_io_instance_t *inst, fr_schedule_t *
 	 *	path data takes from the socket to the decoder and
 	 *	back again.
 	 */
-	MEM(li = talloc_zero(ctx, fr_listen_t));
+	MEM(li = talloc_zero(NULL, fr_listen_t));
 	talloc_set_destructor(li, fr_io_listen_free);
 
 	/*
@@ -3132,7 +3141,6 @@ fr_app_io_t fr_master_app_io = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "radius_master_io",
 
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate,
 	},
 	.default_message_size	= 4096,

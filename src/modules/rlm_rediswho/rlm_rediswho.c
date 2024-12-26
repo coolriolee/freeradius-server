@@ -196,8 +196,8 @@ static unlang_action_t mod_accounting_all(rlm_rcode_t *p_result, rlm_rediswho_t 
 
 static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_rediswho_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rediswho_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	rlm_rediswho_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_rediswho_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	rlm_rcode_t		rcode;
 	fr_pair_t		*vp;
 	fr_dict_enum_value_t	*dv;
@@ -231,8 +231,8 @@ static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, mo
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_rediswho_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_rediswho_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_rediswho_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_rediswho_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 
 	inst->cluster = fr_redis_cluster_alloc(inst, conf, &inst->conf, true, NULL, NULL, NULL);
 	if (!inst->cluster) return -1;
@@ -252,14 +252,15 @@ module_rlm_t rlm_rediswho = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "rediswho",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_rediswho_t),
 		.config		= module_config,
 		.onload		= mod_load,
 		.instantiate	= mod_instantiate
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

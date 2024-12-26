@@ -39,15 +39,34 @@ static int8_t _cf_ident2_cmp(void const *a, void const *b);
 /** Return the next child that's of the specified type
  *
  * @param[in] parent	to return children from.
- * @param[in] prev	child to start searching from.
+ * @param[in] current	child to start searching from.
  * @param[in] type	to search for.
  * @return
  *	- The next #CONF_ITEM that's a child of ci matching type.
  *	- NULL if no #CONF_ITEM matches that criteria.
  */
-static CONF_ITEM *cf_next(CONF_ITEM const *parent, CONF_ITEM const *prev, CONF_ITEM_TYPE type)
+static CONF_ITEM *cf_next(CONF_ITEM const *parent, CONF_ITEM const *current, CONF_ITEM_TYPE type)
 {
-	cf_item_foreach_prev(parent, ci, UNCONST(CONF_ITEM *, prev)) {
+	cf_item_foreach_next(parent, ci, UNCONST(CONF_ITEM *, current)) {
+		if (ci->type == type) return ci;
+	}
+
+	return NULL;
+}
+
+/** Return the previos child that's of the specified type
+ *
+ * @param[in] parent	to return children from.
+ * @param[in] current	child to start searching from.
+ * @param[in] type	to search for.
+ * @return
+ *	- The next #CONF_ITEM that's a child of ci matching type.
+ *	- NULL if no #CONF_ITEM matches that criteria.
+ */
+static inline CC_HINT(always_inline)
+CONF_ITEM *cf_prev(CONF_ITEM const *parent, CONF_ITEM const *current, CONF_ITEM_TYPE type)
+{
+	cf_item_foreach_prev(parent, ci, UNCONST(CONF_ITEM *, current)) {
 		if (ci->type == type) return ci;
 	}
 
@@ -205,7 +224,7 @@ static CONF_ITEM *cf_find_next(CONF_ITEM const *parent, CONF_ITEM const *prev,
 	}
 
 	if (IS_WILDCARD(ident1)) {
-		cf_item_foreach_prev(parent, ci, prev) {
+		cf_item_foreach_next(parent, ci, prev) {
 			if (cf_ident2_cmp(ci, find) == 0) return ci;
 		}
 
@@ -213,7 +232,7 @@ static CONF_ITEM *cf_find_next(CONF_ITEM const *parent, CONF_ITEM const *prev,
 	}
 
 	if (IS_WILDCARD(ident2)) {
-		cf_item_foreach_prev(parent, ci, prev) {
+		cf_item_foreach_next(parent, ci, prev) {
 		     if (_cf_ident1_cmp(ci, find) == 0) return ci;
 
 		}
@@ -221,7 +240,7 @@ static CONF_ITEM *cf_find_next(CONF_ITEM const *parent, CONF_ITEM const *prev,
 		return NULL;
 	}
 
-	cf_item_foreach_prev(parent, ci, prev) {
+	cf_item_foreach_next(parent, ci, prev) {
 		if (_cf_ident2_cmp(ci, find) == 0) return ci;
 	}
 
@@ -422,12 +441,13 @@ void _cf_item_insert_after(CONF_ITEM *parent, CONF_ITEM *prev, CONF_ITEM *child)
  * @param[in] parent	to remove child from.
  * @param[in] child	to remove.
  * @return
- *	- The item removed.
+ *	- The previous item (makes iteration easier)
  *	- NULL if the item wasn't set.
  */
 CONF_ITEM *_cf_item_remove(CONF_ITEM *parent, CONF_ITEM *child)
 {
 	CONF_ITEM	*found = NULL;
+	CONF_ITEM	*prev;
 	bool		in_ident1, in_ident2;
 
 	if (!parent || cf_item_has_no_children(parent)) return NULL;
@@ -445,7 +465,7 @@ CONF_ITEM *_cf_item_remove(CONF_ITEM *parent, CONF_ITEM *child)
 	/*
 	 *	Fixup the linked list
 	 */
-	fr_dlist_remove(&parent->children, child);
+	prev = fr_dlist_remove(&parent->children, child);
 
 	in_ident1 = (fr_rb_remove_by_inline_node(parent->ident1, &child->ident1_node) != NULL);
 
@@ -476,22 +496,37 @@ CONF_ITEM *_cf_item_remove(CONF_ITEM *parent, CONF_ITEM *child)
 		}
 	}
 
-	return child;
+	return prev;
+}
+
+/** Return the next child of the CONF_ITEM
+ *
+ * @param[in] ci	to return children from.
+ * @param[in] curr	child to start searching from.
+ * @return
+ *	- The next #CONF_ITEM that's a child of cs.
+ *	- NULL if no more #CONF_ITEM.
+ */
+CONF_ITEM *_cf_item_next(CONF_ITEM const *ci, CONF_ITEM const *curr)
+{
+	if (!ci) return NULL;
+
+	return fr_dlist_next(&ci->children, curr);
 }
 
 /** Return the next child of cs
  *
  * @param[in] ci	to return children from.
- * @param[in] prev	child to start searching from.
+ * @param[in] curr	child to start searching from.
  * @return
  *	- The next #CONF_ITEM that's a child of cs.
  *	- NULL if no more #CONF_ITEM.
  */
-CONF_ITEM *_cf_item_next(CONF_ITEM const *ci, CONF_ITEM const *prev)
+CONF_ITEM *_cf_item_prev(CONF_ITEM const *ci, CONF_ITEM const *curr)
 {
 	if (!ci) return NULL;
 
-	return fr_dlist_next(&ci->children, prev);
+	return fr_dlist_prev(&ci->children, curr);
 }
 
 /** Initialize a CONF_ITEM, so we don't have repeated code
@@ -789,8 +824,6 @@ CONF_SECTION *_cf_section_alloc(TALLOC_CTX *ctx, CONF_SECTION *parent,
 	}
 	talloc_set_destructor(cs, _cf_section_free);
 
-	cs->attr = (cs->name1[0] == '&') | (parent && parent->attr);
-
 	if (parent) {
 		CONF_DATA const *cd;
 		conf_parser_t *rule;
@@ -886,7 +919,8 @@ void _cf_lineno_set(CONF_ITEM *ci, int lineno)
  * @param[in] name1	of new section.
  * @param[in] name2	of new section.
  * @param[in] copy_meta	Copy additional meta data for a section
- *			(like template, base, depth and variables).
+ *			(like template, base, depth, parsed state,
+ *			and variables).
  * @return
  *	- A duplicate of the existing section.
  *	- NULL on error.
@@ -922,7 +956,7 @@ CONF_SECTION *cf_section_dup(TALLOC_CTX *ctx, CONF_SECTION *parent, CONF_SECTION
 			break;
 
 		case CONF_ITEM_PAIR:
-			cp = cf_pair_dup(new, cf_item_to_pair(ci));
+			cp = cf_pair_dup(new, cf_item_to_pair(ci), copy_meta);
 			if (!cp) {
 				talloc_free(new);
 				return NULL;
@@ -940,18 +974,42 @@ CONF_SECTION *cf_section_dup(TALLOC_CTX *ctx, CONF_SECTION *parent, CONF_SECTION
 	return new;
 }
 
-
-/** Return the next child that's a #CONF_SECTION
+/** Return the first child in a CONF_SECTION
  *
  * @param[in] cs	to return children from.
- * @param[in] prev	child to start searching from.
  * @return
  *	- The next #CONF_ITEM that's a child of cs and a CONF_SECTION.
  *	- NULL if no #CONF_ITEM matches that criteria.
  */
-CONF_SECTION *cf_section_next(CONF_SECTION const *cs, CONF_SECTION const *prev)
+CONF_SECTION *cf_section_first(CONF_SECTION const *cs)
 {
-	return cf_item_to_section(cf_next(cf_section_to_item(cs), cf_section_to_item(prev), CONF_ITEM_SECTION));
+	return cf_item_to_section(cf_next(cf_section_to_item(cs), NULL, CONF_ITEM_SECTION));
+}
+
+/** Return the next child that's a #CONF_SECTION
+ *
+ * @param[in] cs	to return children from.
+ * @param[in] curr	child to start searching from.
+ * @return
+ *	- The next #CONF_ITEM that's a child of cs and a CONF_SECTION.
+ *	- NULL if no #CONF_ITEM matches that criteria.
+ */
+CONF_SECTION *cf_section_next(CONF_SECTION const *cs, CONF_SECTION const *curr)
+{
+	return cf_item_to_section(cf_next(cf_section_to_item(cs), cf_section_to_item(curr), CONF_ITEM_SECTION));
+}
+
+/** Return the previous child that's a #CONF_SECTION
+ *
+ * @param[in] cs	to return children from.
+ * @param[in] curr	child to start searching from.
+ * @return
+ *	- The next #CONF_ITEM that's a child of cs and a CONF_SECTION.
+ *	- NULL if no #CONF_ITEM matches that criteria.
+ */
+CONF_SECTION *cf_section_prev(CONF_SECTION const *cs, CONF_SECTION const *curr)
+{
+	return cf_item_to_section(cf_prev(cf_section_to_item(cs), cf_section_to_item(curr), CONF_ITEM_SECTION));
 }
 
 /** Find a CONF_SECTION with name1 and optionally name2.
@@ -995,12 +1053,14 @@ CONF_SECTION *cf_section_find_next(CONF_SECTION const *cs, CONF_SECTION const *p
 					       CONF_ITEM_SECTION, name1, name2));
 }
 
-/** Find a section in the lineage of a CONF_SECTION which matches a specific name1 and optionally name2.
+/** Find an ancestor of the passed CONF_ITEM which has a child matching a specific name1 and optionally name2.
+ *
+ * @note Despite the name, this function also searches in ci for a matching item.
  *
  * Will walk up the configuration tree, searching in each parent until a matching section is found or
  * we hit the root.
  *
- * @param[in] cs	The section we're searching in.
+ * @param[in] ci	The conf item we're searching back from.
  * @param[in] name1	of the section we're searching for. Special value CF_IDENT_ANY
  *			can be used to match any name1 value.
  * @param[in] name2	of the section we're searching for. Special value CF_IDENT_ANY
@@ -1009,25 +1069,22 @@ CONF_SECTION *cf_section_find_next(CONF_SECTION const *cs, CONF_SECTION const *p
  *	- The first matching subsection.
  *	- NULL if no subsections match.
  */
-CONF_SECTION *cf_section_find_in_parent(CONF_SECTION const *cs,
-			      		char const *name1, char const *name2)
+CONF_SECTION *_cf_section_find_in_parent(CONF_ITEM const *ci,
+			      		 char const *name1, char const *name2)
 {
-	CONF_ITEM const *parent = cf_section_to_item(cs);
-
 	do {
 		CONF_ITEM *found;
 
-		found = cf_find(parent, CONF_ITEM_SECTION, name1, name2);
+		found = cf_find(ci, CONF_ITEM_SECTION, name1, name2);
 		if (found) return cf_item_to_section(found);
-	} while ((parent = cf_parent(parent)));
+	} while ((ci = cf_parent(ci)));
 
 	return NULL;
 }
 
-
 /** Find a parent CONF_SECTION with name1 and optionally name2.
  *
- * @param[in] cs	The section we're searching in.
+ * @param[in] ci	The section we're searching in.
  * @param[in] name1	of the section we're searching for. Special value CF_IDENT_ANY
  *			can be used to match any name1 value.
  * @param[in] name2	of the section we're searching for. Special value CF_IDENT_ANY
@@ -1036,16 +1093,18 @@ CONF_SECTION *cf_section_find_in_parent(CONF_SECTION const *cs,
  *	- The first matching subsection.
  *	- NULL if no subsections match.
  */
-CONF_SECTION *cf_section_find_parent(CONF_SECTION const *cs,
-				     char const *name1, char const *name2)
+CONF_SECTION *_cf_section_find_parent(CONF_ITEM const *ci,
+				      char const *name1, char const *name2)
 {
-	CONF_ITEM *parent = cf_section_to_item(cs);
+	while ((ci = cf_parent(ci))) {
+		CONF_SECTION *found;
 
-	while ((parent = cf_parent(parent))) {
-		CONF_SECTION *found = cf_item_to_section(parent);
+		if (!cf_item_is_section(ci)) continue;	/* Could be data hanging off a pair*/
+
+		found = cf_item_to_section(ci);
 
 		if (cf_section_name_cmp(found, name1, name2) == 0) return found;
-	};
+	}
 
 	return NULL;
 }
@@ -1153,7 +1212,7 @@ char const *cf_section_name(CONF_SECTION const *cs)
  */
 char const *cf_section_argv(CONF_SECTION const *cs, int argc)
 {
-	if (!cs || !cs->argv || (argc < 0) || (argc > cs->argc)) return NULL;
+	if (!cs || !cs->argv || (argc < 0) || (argc >= cs->argc)) return NULL;
 
 	return cs->argv[argc];
 }
@@ -1254,11 +1313,12 @@ CONF_PAIR *cf_pair_alloc(CONF_SECTION *parent, char const *attr, char const *val
  *
  * @param parent	to allocate new pair in.
  * @param cp		to duplicate.
+ * @param copy_meta	Copy additional meta data for a pair
  * @return
  *	- NULL on error.
  *	- A duplicate of the input pair.
  */
-CONF_PAIR *cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp)
+CONF_PAIR *cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp, bool copy_meta)
 {
 	CONF_PAIR *new;
 
@@ -1268,7 +1328,7 @@ CONF_PAIR *cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp)
 	new = cf_pair_alloc(parent, cp->attr, cf_pair_value(cp), cp->op, cp->lhs_quote, cp->rhs_quote);
 	if (!new) return NULL;
 
-	new->parsed = cp->parsed;
+	if (copy_meta) new->parsed = cp->parsed;
 	cf_lineno_set(new, cp->item.lineno);
 	cf_filename_set(new, cp->item.filename);
 
@@ -1290,20 +1350,18 @@ CONF_PAIR *cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp)
 int cf_pair_replace(CONF_SECTION *cs, CONF_PAIR *cp, char const *value)
 {
 	CONF_PAIR *new_cp;
-	CONF_ITEM *ci;
 
 	if (!cs || !cp || !value) return -1;
 
 	/*
 	 *	Remove the old CONF_PAIR
 	 */
-	ci = cf_item_remove(cs, cp);
-	if (!fr_cond_assert(!ci || (ci == cf_pair_to_item(cp)))) return -1;
+	(void)cf_item_remove(cs, cp);
 
 	/*
 	 *	Add the new CONF_PAIR
 	 */
-	MEM(new_cp = cf_pair_dup(cs, cp));
+	MEM(new_cp = cf_pair_dup(cs, cp, true));
 	talloc_const_free(cp->value);
 	MEM(cp->value = talloc_typed_strdup(cp, value));
 
@@ -1335,14 +1393,39 @@ bool cf_pair_is_parsed(CONF_PAIR *cp)
 /** Return the next child that's a #CONF_PAIR
  *
  * @param[in] cs	to return children from.
- * @param[in] prev	child to start searching from.
  * @return
  *	- The next #CONF_ITEM that's a child of cs and a CONF_PAIR.
  *	- NULL if no #CONF_ITEM matches that criteria.
  */
-CONF_PAIR *cf_pair_next(CONF_SECTION const *cs, CONF_PAIR const *prev)
+CONF_PAIR *cf_pair_first(CONF_SECTION const *cs)
 {
-	return cf_item_to_pair(cf_next(cf_section_to_item(cs), cf_pair_to_item(prev), CONF_ITEM_PAIR));
+	return cf_item_to_pair(cf_next(cf_section_to_item(cs), NULL, CONF_ITEM_PAIR));
+}
+
+/** Return the next child that's a #CONF_PAIR
+ *
+ * @param[in] cs	to return children from.
+ * @param[in] curr	child to start searching from.
+ * @return
+ *	- The next #CONF_ITEM that's a child of cs and a CONF_PAIR.
+ *	- NULL if no #CONF_ITEM matches that criteria.
+ */
+CONF_PAIR *cf_pair_next(CONF_SECTION const *cs, CONF_PAIR const *curr)
+{
+	return cf_item_to_pair(cf_next(cf_section_to_item(cs), cf_pair_to_item(curr), CONF_ITEM_PAIR));
+}
+
+/** Return the next child that's a #CONF_PAIR
+ *
+ * @param[in] cs	to return children from.
+ * @param[in] curr	child to start searching from.
+ * @return
+ *	- The next #CONF_ITEM that's a child of cs and a CONF_PAIR.
+ *	- NULL if no #CONF_ITEM matches that criteria.
+ */
+CONF_PAIR *cf_pair_prev(CONF_SECTION const *cs, CONF_PAIR const *curr)
+{
+	return cf_item_to_pair(cf_prev(cf_section_to_item(cs), cf_pair_to_item(curr), CONF_ITEM_PAIR));
 }
 
 /** Search for a #CONF_PAIR with a specific name
@@ -1789,13 +1872,10 @@ CONF_DATA const *_cf_data_add_static(CONF_ITEM *ci, void const *data, char const
 void *_cf_data_remove(CONF_ITEM *parent, CONF_DATA const *cd)
 {
 	void *data;
-	CONF_ITEM *ci;
 
 	if (!cd) return NULL;
 
-	ci = cf_item_remove(parent, cd);
-	if (!fr_cond_assert(!ci || (ci == cf_data_to_item(cd)))) return NULL;
-	if (!ci) return NULL;
+	(void)cf_item_remove(parent, cd);
 
 	talloc_set_destructor(cd, NULL);	/* Disarm the destructor */
 	memcpy(&data, &cd->data, sizeof(data));
@@ -2191,7 +2271,7 @@ void _cf_log_perr_by_child(fr_log_type_t type, CONF_SECTION const *parent, char 
  *
  * @param[in] ci	being debugged.
  */
-void _cf_debug(CONF_ITEM const *ci)
+void _cf_item_debug(CONF_ITEM const *ci)
 {
 	/*
 	 *	Print summary of the item
@@ -2206,7 +2286,7 @@ void _cf_debug(CONF_ITEM const *ci)
 		DEBUG("  name1         : %s", cs->name1);
 		DEBUG("  name2         : %s", cs->name2 ? cs->name2 : "<none>");
 		DEBUG("  name2_quote   : %s", fr_table_str_by_value(fr_token_quotes_table, cs->name2_quote, "<INVALID>"));
-		DEBUG("  argc          : %u", cs->argc);
+		DEBUG("  argc          : %d", cs->argc);
 
 		for (i = 0; i < cs->argc; i++) {
 			char const *quote = fr_table_str_by_value(fr_token_quotes_table, cs->argv_quote[i], "<INVALID>");
@@ -2249,7 +2329,7 @@ void _cf_debug(CONF_ITEM const *ci)
 
 	DEBUG("  filename      : %s", ci->filename);
 	DEBUG("  line          : %i", ci->lineno);
-	DEBUG("  next          : %p", fr_dlist_next(&ci->parent->children, ci));
+	if (ci->parent) DEBUG("  next          : %p", fr_dlist_next(&ci->parent->children, ci));
 	DEBUG("  parent        : %p", ci->parent);
 	DEBUG("  children      : %s", cf_item_has_no_children(ci) ? "no" : "yes");
 	DEBUG("  ident1 tree   : %p (%u entries)", ci->ident1, ci->ident1 ? fr_rb_num_elements(ci->ident1) : 0);
@@ -2312,6 +2392,20 @@ void _cf_debug(CONF_ITEM const *ci)
 			break;
 		}
 	}
+}
+
+/** Ease of use from debugger
+ */
+void cf_pair_debug(CONF_PAIR *cp)
+{
+	cf_item_debug(cp);
+}
+
+/** Ease of use from debugger
+ */
+void cf_section_debug(CONF_SECTION *cs)
+{
+	cf_item_debug(cs);
 }
 
 /*

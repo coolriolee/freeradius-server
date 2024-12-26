@@ -31,7 +31,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/map_proc.h>
 
-static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void *mod_inst, UNUSED void *proc_inst, request_t *request,
+static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void const *mod_inst, UNUSED void *proc_inst, request_t *request,
 				    fr_value_box_list_t *key, map_list_t const *maps);
 
 /*
@@ -481,7 +481,7 @@ static int csv_map_verify(map_t *map, void *instance)
 /*
  *	Verify the result of the map.
  */
-static int csv_maps_verify(CONF_SECTION *cs, void *mod_inst, UNUSED void *proc_inst,
+static int csv_maps_verify(CONF_SECTION *cs, void const *mod_inst, UNUSED void *proc_inst,
 			  tmpl_t const *src, map_list_t const *maps)
 {
 	map_t const *map = NULL;
@@ -496,7 +496,7 @@ static int csv_maps_verify(CONF_SECTION *cs, void *mod_inst, UNUSED void *proc_i
 		/*
 		 *	This function doesn't change the map, so it's OK.
 		 */
-		if (csv_map_verify(UNCONST(map_t *, map), mod_inst) < 0) return -1;
+		if (csv_map_verify(UNCONST(map_t *, map), UNCONST(void *, mod_inst)) < 0) return -1;
 	}
 
 	return 0;
@@ -514,8 +514,8 @@ static int csv_maps_verify(CONF_SECTION *cs, void *mod_inst, UNUSED void *proc_i
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_csv_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_csv_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_csv_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_csv_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 	int		i;
 	char const	*p;
 	char		*q;
@@ -737,7 +737,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	And register the `map csv <key> { ... }` function.
 	 */
-	map_proc_register(inst, mctx->inst->name, mod_map_proc, csv_maps_verify, 0, 0);
+	map_proc_register(inst, inst, mctx->mi->name, mod_map_proc, csv_maps_verify, 0, 0);
 
 	return 0;
 }
@@ -753,8 +753,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_csv_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_csv_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_csv_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_csv_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
 	CONF_SECTION	*cs;
 	int		lineno;
 	FILE		*fp;
@@ -975,10 +975,10 @@ finish:
  * @param[in] maps	Head of the map list.
  * @return UNLANG_ACTION_CALCULATE_RESULT
  */
-static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void *mod_inst, UNUSED void *proc_inst, request_t *request,
+static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void const *mod_inst, UNUSED void *proc_inst, request_t *request,
 				    fr_value_box_list_t *key, map_list_t const *maps)
 {
-	rlm_csv_t		*inst = talloc_get_type_abort(mod_inst, rlm_csv_t);
+	rlm_csv_t const		*inst = talloc_get_type_abort_const(mod_inst, rlm_csv_t);
 	fr_value_box_t		*key_head = fr_value_box_list_head(key);
 
 	if (!key_head) {
@@ -1002,7 +1002,7 @@ static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void *mod_inst, UNUSE
 
 static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_csv_t const *inst = talloc_get_type_abort_const(mctx->inst->data, rlm_csv_t);
+	rlm_csv_t const *inst = talloc_get_type_abort_const(mctx->mi->data, rlm_csv_t);
 	rlm_rcode_t rcode;
 	ssize_t slen;
 	fr_value_box_t *key;
@@ -1052,14 +1052,16 @@ module_rlm_t rlm_csv = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "csv",
-		.flags		= 0,
+		.flags		= MODULE_TYPE_DYNAMIC_UNSAFE,
 		.inst_size	= sizeof(rlm_csv_t),
 		.config		= module_config,
 		.bootstrap	= mod_bootstrap,
 		.instantiate	= mod_instantiate,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,	.method = mod_process },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_process },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

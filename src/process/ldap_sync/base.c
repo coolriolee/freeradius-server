@@ -57,7 +57,7 @@ static char const *ldap_sync_message_types[FR_LDAP_SYNC_CODE_MAX] = {
 	"Cookie-Store-Response",
 };
 
-static void ldap_sync_packet_debug(request_t *request, fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
+static void ldap_sync_packet_debug(request_t *request, fr_packet_t *packet, fr_pair_list_t *list, bool received)
 {
 
 	if (!packet) return;
@@ -105,7 +105,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 {
 	fr_process_state_t const	*state;
 
-	(void) talloc_get_type_abort_const(mctx->inst->data, process_ldap_sync_t);
+	(void) talloc_get_type_abort_const(mctx->mi->data, process_ldap_sync_t);
 
 	PROCESS_TRACE;
 
@@ -195,39 +195,33 @@ static fr_process_state_t const process_state[] = {
 
 static virtual_server_compile_t const compile_list[] = {
 	{
-		.name = "load",
-		.name2 = "Cookie",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("load", "Cookie"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(load_cookie)
 	},
 	{
-		.name = "store",
-		.name2 = "Cookie",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("store", "Cookie"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(store_cookie)
 	},
 	{
-		.name = "recv",
-		.name2 = "Add",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Add"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(recv_add)
 	},
 	{
-		.name = "recv",
-		.name2 = "Present",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Present"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(recv_present)
 	},
 	{
-		.name = "recv",
-		.name2 = "Delete",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Delete"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(recv_delete)
 	},
 	{
-		.name = "recv",
-		.name2 = "Modify",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Modify"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(recv_modify)
 	},
 

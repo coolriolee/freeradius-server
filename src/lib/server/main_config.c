@@ -103,7 +103,7 @@ static int name_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, c
  *	Log destinations
  */
 static const conf_parser_t initial_log_config[] = {
-	{ FR_CONF_OFFSET("destination", main_config_t, log_dest), .dflt = "files" },
+	{ FR_CONF_OFFSET("destination", main_config_t, log_dest), .dflt = "file" },
 	{ FR_CONF_OFFSET("syslog_facility", main_config_t, syslog_facility), .dflt = "daemon",
 		.func = cf_table_parse_int,
 			.uctx = &(cf_table_parse_ctx_t){
@@ -174,7 +174,7 @@ static const conf_parser_t thread_config[] = {
 	{ FR_CONF_OFFSET("num_workers", main_config_t, max_workers), .dflt = STRINGIFY(0),
 	  .func = num_workers_parse, .dflt_func = num_workers_dflt },
 
-	{ FR_CONF_OFFSET_TYPE_FLAGS("stats_interval", FR_TYPE_TIME_DELTA | CONF_FLAG_HIDDEN, 0, main_config_t, stats_interval), },
+	{ FR_CONF_OFFSET_TYPE_FLAGS("stats_interval", FR_TYPE_TIME_DELTA, CONF_FLAG_HIDDEN, main_config_t, stats_interval) },
 
 #ifdef WITH_TLS
 	{ FR_CONF_OFFSET_TYPE_FLAGS("openssl_async_pool_init", FR_TYPE_SIZE, 0, main_config_t, openssl_async_pool_init), .dflt = "64" },
@@ -187,9 +187,12 @@ static const conf_parser_t thread_config[] = {
 /*
  *	Migration configuration.
  */
+extern bool tmpl_require_enum_prefix;
+
 static const conf_parser_t migrate_config[] = {
 	{ FR_CONF_OFFSET_FLAGS("rewrite_update", CONF_FLAG_HIDDEN, main_config_t, rewrite_update) },
 	{ FR_CONF_OFFSET_FLAGS("forbid_update", CONF_FLAG_HIDDEN, main_config_t, forbid_update) },
+	{ FR_CONF_OFFSET_FLAGS("require_enum_prefix", CONF_FLAG_HIDDEN, main_config_t, require_enum_prefix) },
 
 	CONF_PARSER_TERMINATOR
 };
@@ -1068,11 +1071,16 @@ int main_config_init(main_config_t *config)
 	INFO("Starting - reading configuration files ...");
 
 	/*
-	 *	About sizeof(request_t) + sizeof(fr_radius_packet_t) * 2 + sizeof(fr_pair_t) * 400
+	 *	About sizeof(request_t) + sizeof(fr_packet_t) * 2 + sizeof(fr_pair_t) * 400
 	 *
 	 *	Which should be enough for many configurations.
 	 */
 	config->talloc_pool_size = 8 * 1024; /* default */
+
+	/*
+	 *	Migration flags
+	 */
+	if (!tmpl_require_enum_prefix) tmpl_require_enum_prefix = config->require_enum_prefix;
 
 	cs = cf_section_alloc(NULL, NULL, "main", NULL);
 	if (!cs) return -1;
@@ -1100,25 +1108,6 @@ int main_config_init(main_config_t *config)
 		PERROR("Failed reading internal dictionaries");
 		goto failure;
 	}
-
-#define DICT_READ_OPTIONAL(_d, _n) \
-do {\
-	switch (fr_dict_read(config->dict, _d, _n)) {\
-	case -1:\
-		PERROR("Error reading dictionary \"%s/%s\"", _d, _n);\
-		goto failure;\
-	case 0:\
-		DEBUG2("Including dictionary file \"%s/%s\"", _d,_n);\
-		break;\
-	default:\
-		break;\
-	}\
-} while (0)
-
-	/*
-	 *	It's OK if this one doesn't exist.
-	 */
-	DICT_READ_OPTIONAL(config->raddb_dir, FR_DICTIONARY_FILE);
 
 	/*
 	 *	Special-case things.  If the output is a TTY, AND
@@ -1161,6 +1150,11 @@ do {\
 	 */
 	if (cf_section_rules_push(cs, lib_dir_on_read_config) < 0) goto failure;
 	if (cf_section_rules_push(cs, virtual_servers_on_read_config) < 0) goto failure;
+
+	/*
+	 *	Track the status of the configuration.
+	 */
+	if (fr_debug_lvl) cf_md5_init();
 
 	/* Read the configuration file */
 	snprintf(buffer, sizeof(buffer), "%.200s/%.50s.conf", config->raddb_dir, config->name);
@@ -1503,6 +1497,7 @@ void main_config_hup(main_config_t *config)
 static fr_table_num_ordered_t config_arg_table[] = {
 	{ L("rewrite_update"),		 offsetof(main_config_t, rewrite_update) },
 	{ L("forbid_update"),		 offsetof(main_config_t, forbid_update) },
+	{ L("require_enum_prefix"),	 offsetof(main_config_t, require_enum_prefix) },
 };
 static size_t config_arg_table_len = NUM_ELEMENTS(config_arg_table);
 

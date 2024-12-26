@@ -38,9 +38,11 @@ static ssize_t lo_read(int fd, void *out, size_t outlen)
 	ssize_t r;
 	uint8_t *p = out;
 
-	for (total = 0; total < outlen; total += r) {
+	for (total = 0; total < outlen; ) {
+		/* coverity[overflow_sink] */
 		r = read(fd, p + total, outlen - total);
 
+		/* coverity[return_overflow] */
 		if (r == 0) return total;
 
 		if (r < 0) {
@@ -60,6 +62,7 @@ static ssize_t lo_read(int fd, void *out, size_t outlen)
 
 			return -1;
 		}
+		total += r;
 	}
 
 	return total;

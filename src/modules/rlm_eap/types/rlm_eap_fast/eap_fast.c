@@ -461,7 +461,7 @@ ssize_t eap_fast_decode_pair(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr_
 		ret = fr_value_box_from_network(vp, &vp->data, vp->vp_type, vp->da,
 						&FR_DBUFF_TMP(p, (size_t)len), len, true);
 		if (ret != len) {
-			fr_pair_raw_from_pair(vp, p, len);
+			fr_pair_raw_afrom_pair(vp, p, len);
 		}
 		fr_pair_append(out, vp);
 		p += len;
@@ -477,7 +477,7 @@ ssize_t eap_fast_decode_pair(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr_
 static rlm_rcode_t CC_HINT(nonnull) process_reply(UNUSED eap_session_t *eap_session,
 						  fr_tls_session_t *tls_session,
 						  request_t *request,
-						  fr_radius_packet_t *reply, fr_pair_list_t *reply_list)
+						  fr_packet_t *reply, fr_pair_list_t *reply_list)
 {
 	rlm_rcode_t			rcode = RLM_MODULE_REJECT;
 	fr_pair_t			*vp;
@@ -664,7 +664,7 @@ static fr_radius_packet_code_t eap_fast_eap_payload(request_t *request, eap_sess
 	 * Call authentication recursively, which will
 	 * do PAP, CHAP, MS-CHAP, etc.
 	 */
-	eap_virtual_server(request, eap_session, t->virtual_server);
+	eap_virtual_server(request, eap_session, t->server_cs);
 
 	/*
 	 * Decide what to do with the reply.
@@ -703,7 +703,7 @@ static fr_radius_packet_code_t eap_fast_eap_payload(request_t *request, eap_sess
 			request->proxy->packet->src_port = 0;
 			request->proxy->packet->dst_port = 0;
 			fake->packet = NULL;
-			fr_radius_packet_free(&fake->reply);
+			fr_packet_free(&fake->reply);
 			fake->reply = NULL;
 
 			/*

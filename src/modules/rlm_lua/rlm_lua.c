@@ -25,7 +25,7 @@
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/util/debug.h>
@@ -58,7 +58,7 @@ static const conf_parser_t module_config[] = {
 #define DO_LUA(_s)\
 static unlang_action_t mod_##_s(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request) \
 {\
-	rlm_lua_t const *inst = talloc_get_type_abort_const(mctx->inst->data, rlm_lua_t);\
+	rlm_lua_t const *inst = talloc_get_type_abort_const(mctx->mi->data, rlm_lua_t);\
 	if (!inst->func_##_s) RETURN_MODULE_NOOP;\
 	return fr_lua_run(p_result, mctx, request, inst->func_##_s);\
 }
@@ -106,7 +106,7 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_lua_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_lua_t);
+	rlm_lua_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_lua_t);
 	rlm_rcode_t ret = 0;
 
 	/*
@@ -115,7 +115,7 @@ static int mod_detach(module_detach_ctx_t const *mctx)
 	if (inst->interpreter) {
 		if (inst->func_detach) {
 			fr_lua_run(&ret,
-				   MODULE_CTX(mctx->inst,
+				   MODULE_CTX(mctx->mi,
 					      &(rlm_lua_thread_t){
 							.interpreter = inst->interpreter
 					      },
@@ -130,7 +130,7 @@ static int mod_detach(module_detach_ctx_t const *mctx)
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_lua_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_lua_t);
+	rlm_lua_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_lua_t);
 	rlm_rcode_t rcode;
 
 	/*
@@ -144,7 +144,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 	if (inst->func_instantiate) {
 		fr_lua_run(&rcode,
-			   MODULE_CTX(mctx->inst,
+			   MODULE_CTX(mctx->mi,
 			   	      &(rlm_lua_thread_t){
 						.interpreter = inst->interpreter
 				      },
@@ -169,7 +169,6 @@ module_rlm_t rlm_lua = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "lua",
-		.flags			= MODULE_TYPE_THREAD_SAFE,
 		.inst_size		= sizeof(rlm_lua_t),
 
 		.thread_inst_size	= sizeof(rlm_lua_thread_t),
@@ -181,17 +180,19 @@ module_rlm_t rlm_lua = {
 		.detach			= mod_detach,
 		.thread_detach		= mod_thread_detach
 	},
-	.method_names = (module_method_name_t[]){
-		/*
-		 *	Hack to support old configurations
-		 */
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			/*
+			 *	Hack to support old configurations
+			 */
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting	},
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate },
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY), .method = mod_authorize },
 
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_preacct		},
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize		},
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting	},
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate	},
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth		},
-		MODULE_NAME_TERMINATOR
+			{ .section = SECTION_NAME("recv", "accounting-request"), .method = mod_preacct },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize },
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

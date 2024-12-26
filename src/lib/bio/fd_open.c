@@ -30,18 +30,46 @@
 #include <net/if.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <netinet/tcp.h>
+#include <netinet/in.h>
 
 /** Initialize common datagram information
  *
  */
-static int fr_bio_fd_common_tcp(int fd, UNUSED fr_socket_t const *sock, UNUSED fr_bio_fd_config_t const *cfg)
+static int fr_bio_fd_common_tcp(int fd, UNUSED fr_socket_t const *sock, fr_bio_fd_config_t const *cfg)
 {
 	int on = 1;
 
 #ifdef SO_KEEPALIVE
+	/*
+	 *	TCP keepalives are always a good idea.  Too many people put firewalls between critical
+	 *	systems, and then the firewalls drop live TCP streams.
+	 */
 	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0) {
 		fr_strerror_printf("Failed setting SO_KEEPALIVE: %s", fr_syserror(errno));
 		return -1;
+	}
+#endif
+
+#ifdef TCP_NODELAY
+	/*
+	 *	Add some defines for *BSD, and Solaris systems.
+	 */
+#  if !defined(SOL_TCP) && defined(IPPROTO_TCP)
+#    define SOL_TCP IPPROTO_TCP
+#  endif
+
+	/*
+	 *	Also set TCP_NODELAY, to force the data to be written quickly.
+	 *
+	 *	We buffer full packets in memory before we write them, so there's no reason for the kernel to
+	 *	sit around waiting for more data from us.
+	 */
+	if (!cfg->tcp_delay) {
+		if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &on, sizeof(on)) < 0) {
+			fr_strerror_printf("Failed setting TCP_NODELAY: %s", fr_syserror(errno));
+			return -1;
+		}
 	}
 #endif
 
@@ -79,9 +107,15 @@ static int fr_bio_fd_common_datagram(int fd, UNUSED fr_socket_t const *sock, fr_
 	}
 #endif
 
+
 #ifdef SO_RCVBUF
 	if (cfg->recv_buff) {
 		int opt = cfg->recv_buff;
+
+		/*
+		 *	Clamp value to something reasonable.
+		 */
+		if (opt > (1 << 29)) opt = (1 << 29);
 
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &opt, sizeof(opt)) < 0) {
 			fr_strerror_printf("Failed setting SO_RCVBUF: %s", fr_syserror(errno));
@@ -93,6 +127,11 @@ static int fr_bio_fd_common_datagram(int fd, UNUSED fr_socket_t const *sock, fr_
 #ifdef SO_SNDBUF
 	if (cfg->send_buff) {
 		int opt = cfg->send_buff;
+
+		/*
+		 *	Clamp value to something reasonable.
+		 */
+		if (opt > (1 << 29)) opt = (1 << 29);
 
 		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &opt, sizeof(opt)) < 0) {
 			fr_strerror_printf("Failed setting SO_SNDBUF: %s", fr_syserror(errno));
@@ -418,7 +457,7 @@ static int fr_bio_fd_socket_unix_mkdir(int *dirfd, char const **filename, fr_bio
 	return 0;
 }
 
-static int fr_bio_fd_unix_shutdown(fr_bio_t *bio)
+static void fr_bio_fd_unix_shutdown(fr_bio_t *bio)
 {
 	fr_bio_fd_t *my = talloc_get_type_abort(bio, fr_bio_fd_t);
 
@@ -435,11 +474,9 @@ static int fr_bio_fd_unix_shutdown(fr_bio_t *bio)
 	/*
 	 *	Run the user shutdown before we run ours.
 	 */
-	if (my->user_shutdown) {
-		if (my->user_shutdown(bio) < 0) return -1;
-	}
+	if (my->user_shutdown) my->user_shutdown(bio);
 
-	return unlink(my->info.socket.unix.path);
+	(void) unlink(my->info.socket.unix.path);
 }
 
 /** Bind to a Unix domain socket.
@@ -564,6 +601,13 @@ static int fr_bio_fd_socket_bind_unix(fr_bio_fd_t *my, fr_bio_fd_config_t const 
 	return 0;
 }
 
+/*
+ *	Use the OSX native versions on OSX.
+ */
+#ifdef __APPLE__
+#undef SO_BINDTODEVICE
+#endif
+
 #ifdef SO_BINDTODEVICE
 /** Linux bind to device by name.
  *
@@ -597,7 +641,7 @@ static int fr_bio_fd_socket_bind_to_device(fr_bio_fd_t *my, fr_bio_fd_config_t c
 }
 
 #elif defined(IP_BOUND_IF) || defined(IPV6_BOUND_IF)
-/** *BSD bind to interface by index.
+/** OSX bind to interface by index.
  *
  */
 static int fr_bio_fd_socket_bind_to_device(fr_bio_fd_t *my, UNUSED fr_bio_fd_config_t const *cfg)
@@ -640,6 +684,8 @@ static int fr_bio_fd_socket_bind_to_device(fr_bio_fd_t *my, UNUSED fr_bio_fd_con
  */
 static int fr_bio_fd_socket_bind_to_device(fr_bio_fd_t *my, fr_bio_fd_config_t const *cfg)
 {
+	if (!my->info.socket.inet.ifindex) return 0;
+
 	fr_strerror_const("Bind to interface is not supported on this platform");
 	return -1;
 }
@@ -683,9 +729,181 @@ static int fr_bio_fd_socket_bind(fr_bio_fd_t *my, fr_bio_fd_config_t const *cfg)
 	return fr_bio_fd_socket_name(my);
 }
 
+static void fr_bio_fd_name(fr_bio_fd_t *my)
+{
+	fr_bio_fd_config_t const *cfg = my->info.cfg;
+
+	switch (my->info.type) {
+	case FR_BIO_FD_INVALID:
+		return;
+
+	case FR_BIO_FD_UNCONNECTED:
+		fr_assert(cfg->socket_type == SOCK_DGRAM);
+
+		switch (my->info.socket.af) {
+		case AF_INET:
+		case AF_INET6:
+			my->info.name = fr_asprintf(my, "proto udp local %pV port %u",
+						    fr_box_ipaddr(my->info.socket.inet.src_ipaddr),
+						    my->info.socket.inet.src_port);
+			break;
+
+		case AF_LOCAL:
+			my->info.name = fr_asprintf(my, "proto unix (datagram) filename %s",
+						    cfg->path);
+			break;
+
+		default:
+			fr_assert(0);
+			my->info.name = "??? invalid BIO ???";
+			break;
+		}
+		break;
+
+	case FR_BIO_FD_CONNECTED:
+	case FR_BIO_FD_ACCEPTED:
+		switch (my->info.socket.af) {
+		case AF_INET:
+		case AF_INET6:
+			my->info.name = fr_asprintf(my, "proto %s local %pV port %u remote %pV port %u",
+						    (cfg->socket_type == SOCK_DGRAM) ? "udp" : "tcp",
+						    fr_box_ipaddr(my->info.socket.inet.src_ipaddr),
+						    my->info.socket.inet.src_port,
+						    fr_box_ipaddr(my->info.socket.inet.dst_ipaddr),
+						    my->info.socket.inet.dst_port);
+			break;
+
+		case AF_LOCAL:
+			my->info.name = fr_asprintf(my, "proto unix %sfilename %s",
+						    (cfg->socket_type == SOCK_DGRAM) ? "(datagram) " : "",
+						    cfg->path);
+			break;
+
+		case AF_FILE_BIO:
+			fr_assert(cfg->socket_type == SOCK_STREAM);
+
+			if (cfg->flags == O_RDONLY) {
+				my->info.name = fr_asprintf(my, "proto file (read-only) filename %s ",
+							    cfg->filename);
+
+			} else if (cfg->flags == O_WRONLY) {
+				my->info.name = fr_asprintf(my, "proto file (write-only) filename %s",
+							    cfg->filename);
+			} else {
+				my->info.name = fr_asprintf(my, "proto file (read-write) filename %s",
+							    cfg->filename);
+			}
+			break;
+
+		default:
+			fr_assert(0);
+			my->info.name = "??? invalid BIO ???";
+			break;
+		}
+		break;
+
+	case FR_BIO_FD_LISTEN:
+		fr_assert(cfg->socket_type == SOCK_STREAM);
+
+		switch (my->info.socket.af) {
+		case AF_INET:
+		case AF_INET6:
+			my->info.name = fr_asprintf(my, "proto %s local %pV port %u",
+						    (cfg->socket_type == SOCK_DGRAM) ? "udp" : "tcp",
+						    fr_box_ipaddr(my->info.socket.inet.src_ipaddr),
+						    my->info.socket.inet.src_port);
+			break;
+
+		case AF_LOCAL:
+			my->info.name = fr_asprintf(my, "proto unix filename %s",
+						    cfg->path);
+			break;
+
+		default:
+			fr_assert(0);
+			my->info.name = "??? invalid BIO ???";
+			break;
+		}
+		break;
+	}
+}
+
+/** Checks the configuration without modifying anything.
+ *
+ */
+int fr_bio_fd_check_config(fr_bio_fd_config_t const *cfg)
+{
+	/*
+	 *	Unix sockets and files are OK.
+	 */
+	if (cfg->path || cfg->filename) return 0;
+
+	/*
+	 *	Sanitize the IP addresses.
+	 *
+	 */
+	switch (cfg->type) {
+	case FR_BIO_FD_INVALID:
+		fr_strerror_const("No connection type was specified");
+		return -1;
+
+	case FR_BIO_FD_CONNECTED:
+		/*
+		 *	Ensure that we have a destination address.
+		 */
+		if (cfg->dst_ipaddr.af == AF_UNSPEC) {
+			fr_strerror_const("No destination IP address was specified");
+			return -1;
+		}
+
+		if (!cfg->dst_port) {
+			fr_strerror_const("No destination port was specified");
+			return -1;
+		}
+
+		/*
+		 *	The source IP has to be the same address family as the destination IP.
+		 */
+		if ((cfg->src_ipaddr.af != AF_UNSPEC) && (cfg->src_ipaddr.af != cfg->dst_ipaddr.af)) {
+			fr_strerror_printf("Source and destination IP addresses are not from the same IP address family");
+			return -1;
+		}
+		break;
+
+	case FR_BIO_FD_LISTEN:
+		if (!cfg->src_port) {
+			fr_strerror_const("No source port was specified");
+			return -1;
+		}
+		FALL_THROUGH;
+
+		/*
+		 *	Unconnected sockets can use a source port, but don't need one.
+		 */
+	case FR_BIO_FD_UNCONNECTED:
+		if (cfg->path && cfg->filename) {
+			fr_strerror_const("Unconnected sockets cannot be used with Unix sockets or files");
+			return -1;
+		}
+
+		if (cfg->src_ipaddr.af == AF_UNSPEC) {
+			fr_strerror_const("No source IP address was specified");
+			return -1;
+		}
+		break;
+
+	case FR_BIO_FD_ACCEPTED:
+		fr_assert(cfg->src_ipaddr.af != AF_UNSPEC);
+		fr_assert(cfg->dst_ipaddr.af != AF_UNSPEC);
+		break;
+	}
+
+	return 0;
+}
+
 /** Opens a socket and updates sock->fd
  *
- *  Note that it does not call connect()!
+ *  If the socket is asynchronous, it also calls connect()
  */
 int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 {
@@ -711,6 +929,52 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 		my->info.socket.inet.src_port = cfg->src_port;
 		my->info.socket.inet.dst_port = cfg->dst_port;
 
+		if (fr_bio_fd_check_config(cfg) < 0) return -1;
+
+		/*
+		 *	Sanitize the IP addresses.
+		 *
+		 */
+		switch (cfg->type) {
+		case FR_BIO_FD_INVALID:
+			return -1;
+
+		case FR_BIO_FD_CONNECTED:
+			/*
+			 *	No source specified, just bootstrap it from the destination.
+			 */
+			if (my->info.socket.inet.src_ipaddr.af == AF_UNSPEC) {
+				my->info.socket.inet.src_ipaddr = (fr_ipaddr_t) {
+					.af = my->info.socket.inet.dst_ipaddr.af,
+					.prefix = (my->info.socket.inet.dst_ipaddr.af == AF_INET) ? 32 : 128,
+				};
+
+				/*
+				 *	Set the main socket AF too.
+				 */
+				my->info.socket.af = my->info.socket.inet.dst_ipaddr.af;
+			}
+
+			/*
+			 *	The source IP has to be the same address family as the destination IP.
+			 */
+			if (my->info.socket.inet.src_ipaddr.af != my->info.socket.inet.dst_ipaddr.af) {
+				fr_strerror_const("Source and destination IP addresses are not from the same IP address family");
+				return -1;
+			}
+			break;
+
+		case FR_BIO_FD_UNCONNECTED:
+		case FR_BIO_FD_LISTEN:
+			fr_assert(my->info.socket.inet.src_ipaddr.af != AF_UNSPEC);
+			break;
+
+		case FR_BIO_FD_ACCEPTED:
+			fr_assert(my->info.socket.inet.src_ipaddr.af != AF_UNSPEC);
+			fr_assert(my->info.socket.inet.dst_ipaddr.af != AF_UNSPEC);
+			break;
+		}
+
 		if (cfg->socket_type == SOCK_STREAM) {
 			protocol = IPPROTO_TCP;
 		} else {
@@ -726,10 +990,19 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 			}
 		}
 
-		fd = socket(my->info.socket.af, my->info.socket.type, protocol);
-		if (fd < 0) {
-			fr_strerror_printf("Failed opening socket: %s", fr_syserror(errno));
-			return -1;
+		/*
+		 *	It's already opened, so we don't need to do that.
+		 */
+		if (cfg->type == FR_BIO_FD_ACCEPTED) {
+			fd = my->info.socket.fd;
+			fr_assert(fd >= 0);
+
+		} else {
+			fd = socket(my->info.socket.af, my->info.socket.type, protocol);
+			if (fd < 0) {
+				fr_strerror_printf("Failed opening socket: %s", fr_syserror(errno));
+				return -1;
+			}
 		}
 
 	} else if (cfg->path) {
@@ -744,6 +1017,11 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 		}
 
 	} else {
+		if (cfg->type != FR_BIO_FD_CONNECTED) {
+			fr_strerror_printf("Can only use connected sockets for file IO");
+			return -1;
+		}
+
 		/*
 		 *	Filenames overload the #fr_socket_t for now.
 		 */
@@ -768,8 +1046,21 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 
 			fd = dup(STDERR_FILENO);
 
+		} else if (strcmp(cfg->filename, "/dev/stdin") == 0) {
+			if (cfg->flags != O_RDONLY) {
+				fr_strerror_printf("Cannot write to %s", cfg->filename);
+				return -1;
+			}
+
+			fd = dup(STDIN_FILENO);
+
 		} else {
-			fd = open(cfg->filename, cfg->flags, cfg->perm);
+			/*
+			 *	Minor hacks so that we have only _one_ source of open / mkdir
+			 */
+			my->info.socket.fd = -1;
+
+			fd = fr_bio_fd_reopen(bio);
 		}
 		if (fd < 0) {
 			fr_strerror_printf("Failed opening file %s: %s", cfg->filename, fr_syserror(errno));
@@ -809,7 +1100,7 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 	/*
 	 *	Initialize the bio information before calling the various setup functions.
 	 */
-	my->info.state = (cfg->type == FR_BIO_FD_CONNECTED) ? FR_BIO_FD_STATE_CONNECTING : FR_BIO_FD_STATE_OPEN;
+	my->info.state = FR_BIO_FD_STATE_CONNECTING;
 
 	/*
 	 *	Set the FD so that the subsequent calls can use it.
@@ -826,6 +1117,9 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 	 *	/ write functions.
 	 */
 	switch (cfg->type) {
+	case FR_BIO_FD_INVALID:
+		return -1;
+
 		/*
 		 *	Unconnected UDP or datagram AF_LOCAL server sockets.
 		 */
@@ -873,7 +1167,6 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 			if (rcode < 0) goto fail;
 		}
 
-
 		switch (my->info.socket.af) {
 		case AF_LOCAL:
 			if (fr_bio_fd_socket_bind_unix(my, cfg) < 0) goto fail;
@@ -894,10 +1187,31 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 		if (fr_bio_fd_init_connected(my) < 0) goto fail;
 		break;
 
+	case FR_BIO_FD_ACCEPTED:
+#ifdef SO_NOSIGPIPE
+		/*
+		 *	Although the server ignore SIGPIPE, some operating systems like BSD and OSX ignore the
+		 *	ignoring.
+		 *
+		 *	Fortunately, those operating systems usually support SO_NOSIGPIPE.  We set that to prevent
+		 *	them raising the signal in the first place.
+		 */
+		{
+			int on = 1;
+
+			setsockopt(my->info.socket.fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+		}
+#endif
+
+		my->info.type = FR_BIO_FD_CONNECTED;
+
+                if (fr_bio_fd_init_common(my) < 0) goto fail;
+		break;
+
 		/*
 		 *	Server socket which listens for new stream connections
 		 */
-	case FR_BIO_FD_ACCEPT:
+	case FR_BIO_FD_LISTEN:
 		fr_assert(my->info.socket.type == SOCK_STREAM);
 
 		switch (my->info.socket.af) {
@@ -922,9 +1236,92 @@ int fr_bio_fd_open(fr_bio_t *bio, fr_bio_fd_config_t const *cfg)
 			goto fail;
 		}
 
-		if (fr_bio_fd_init_accept(my) < 0) goto fail;
+		if (fr_bio_fd_init_listen(my) < 0) goto fail;
 		break;
 	}
 
+	/*
+	 *	Set the name of the BIO.
+	 */
+	fr_bio_fd_name(my);
+
 	return 0;
+}
+
+/** Reopen a file BIO
+ *
+ *  e.g. for log files.
+ */
+int fr_bio_fd_reopen(fr_bio_t *bio)
+{
+	fr_bio_fd_t *my = talloc_get_type_abort(bio, fr_bio_fd_t);
+	fr_bio_fd_config_t const *cfg = my->info.cfg;
+	int fd, flags;
+
+	if (my->info.socket.af != AF_FILE_BIO) {
+		fr_strerror_const("Cannot reopen a non-file BIO");
+		return -1;
+	}
+
+	/*
+	 *	Create it if necessary.
+	 */
+	flags = cfg->flags;
+	if (flags != O_RDONLY) flags |= O_CREAT;
+
+	if (!cfg->mkdir) {
+		/*
+		 *	Client BIOs writing to a file, and therefore need to create it.
+		 */
+	do_open:
+		fd = open(cfg->filename, flags, cfg->perm);
+		if (fd < 0) {
+		failed_open:
+			fr_strerror_printf("Failed opening file %s: %s", cfg->filename, fr_syserror(errno));
+			return -1;
+		}
+	
+	} else {
+		/*
+		 *	We make the parent directory if told to, AND if there's a '/' in the path.
+		 */
+		char *p = strrchr(cfg->filename, '/');
+		int dir_fd;
+
+		if (!p) goto do_open;
+
+		if (fr_mkdir(&dir_fd, cfg->filename, (size_t) (p - cfg->filename), cfg->perm, fr_mkdir_chown,
+			      &(fr_mkdir_chown_t) {
+				      .uid = cfg->uid,
+				      .gid = cfg->gid,
+			      }) < 0) {
+			return -1;
+		}
+
+		fd = openat(dir_fd, p + 1, flags, cfg->perm);
+		if (fd < 0) {
+			close(dir_fd);
+			goto failed_open;
+		}
+	}
+
+	/*
+	 *	We're boot-strapping, just set the new FD and return.
+	 */
+	if (my->info.socket.fd < 0) {
+		return fd;
+	}
+
+	/*
+	 *	Replace the FD rather than swapping it out with a new one.  This is potentially more
+	 *	thread-safe.
+	 */
+	if (dup2(fd, my->info.socket.fd) < 0) {
+		close(fd);
+		fr_strerror_printf("Failed reopening file - %s", fr_syserror(errno));
+		return -1;
+	}
+
+	close(fd);
+	return my->info.socket.fd;
 }

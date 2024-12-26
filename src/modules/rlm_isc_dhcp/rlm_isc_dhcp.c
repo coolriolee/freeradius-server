@@ -2174,8 +2174,8 @@ static int read_file(rlm_isc_dhcp_t *inst, rlm_isc_dhcp_info_t *parent, char con
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_isc_dhcp_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_isc_dhcp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	rlm_isc_dhcp_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_isc_dhcp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	rlm_isc_dhcp_info_t	*info;
 	int			ret;
 
@@ -2205,7 +2205,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_isc_dhcp_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_isc_dhcp_t);
+	rlm_isc_dhcp_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_isc_dhcp_t);
 	int			ret;
 
 	ret = apply_fixed_ip(inst, request);
@@ -2219,7 +2219,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 
 static unlang_action_t CC_HINT(nonnull) mod_post_auth(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_isc_dhcp_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_isc_dhcp_t);
+	rlm_isc_dhcp_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_isc_dhcp_t);
 	int			ret;
 
 	ret = apply(inst, request, inst->head);
@@ -2240,9 +2240,11 @@ module_rlm_t rlm_isc_dhcp = {
 		.config		= module_config,
 		.instantiate	= mod_instantiate
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize },
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_post_auth },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize },
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY), .method = mod_post_auth },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

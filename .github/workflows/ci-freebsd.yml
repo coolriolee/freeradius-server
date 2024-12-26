@@ -10,13 +10,13 @@ on:
 
 env:
   HOSTAPD_BUILD_DIR: eapol_test.ci
-  HOSTAPD_GIT_TAG: hostap_2_10
+  HOSTAPD_GIT_TAG: hostap_2_11
   NO_PERFORMANCE_TESTS: yes
 
 jobs:
   freebsd-build:
 
-    runs-on: macos-12
+    runs-on: ubuntu-latest
 
     name: "FreeBSD build"
 
@@ -52,16 +52,16 @@ jobs:
         key: hostapd-freebsd-${{ env.HOSTAPD_GIT_TAG }}-v4
 
     - name: Test using a FreeBSD VirtualBox VM
-      uses: cross-platform-actions/action@v0.22.0
+      uses: cross-platform-actions/action@v0.25.0
       with:
         operating_system: freebsd
-        version: '13.2'
+        version: '14.0'
         sync_files: runner-to-vm
         memory: 4G
-        hypervisor: qemu
         environment_variables: HOSTAPD_BUILD_DIR HOSTAPD_GIT_TAG NO_PERFORMANCE_TESTS
         run: |
           sudo pkg install -y    \
+            brotli               \
             curl                 \
             cyrus-sasl           \
             freetds              \
@@ -77,16 +77,16 @@ jobs:
             libyubikey           \
             lua52                \
             luajit-devel         \
-            mysql80-client       \
+            mariadb-connector-c  \
             net-snmp             \
             openldap25-client    \
             python3              \
-            py39-pip             \
+            py311-pip            \
             postgresql12-client  \
             sqlite3              \
             talloc               \
             unixODBC
-          sudo pip install tacacs_plus
+          PIP_BREAK_SYSTEM_PACKAGES=1 pip install tacacs_plus
           echo "#! /bin/sh"        | sudo tee /usr/local/bin/nproc
           echo "sysctl -n hw.ncpu" | sudo tee -a /usr/local/bin/nproc
           sudo chmod +x /usr/local/bin/nproc

@@ -284,10 +284,17 @@ static unlang_action_t unlang_update_state_init(rlm_rcode_t *p_result, request_t
 }
 
 static unlang_action_t map_proc_resume(UNUSED rlm_rcode_t *p_result, UNUSED request_t *request,
-				       unlang_stack_frame_t *frame)
+#ifdef WITH_VERIFY_PTR
+				       unlang_stack_frame_t *frame
+#else
+				       UNUSED unlang_stack_frame_t *frame
+#endif
+				      )
 {
+#ifdef WITH_VERIFY_PTR
 	unlang_frame_state_map_proc_t	*map_proc_state = talloc_get_type_abort(frame->state, unlang_frame_state_map_proc_t);
 	VALUE_BOX_LIST_VERIFY(&map_proc_state->src_result);
+#endif
 	return UNLANG_ACTION_CALCULATE_RESULT;
 }
 
@@ -383,6 +390,7 @@ void unlang_map_init(void)
 	unlang_register(UNLANG_TYPE_MAP,
 			   &(unlang_op_t){
 				.name = "map",
+				.rcode_set = true,
 				.interpret = unlang_map_state_init,
 				.frame_state_size = sizeof(unlang_frame_state_map_proc_t),
 				.frame_state_type = "unlang_frame_state_map_proc_t",

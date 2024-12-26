@@ -385,7 +385,7 @@ static unlang_action_t unlang_xlat(rlm_rcode_t *p_result, request_t *request, un
 	xlat_action_t			xa;
 	xlat_exp_head_t const		*child = NULL;
 
-	RINDENT_SAVE(&state->indent, request);
+	RINDENT_SAVE(state, request);
 	RINDENT();
 
 	xa = xlat_frame_eval(state->ctx, &state->values, &child, request, state->head, &state->exp);
@@ -403,7 +403,7 @@ static unlang_action_t unlang_xlat(rlm_rcode_t *p_result, request_t *request, un
 		fr_value_box_list_talloc_free(&state->out);
 		if (unlang_xlat_push(state->ctx, state->success, &state->out, request, child, false) < 0) {
 			*p_result = RLM_MODULE_FAIL;
-			RINDENT_RESTORE(request, &state->indent);
+			RINDENT_RESTORE(request, state);
 			return UNLANG_ACTION_STOP_PROCESSING;
 		}
 		return UNLANG_ACTION_PUSHED_CHILD;
@@ -423,14 +423,14 @@ static unlang_action_t unlang_xlat(rlm_rcode_t *p_result, request_t *request, un
 	case XLAT_ACTION_DONE:
 		if (state->success) *state->success = true;
 		*p_result = RLM_MODULE_OK;
-		RINDENT_RESTORE(request, &state->indent);
+		RINDENT_RESTORE(request, state);
 		return UNLANG_ACTION_CALCULATE_RESULT;
 
 	case XLAT_ACTION_FAIL:
 	fail:
 		if (state->success) *state->success = false;
 		*p_result = RLM_MODULE_FAIL;
-		RINDENT_RESTORE(request, &state->indent);
+		RINDENT_RESTORE(request, state);
 		return UNLANG_ACTION_CALCULATE_RESULT;
 
 	default:
@@ -501,7 +501,7 @@ static unlang_action_t unlang_xlat_resume(rlm_rcode_t *p_result, request_t *requ
 	case XLAT_ACTION_DONE:
 		if (state->success) *state->success = true;
 		*p_result = RLM_MODULE_OK;
-		RINDENT_RESTORE(request, &state->indent);
+		RINDENT_RESTORE(request, state);
 		return UNLANG_ACTION_CALCULATE_RESULT;
 
 	case XLAT_ACTION_PUSH_UNLANG:
@@ -521,7 +521,7 @@ static unlang_action_t unlang_xlat_resume(rlm_rcode_t *p_result, request_t *requ
 		fr_value_box_list_talloc_free(&state->out);
 		if (unlang_xlat_push(state->ctx, state->success, &state->out, request, child, false) < 0) {
 			*p_result = RLM_MODULE_FAIL;
-			RINDENT_RESTORE(request, &state->indent);
+			RINDENT_RESTORE(request, state);
 			return UNLANG_ACTION_STOP_PROCESSING;
 		}
 		return UNLANG_ACTION_PUSHED_CHILD;
@@ -529,7 +529,7 @@ static unlang_action_t unlang_xlat_resume(rlm_rcode_t *p_result, request_t *requ
 	case XLAT_ACTION_FAIL:
 		if (state->success) *state->success = false;
 		*p_result = RLM_MODULE_FAIL;
-		RINDENT_RESTORE(request, &state->indent);
+		RINDENT_RESTORE(request, state);
 		return UNLANG_ACTION_CALCULATE_RESULT;
 	/* DON'T SET DEFAULT */
 	}
@@ -537,7 +537,7 @@ static unlang_action_t unlang_xlat_resume(rlm_rcode_t *p_result, request_t *requ
 	fr_assert(0);		/* Garbage xlat action */
 
 	*p_result = RLM_MODULE_FAIL;
-	RINDENT_RESTORE(request, &state->indent);
+	RINDENT_RESTORE(request, state);
 	return UNLANG_ACTION_CALCULATE_RESULT;
 }
 
@@ -577,6 +577,100 @@ xlat_action_t unlang_xlat_yield(request_t *request,
 	state->rctx = rctx;
 
 	return XLAT_ACTION_YIELD;
+}
+
+/** Evaluate a "pure" (or not impure) xlat
+ *
+ * @param[in] ctx		To allocate value boxes and values in.
+ * @param[out] out		Where to write the result of the expansion.
+ * @param[in] request		to push xlat onto.
+ * @param[in] xlat		to evaluate.
+ * @return
+ *	- 0 on success.
+ *	- -1 on failure.
+ */
+int unlang_xlat_eval(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *request, xlat_exp_head_t const *xlat)
+{
+	bool	success = false;
+
+	if (xlat->flags.impure_func) {
+		fr_strerror_const("Expansion requires async operations");
+		return -1;
+	}
+
+	if (unlang_xlat_push(ctx, &success, out, request, xlat, UNLANG_TOP_FRAME) < 0) return -1;
+
+	(void) unlang_interpret(request);
+
+	if (!success) return -1;
+
+	return 0;
+}
+
+/** Evaluate a "pure" (or not impure) xlat
+ *
+ * @param[in] ctx		To allocate value boxes and values in.
+ * @param[out] vb		output value-box
+ * @param[in] type		expected type
+ * @param[in] enumv		enum for type
+ * @param[in] request		to push xlat onto.
+ * @param[in] xlat		to evaluate.
+ * @return
+ *	- 0 on success.
+ *	- -1 on failure.
+ */
+int unlang_xlat_eval_type(TALLOC_CTX *ctx, fr_value_box_t *vb, fr_type_t type, fr_dict_attr_t const *enumv, request_t *request, xlat_exp_head_t const *xlat)
+{
+	fr_value_box_t *src;
+	fr_value_box_list_t list;
+
+	if (fr_type_is_structural(type)) {
+		fr_strerror_const("Invalid type for output of evaluation");
+		return -1;
+	}
+
+	fr_value_box_list_init(&list);
+
+	if (unlang_xlat_eval(ctx, &list, request, xlat) < 0) return -1;
+
+	fr_value_box_init(vb, type, NULL, false);
+
+	switch (type) {
+	default:
+		/*
+		 *	Take only the first entry from the list.
+		 */
+		src = fr_value_box_list_head(&list);
+		if (!src) {
+			fr_strerror_const("Expression returned no results");
+		fail:
+			fr_value_box_list_talloc_free(&list);
+			return -1;
+		}
+
+		if (fr_value_box_cast(ctx, vb, type, enumv, src) < 0) goto fail;
+		fr_value_box_list_talloc_free(&list);
+		break;
+
+	case FR_TYPE_STRING:
+	case FR_TYPE_OCTETS:
+		/*
+		 *	No output: create an empty string.
+		 *
+		 *	The "concat in place" function returns an error for empty input, which is arguably not
+		 *	what we want to do here.
+		 */
+		if (fr_value_box_list_empty(&list)) {
+			break;
+		}
+
+		if (fr_value_box_list_concat_in_place(ctx, vb, &list, type, FR_VALUE_BOX_LIST_FREE_BOX, false, SIZE_MAX) < 0) {
+			goto fail;
+		}
+		break;
+	}
+
+	return 0;
 }
 
 

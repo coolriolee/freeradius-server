@@ -27,6 +27,8 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/modpriv.h>
 #include <freeradius-devel/unlang/xlat_func.h>
+#include <freeradius-devel/unlang/xlat.h>
+#include <freeradius-devel/util/time.h>
 
 #include "interpret_priv.h"
 #include "module_priv.h"
@@ -316,6 +318,16 @@ unlang_frame_action_t result_calculate(request_t *request, unlang_stack_frame_t 
 		*priority);
 
 	/*
+	 *	Update request->rcode if the instruction says we should
+	 *	We don't care about priorities for this.
+	 */
+	if (unlang_ops[instruction->type].rcode_set) {
+		RDEBUG3("Setting rcode to '%s'",
+			fr_table_str_by_value(rcode_table, *result, "<INVALID>"));
+		request->rcode = *result;
+	}
+
+	/*
 	 *	Don't set action or priority if we don't have one.
 	 */
 	if (*result == RLM_MODULE_NOT_SET) return UNLANG_FRAME_ACTION_NEXT;
@@ -408,7 +420,7 @@ unlang_frame_action_t result_calculate(request_t *request, unlang_stack_frame_t 
 				if (retry->count >= instruction->actions.retry.mrc) {
 					retry->state = FR_RETRY_MRC;
 
-					REDEBUG("Retries hit max_rtx_count (%d) - returning 'fail'", instruction->actions.retry.mrc);
+					REDEBUG("Retries hit max_rtx_count (%u) - returning 'fail'", instruction->actions.retry.mrc);
 
 				fail:
 					*result = RLM_MODULE_FAIL;
@@ -419,7 +431,7 @@ unlang_frame_action_t result_calculate(request_t *request, unlang_stack_frame_t 
 
 		RINDENT();
 		if (instruction->actions.retry.mrc) {
-			RDEBUG("... retrying (%d/%d)", retry->count, instruction->actions.retry.mrc);
+			RDEBUG("... retrying (%u/%u)", retry->count, instruction->actions.retry.mrc);
 		} else {
 			RDEBUG("... retrying");
 		}
@@ -1079,6 +1091,8 @@ void unlang_interpret_request_done(request_t *request)
 		intp->funcs.done_detached(request, stack->result, intp->uctx);	/* Callback will usually free the request */
 		break;
 	}
+
+	request->master_state = REQUEST_DONE;
 }
 
 static inline CC_HINT(always_inline)
@@ -1091,7 +1105,7 @@ void unlang_interpret_request_stop(request_t *request)
 
 	intp = stack->intp;
 	intp->funcs.stop(request, intp->uctx);
-	request->log.unlang_indent = 0;			/* nothing unwinds the indentation stack */
+	request->log.indent.unlang = 0;			/* nothing unwinds the indentation stack */
 	request->master_state = REQUEST_STOP_PROCESSING;
 }
 
@@ -1106,9 +1120,8 @@ void unlang_interpret_request_detach(request_t *request)
 	if (!request_is_detachable(request)) return;
 
 	intp = stack->intp;
-	intp->funcs.detach(request, intp->uctx);
 
-	if (request_detach(request) < 0) RPEDEBUG("Failed detaching request");
+	intp->funcs.detach(request, intp->uctx);
 }
 
 /** Send a signal (usually stop) to a request
@@ -1311,6 +1324,13 @@ bool unlang_request_is_cancelled(request_t const *request)
 	return (request->master_state == REQUEST_STOP_PROCESSING);
 }
 
+/** Return whether a request has been marked done
+ */
+bool unlang_request_is_done(request_t const *request)
+{
+	return (request->master_state == REQUEST_DONE);
+}
+
 /** Check if a request as resumable.
  *
  * @param[in] request		The current request.
@@ -1435,6 +1455,9 @@ static xlat_action_t unlang_cancel_never_run(UNUSED TALLOC_CTX *ctx, UNUSED fr_d
 
 /** Allows a request to dynamically alter its own lifetime
  *
+ * %cancel(<timeout>)
+ *
+ * If timeout is 0, then the request is immediately cancelled.
  */
 static xlat_action_t unlang_cancel_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					UNUSED xlat_ctx_t const *xctx,
@@ -1485,7 +1508,9 @@ static xlat_action_t unlang_cancel_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	 *	We call unlang_xlat_yield to keep the interpreter happy
 	 *	as it expects to see a resume function set.
 	 */
-	if (!timeout) return unlang_xlat_yield(request, unlang_cancel_never_run, NULL, 0, NULL);
+	if (!timeout || fr_time_delta_eq(timeout->vb_time_delta, fr_time_delta_from_sec(0))) {
+		return unlang_xlat_yield(request, unlang_cancel_never_run, NULL, 0, NULL);
+	}
 
 	if (ev_p_og) {
 		MEM(vb = fr_value_box_alloc(ctx, FR_TYPE_TIME_DELTA, NULL));

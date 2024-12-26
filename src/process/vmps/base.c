@@ -162,7 +162,7 @@ static fr_process_state_t const process_state[] = {
 /*
  *	Debug the packet if requested.
  */
-static void vmps_packet_debug(request_t *request, fr_radius_packet_t const *packet, fr_pair_list_t const *list, bool received)
+static void vmps_packet_debug(request_t *request, fr_packet_t const *packet, fr_pair_list_t const *list, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];
@@ -207,7 +207,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_vmps_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_vmps_t);
 	fr_assert(PROCESS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "vmps";
@@ -228,33 +228,28 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 static const virtual_server_compile_t compile_list[] = {
 	{
-		.name = "recv",
-		.name2 = "Join-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Join-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(join_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Join-Response",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Join-Response"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(join_response),
 	},
 	{
-		.name = "recv",
-		.name2 = "Reconfirm-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Reconfirm-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = PROCESS_CONF_OFFSET(reconfirm_request),
 	},
 	{
-		.name = "send",
-		.name2 = "Reconfirm-Response",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Reconfirm-Response"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(reconfirm_response),
 	},
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond),
 	},
 

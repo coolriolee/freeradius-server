@@ -22,6 +22,7 @@
  *
  * @copyright 2000-2003,2006-2015 The FreeRADIUS server project
  */
+#include "protocols/radius/radius.h"
 RCSID("$Id$")
 
 #include <freeradius-devel/util/dbuff.h>
@@ -38,8 +39,8 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 			    fr_dcursor_t *cursor, void *encode_ctx);
 
 static ssize_t encode_child(fr_dbuff_t *dbuff,
-				fr_da_stack_t *da_stack, unsigned int depth,
-				fr_dcursor_t *cursor, void *encode_ctx);
+			    fr_da_stack_t *da_stack, unsigned int depth,
+			    fr_dcursor_t *cursor, void *encode_ctx);
 
 /** "encrypt" a password RADIUS style
  *
@@ -246,7 +247,7 @@ static ssize_t encode_tlv(fr_dbuff_t *dbuff,
 
 			if (vp->da != da_stack->da[depth]) {
 				fr_strerror_printf("%s: Can't encode empty TLV", __FUNCTION__);
-				return PAIR_ENCODE_SKIPPED;
+				return 0;
 			}
 
 			fr_pair_dcursor_child_iter_init(&child_cursor, &vp->vp_group, cursor);
@@ -257,10 +258,7 @@ static ssize_t encode_tlv(fr_dbuff_t *dbuff,
 			 *	Call ourselves recursively to encode children.
 			 */
 			slen = encode_tlv(&work_dbuff, da_stack, depth, &child_cursor, encode_ctx);
-			if (slen < 0) {
-				if (slen == PAIR_ENCODE_SKIPPED) continue;
-				return slen;
-			}
+			if (slen < 0) return slen;
 
 			vp = fr_dcursor_next(cursor);
 			fr_proto_da_stack_build(da_stack, vp ? vp->da : NULL);
@@ -268,10 +266,7 @@ static ssize_t encode_tlv(fr_dbuff_t *dbuff,
 		} else {
 			slen = encode_child(&work_dbuff, da_stack, depth + 1, cursor, encode_ctx);
 		}
-		if (slen < 0) {
-			if (slen == PAIR_ENCODE_SKIPPED) continue;
-			return slen;
-		}
+		if (slen < 0) return slen;
 
 		/*
 		 *	If nothing updated the attribute, stop
@@ -307,10 +302,7 @@ static ssize_t encode_pairs(fr_dbuff_t *dbuff, fr_pair_list_t const *vps, void *
 		 *	Encode an individual VP
 		 */
 		slen = fr_radius_encode_pair(dbuff, &cursor, encode_ctx);
-		if (slen < 0) {
-			if (slen == PAIR_ENCODE_SKIPPED) continue;
-			return slen;
-		}
+		if (slen < 0) return slen;
 	}
 
 	return fr_dbuff_used(dbuff);
@@ -325,21 +317,21 @@ static ssize_t encode_pairs(fr_dbuff_t *dbuff, fr_pair_list_t const *vps, void *
  *	  unless it's one of a list of exceptions.
  *	< 0, How many additional bytes we'd need as a negative integer.
  *	PAIR_ENCODE_FATAL_ERROR - Abort encoding the packet.
- *	PAIR_ENCODE_SKIPPED - Unencodable value
  */
 static ssize_t encode_value(fr_dbuff_t *dbuff,
 			    fr_da_stack_t *da_stack, unsigned int depth,
 			    fr_dcursor_t *cursor, void *encode_ctx)
 {
-	ssize_t			slen;
-	size_t			len;
-	fr_pair_t const	*vp = fr_dcursor_current(cursor);
-	fr_dict_attr_t const	*da = da_stack->da[depth];
-	fr_radius_encode_ctx_t	*packet_ctx = encode_ctx;
-	fr_dbuff_t		work_dbuff = FR_DBUFF(dbuff);
-	fr_dbuff_t		value_dbuff;
-	fr_dbuff_marker_t	value_start, src, dest;
-	bool			encrypted = false;
+	ssize_t				slen;
+	size_t				len;
+	fr_pair_t const			*vp = fr_dcursor_current(cursor);
+	fr_dict_attr_t const		*da = da_stack->da[depth];
+	fr_radius_encode_ctx_t		*packet_ctx = encode_ctx;
+	fr_dbuff_t			work_dbuff = FR_DBUFF(dbuff);
+	fr_dbuff_t			value_dbuff;
+	fr_dbuff_marker_t		value_start, src, dest;
+	bool				encrypted = false;
+	fr_radius_attr_flags_encrypt_t	encrypt;
 
 	PAIR_VERIFY(vp);
 	FR_PROTO_STACK_PRINT(da_stack, depth);
@@ -354,7 +346,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	/*
 	 *	Catch errors early on.
 	 */
-	if (flag_encrypted(&vp->da->flags) && !packet_ctx) {
+	if (fr_radius_flag_encrypted(vp->da) && !packet_ctx) {
 		fr_strerror_const("Asked to encrypt attribute, but no packet context provided");
 		return PAIR_ENCODE_FATAL_ERROR;
 	}
@@ -406,7 +398,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 *	tag, then we always encode a tag byte, even one that
 	 *	is zero.
 	 */
-	if ((vp->vp_type == FR_TYPE_STRING) && flag_has_tag(&vp->da->flags)) {
+	if ((vp->vp_type == FR_TYPE_STRING) && fr_radius_flag_has_tag(vp->da)) {
 		if (packet_ctx->tag) {
 			FR_DBUFF_IN_RETURN(&work_dbuff, (uint8_t)packet_ctx->tag);
 		} else if (TAG_VALID(vp->vp_strvalue[0])) {
@@ -465,7 +457,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 *	through to using the common encoder.
 	 */
 	case FR_TYPE_STRING:
-		if (flag_abinary(&da->flags)) {
+		if (fr_radius_flag_abinary(da)) {
 			slen = fr_radius_encode_abinary(vp, &value_dbuff);
 			if (slen <= 0) return slen;
 			break;
@@ -489,6 +481,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 *	be written.
 	 */
 	if (fr_dbuff_used(&value_dbuff) == 0) {
+	return_0:
 		vp = fr_dcursor_next(cursor);
 		fr_proto_da_stack_build(da_stack, vp ? vp->da : NULL);
 		return 0;
@@ -500,8 +493,9 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 *	Attributes with encrypted values MUST be less than
 	 *	128 bytes long.
 	 */
-	if (flag_encrypted(&da->flags)) switch (vp->da->flags.subtype) {
-	case FLAG_ENCRYPT_USER_PASSWORD:
+	encrypt = fr_radius_flag_encrypted(da);
+	if (encrypt) switch (encrypt) {
+	case RADIUS_FLAG_ENCRYPT_USER_PASSWORD:
 		/*
 		 *	Encode the password in place
 		 */
@@ -510,11 +504,13 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		encrypted = true;
 		break;
 
-	case FLAG_TAGGED_TUNNEL_PASSWORD:
-	case FLAG_ENCRYPT_TUNNEL_PASSWORD:
+	case RADIUS_FLAG_ENCRYPT_TUNNEL_PASSWORD:
+	{
+		bool has_tag = fr_radius_flag_has_tag(vp->da);
+
 		if (packet_ctx->disallow_tunnel_passwords) {
-			fr_strerror_const("Attributes with 'encrypt=2' set cannot go into this packet.");
-			return PAIR_ENCODE_SKIPPED;
+			fr_strerror_const("Attributes with 'encrypt=Tunnel-Password' set cannot go into this packet.");
+			goto return_0;
 		}
 
 		/*
@@ -526,30 +522,31 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		 *	perhaps one of the salt fields could be
 		 *	mistaken for the tag.
 		 */
-		if (flag_has_tag(&vp->da->flags)) fr_dbuff_advance(&work_dbuff, 1);
+		if (has_tag) fr_dbuff_advance(&work_dbuff, 1);
 
 		slen = encode_tunnel_password(&work_dbuff, &value_start, fr_dbuff_used(&value_dbuff), packet_ctx);
 		if (slen < 0) {
 			fr_strerror_printf("%s too long", vp->da->name);
-			return slen - flag_has_tag(&vp->da->flags);
+			return slen - has_tag;
 		}
 
 		/*
 		 *	Do this after so we don't mess up the input
 		 *	value.
 		 */
-		if (flag_has_tag(&vp->da->flags)) {
+		if (has_tag) {
 			fr_dbuff_set_to_start(&value_start);
 			fr_dbuff_in(&value_start, (uint8_t) 0x00);
 		}
 		encrypted = true;
+	}
 		break;
 
 	/*
 	 *	The code above ensures that this attribute
 	 *	always fits.
 	 */
-	case FLAG_ENCRYPT_ASCEND_SECRET:
+	case RADIUS_FLAG_ENCRYPT_ASCEND_SECRET:
 		/*
 		 *	@todo radius decoding also uses fr_radius_ascend_secret() (Vernam cipher
 		 *	is its own inverse). As part of converting decode, make sure the caller
@@ -560,6 +557,13 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		if (slen < 0) return slen;
 		encrypted = true;
 		break;
+
+	case RADIUS_FLAG_ENCRYPT_NONE:
+		break;
+
+	case RADIUS_FLAG_ENCRYPT_INVALID:
+		fr_strerror_const("Invalid encryption type");
+		return PAIR_ENCODE_FATAL_ERROR;
 	}
 
 	if (!encrypted) {
@@ -576,7 +580,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 *	same tunnel.  Valid values for this field are 0x01 through 0x1F,
 	 *	inclusive.  If the Tag field is unused, it MUST be zero (0x00).
 	 */
-	if ((vp->vp_type == FR_TYPE_UINT32) && flag_has_tag(&vp->da->flags)) {
+	if ((vp->vp_type == FR_TYPE_UINT32) && fr_radius_flag_has_tag(vp->da)) {
 		uint8_t	msb = 0;
 		/*
 		 *	Only 24bit integers are allowed here
@@ -585,7 +589,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		(void) fr_dbuff_out(&msb, &src);
 		if (msb != 0) {
 			fr_strerror_const("Integer overflow for tagged uint32 attribute");
-			return PAIR_ENCODE_SKIPPED;
+			goto return_0;
 		}
 		fr_dbuff_set(&dest, &value_start);
 		fr_dbuff_in(&dest, packet_ctx->tag);
@@ -736,7 +740,7 @@ static ssize_t encode_extended(fr_dbuff_t *dbuff,
 	PAIR_VERIFY(vp);
 	FR_PROTO_STACK_PRINT(da_stack, depth);
 
-	extra = flag_long_extended(&da_stack->da[0]->flags);
+	extra = fr_radius_flag_long_extended(da_stack->da[0]);
 
 	/*
 	 *	The data used here can be more than 255 bytes, but only for the
@@ -1225,10 +1229,7 @@ static ssize_t encode_vendor(fr_dbuff_t *dbuff,
 		} else {
 			slen = encode_vendor_attr(&work_dbuff, da_stack, depth, &child_cursor, encode_ctx);
 		}
-		if (slen < 0) {
-			if (slen == PAIR_ENCODE_SKIPPED) continue;
-			return slen;
-		}
+		if (slen < 0) return slen;
 	}
 
 	vp = fr_dcursor_next(cursor);
@@ -1271,7 +1272,7 @@ static ssize_t encode_vsa(fr_dbuff_t *dbuff,
 	vp = fr_dcursor_current(cursor);
 	if (vp->da != da_stack->da[depth]) {
 		fr_strerror_printf("%s: Can't encode empty Vendor-Specific", __FUNCTION__);
-		return PAIR_ENCODE_SKIPPED;
+		return 0;
 	}
 
 	/*
@@ -1285,10 +1286,7 @@ static ssize_t encode_vsa(fr_dbuff_t *dbuff,
 		fr_assert(da_stack->da[depth + 1]->type == FR_TYPE_VENDOR);
 
 		slen = encode_vendor(&work_dbuff, da_stack, depth + 1, &child_cursor, encode_ctx);
-		if (slen < 0) {
-			if (slen == PAIR_ENCODE_SKIPPED) continue;
-			return slen;
-		}
+		if (slen < 0) return slen;
 	}
 
 	/*
@@ -1422,6 +1420,7 @@ static ssize_t encode_rfc(fr_dbuff_t *dbuff, fr_da_stack_t *da_stack, unsigned i
 	fr_pair_t const	*vp = fr_dcursor_current(cursor);
 	fr_dbuff_t		work_dbuff = FR_DBUFF(dbuff);
 	fr_dbuff_marker_t	start;
+	fr_radius_encode_ctx_t	*packet_ctx = encode_ctx;
 
 	fr_dbuff_marker(&start, &work_dbuff);
 
@@ -1448,7 +1447,7 @@ static ssize_t encode_rfc(fr_dbuff_t *dbuff, fr_da_stack_t *da_stack, unsigned i
 		if (((fr_dict_vendor_num_by_da(da_stack->da[depth]) == 0) && (da_stack->da[depth]->attr == 0)) ||
 		    (da_stack->da[depth]->attr > UINT8_MAX)) {
 			fr_strerror_printf("%s: Called with non-standard attribute %u", __FUNCTION__, vp->da->attr);
-			return PAIR_ENCODE_SKIPPED;
+			return 0;
 		}
 		break;
 	}
@@ -1471,12 +1470,16 @@ static ssize_t encode_rfc(fr_dbuff_t *dbuff, fr_da_stack_t *da_stack, unsigned i
 	 *	Message-Authenticator is hard-coded.
 	 */
 	if (vp->da == attr_message_authenticator) {
-		FR_DBUFF_IN_BYTES_RETURN(&work_dbuff, (uint8_t)vp->da->attr, 18);
-		FR_DBUFF_MEMSET_RETURN(&work_dbuff, 0, RADIUS_MESSAGE_AUTHENTICATOR_LENGTH);
+		if (!packet_ctx->seen_message_authenticator) {
+			FR_DBUFF_IN_BYTES_RETURN(&work_dbuff, (uint8_t)vp->da->attr, 18);
+			FR_DBUFF_MEMSET_RETURN(&work_dbuff, 0, RADIUS_MESSAGE_AUTHENTICATOR_LENGTH);
 
-		FR_PROTO_HEX_DUMP(fr_dbuff_current(&start) + 2, RADIUS_MESSAGE_AUTHENTICATOR_LENGTH,
-				  "message-authenticator");
-		FR_PROTO_HEX_DUMP(fr_dbuff_current(&start), 2, "header rfc");
+			FR_PROTO_HEX_DUMP(fr_dbuff_current(&start) + 2, RADIUS_MESSAGE_AUTHENTICATOR_LENGTH,
+					  "message-authenticator");
+			FR_PROTO_HEX_DUMP(fr_dbuff_current(&start), 2, "header rfc");
+
+			packet_ctx->seen_message_authenticator = true;
+		}
 
 		vp = fr_dcursor_next(cursor);
 		fr_proto_da_stack_build(da_stack, vp ? vp->da : NULL);
@@ -1528,7 +1531,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 	PAIR_VERIFY(vp);
 
 	if (vp->da->depth > FR_DICT_MAX_TLV_STACK) {
-		fr_strerror_printf("%s: Attribute depth %i exceeds maximum nesting depth %i",
+		fr_strerror_printf("%s: Attribute depth %u exceeds maximum nesting depth %i",
 				   __FUNCTION__, vp->da->depth, FR_DICT_MAX_TLV_STACK);
 		return PAIR_ENCODE_FATAL_ERROR;
 	}
@@ -1577,7 +1580,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 		    (vp->da != attr_message_authenticator)) {
 			fr_dcursor_next(cursor);
 			fr_strerror_const("Zero length string attributes not allowed");
-			return PAIR_ENCODE_SKIPPED;
+			return 0;
 		}
 		break;
 	}
@@ -1591,7 +1594,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 	/*
 	 *	Fast path for the common case.
 	 */
-	if (vp->da->parent->flags.is_root && !vp->da->flags.subtype) {
+	if (vp->da->parent->flags.is_root && fr_radius_flag_encrypted(vp->da)) {
 		switch (vp->vp_type) {
 		case FR_TYPE_LEAF:
 			da_stack.da[0] = vp->da;
@@ -1621,7 +1624,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 	da = da_stack.da[0];
 	switch (da->type) {
 	case FR_TYPE_OCTETS:
-		if (flag_concat(&da->flags)) {
+		if (fr_radius_flag_concat(da)) {
 			/*
 			 *	Attributes like EAP-Message are marked as
 			 *	"concat", which means that they are fragmented
@@ -1645,7 +1648,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 		break;
 
 	case FR_TYPE_TLV:
-		if (!flag_extended(&da->flags)) {
+		if (!fr_radius_flag_extended(da)) {
 			slen = encode_child(&work_dbuff, &da_stack, 0, cursor, encode_ctx);
 
 		} else if (vp->da != da) {
@@ -1696,21 +1699,27 @@ ssize_t	fr_radius_encode_foreign(fr_dbuff_t *dbuff, fr_pair_list_t const *list)
 }
 
 
-static int encode_test_ctx(void **out, TALLOC_CTX *ctx)
+static int encode_test_ctx(void **out, TALLOC_CTX *ctx, UNUSED fr_dict_t const *dict)
 {
 	static uint8_t vector[RADIUS_AUTH_VECTOR_LENGTH] = {
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
 
 	fr_radius_encode_ctx_t	*test_ctx;
+	fr_radius_ctx_t		*common;
 
 	test_ctx = talloc_zero(ctx, fr_radius_encode_ctx_t);
 	if (!test_ctx) return -1;
 
-	test_ctx->common = talloc_zero(test_ctx, fr_radius_ctx_t);
+	test_ctx->common = common = talloc_zero(test_ctx, fr_radius_ctx_t);
 
-	test_ctx->common->secret = talloc_strdup(test_ctx->common, "testing123");
-	test_ctx->common->secret_length = talloc_array_length(test_ctx->common->secret) - 1;
+	common->secret = talloc_strdup(test_ctx->common, "testing123");
+	common->secret_length = talloc_array_length(test_ctx->common->secret) - 1;
+
+	/*
+	 *	We don't want to automatically add Message-Authenticator
+	 */
+	common->secure_transport = true;
 
 	test_ctx->request_authenticator = vector;
 	test_ctx->rand_ctx.a = 6809;
@@ -1721,7 +1730,7 @@ static int encode_test_ctx(void **out, TALLOC_CTX *ctx)
 	return 0;
 }
 
-static ssize_t fr_radius_encode_proto(UNUSED TALLOC_CTX *ctx, fr_pair_list_t *vps, uint8_t *data, size_t data_len, void *proto_ctx)
+static ssize_t fr_radius_encode_proto(TALLOC_CTX *ctx, fr_pair_list_t *vps, uint8_t *data, size_t data_len, void *proto_ctx)
 {
 	fr_radius_encode_ctx_t	*packet_ctx = talloc_get_type_abort(proto_ctx, fr_radius_encode_ctx_t);
 	int packet_type = FR_RADIUS_CODE_ACCESS_REQUEST;
@@ -1731,25 +1740,30 @@ static ssize_t fr_radius_encode_proto(UNUSED TALLOC_CTX *ctx, fr_pair_list_t *vp
 	vp = fr_pair_find_by_da(vps, NULL, attr_packet_type);
 	if (vp) packet_type = vp->vp_uint32;
 
+	/*
+	 *	Force specific values for testing.
+	 */
 	if ((packet_type == FR_RADIUS_CODE_ACCESS_REQUEST) || (packet_type == FR_RADIUS_CODE_STATUS_SERVER)) {
 		vp = fr_pair_find_by_da(vps, NULL, attr_packet_authentication_vector);
-		if (vp && (vp->vp_length == RADIUS_AUTH_VECTOR_LENGTH)) {
-			memcpy(data + 4, vp->vp_octets, RADIUS_AUTH_VECTOR_LENGTH);
-		} else {
+		if (!vp) {
 			int i;
+			uint8_t vector[RADIUS_AUTH_VECTOR_LENGTH];
 
 			for (i = 0; i < RADIUS_AUTH_VECTOR_LENGTH; i++) {
 				data[4 + i] = fr_fast_rand(&packet_ctx->rand_ctx);
 			}
+
+			fr_pair_list_append_by_da_len(ctx, vp, vps, attr_packet_authentication_vector, vector, sizeof(vector), false);
 		}
 	}
+
+	packet_ctx->code = packet_type;
 
 	/*
 	 *	@todo - pass in packet_ctx to this function, so that we
 	 *	can leverage a consistent random number generator.
 	 */
-	slen = fr_radius_encode(data, data_len, NULL, packet_ctx->common->secret, talloc_array_length(packet_ctx->common->secret) - 1,
-				packet_type, 0, vps);
+	slen = fr_radius_encode(&FR_DBUFF_TMP(data, data_len), vps, packet_ctx);
 	if (slen <= 0) return slen;
 
 	if (fr_radius_sign(data, NULL, (uint8_t const *) packet_ctx->common->secret, talloc_array_length(packet_ctx->common->secret) - 1) < 0) {

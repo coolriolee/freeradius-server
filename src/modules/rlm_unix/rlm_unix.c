@@ -26,7 +26,7 @@
 RCSID("$Id$")
 USES_APPLE_DEPRECATED_API
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <freeradius-devel/radius/radius.h>
 #include <freeradius-devel/server/base.h>
@@ -153,7 +153,7 @@ static bool CC_HINT(nonnull) unix_check_group(UNUSED rlm_unix_t const *inst, req
 /** Check if the user is a member of a particular unix group
  *
 @verbatim
-%{unix.group:<name>}
+%unix.group(<name>)
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -162,7 +162,7 @@ static xlat_action_t unix_group_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				     xlat_ctx_t const *xctx,
 				     request_t *request, fr_value_box_list_t *in)
 {
-	rlm_unix_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_unix_t);
+	rlm_unix_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_unix_t);
 	fr_value_box_t		*arg = fr_value_box_list_head(in);
 	char const		*p = arg->vb_strvalue;
 	fr_value_box_t		*vb;
@@ -182,16 +182,15 @@ static xlat_action_t unix_group_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_unix_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_unix_t);
 	xlat_t			*xlat;
 	xlat_arg_parser_t	*xlat_arg;
 
 	/*
-	 *	Define the new %{unix.group:name} xlat.  The register
+	 *	Define the new %unix.group(name) xlat.  The register
 	 *	function automatically adds the module instance name
 	 *	as a prefix.
 	 */
-	xlat = xlat_func_register_module(inst, mctx, "group", unix_group_xlat, FR_TYPE_BOOL);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "group", unix_group_xlat, FR_TYPE_BOOL);
 	if (!xlat) {
 		PERROR("Failed registering group expansion");
 		return -1;
@@ -201,15 +200,15 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	 *	The xlat escape function needs access to inst - so
 	 *	argument parser details need to be defined here
 	 */
-	xlat_arg = talloc_zero_array(inst, xlat_arg_parser_t, 2);
-	xlat_arg[0].type = FR_TYPE_STRING;
-	xlat_arg[0].required = true;
-	xlat_arg[0].concat = true;
-	xlat_arg[0].func = NULL; /* No real escaping done - we do strcmp() on it */
-	xlat_arg[0].uctx = NULL;
+	xlat_arg = talloc_zero_array(xlat, xlat_arg_parser_t, 2);
+	xlat_arg[0] = (xlat_arg_parser_t) {
+		.type = FR_TYPE_STRING,
+		.required = true,
+		.concat = true
+	};
 	xlat_arg[1] = (xlat_arg_parser_t)XLAT_ARG_PARSER_TERMINATOR;
 
-	xlat_func_mono_set(xlat, xlat_arg);
+	xlat_func_args_set(xlat, xlat_arg);
 
 	return 0;
 }
@@ -373,7 +372,7 @@ static char *uue(void *in)
  */
 static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_unix_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_unix_t);
+	rlm_unix_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_unix_t);
 	fr_pair_t		*vp;
 	FILE			*fp;
 	struct utmp		ut;
@@ -561,10 +560,12 @@ module_rlm_t rlm_unix = {
 		.config		= module_config,
 		.bootstrap	= mod_bootstrap
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "recv",		.name2 = "access-request",	.method = mod_authorize },
-		{ .name1 = "send",		.name2 = "accounting-response",	.method = mod_accounting },	/* Backwards compatibility */
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY), .method = mod_accounting },
+			{ .section = SECTION_NAME("recv", "Access-Request"), .method = mod_authorize },
+			{ .section = SECTION_NAME("send", "Accounting-Response"), .method = mod_accounting },	/* Backwards compatibility */
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

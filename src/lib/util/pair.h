@@ -92,7 +92,7 @@ struct value_pair_s {
 			 * This hack allows the majority of the fr_pair_list_t to overlap with the
 			 * fr_value_box_t which gives us much greater packing efficiency.
 			 */
-			uint8_t		pad[offsetof(fr_value_box_t, type) + sizeof(fr_type_t)];
+			uint8_t		pad[offsetof(fr_value_box_t, safe_for)];
 
 			fr_pair_list_t	children;		//!< Nested attributes of this pair.
 		};
@@ -142,6 +142,7 @@ struct value_pair_s {
 #define vp_type			data.type
 #define vp_tainted		data.tainted
 #define vp_immutable		data.immutable
+#define vp_edit			data.edit
 #define vp_raw			da->flags.is_raw
 
 #define ATTRIBUTE_EQ(_x, _y) ((_x && _y) && (_x->da == _y->da))
@@ -465,7 +466,7 @@ int		fr_pair_steal_append(TALLOC_CTX *nctx, fr_pair_list_t *list, fr_pair_t *vp)
 int		fr_pair_steal_prepend(TALLOC_CTX *nctx, fr_pair_list_t *list, fr_pair_t *vp) CC_HINT(nonnull);
 
 /* Searching and list modification */
-int		fr_pair_raw_from_pair(fr_pair_t *vp, uint8_t const *data, size_t data_len) CC_HINT(nonnull);
+int		fr_pair_raw_afrom_pair(fr_pair_t *vp, uint8_t const *data, size_t data_len) CC_HINT(nonnull);
 
 bool		fr_pair_matches_da(void const *item, void const *uctx) CC_HINT(nonnull);
 
@@ -538,7 +539,7 @@ int		fr_pair_delete_by_da(fr_pair_list_t *head, fr_dict_attr_t const *da) CC_HIN
 
 int		fr_pair_delete_by_da_nested(fr_pair_list_t *list, fr_dict_attr_t const *da) CC_HINT(nonnull);
 
-fr_pair_t	*fr_pair_delete(fr_pair_list_t *list, fr_pair_t *vp) CC_HINT(nonnull);
+int		fr_pair_delete(fr_pair_list_t *list, fr_pair_t *vp) CC_HINT(nonnull);
 
 /* functions for FR_TYPE_STRUCTURAL */
 fr_pair_list_t	*fr_pair_children(fr_pair_t *head) CC_HINT(nonnull);
@@ -673,7 +674,7 @@ int		fr_pair_cmp(fr_pair_t const *a, fr_pair_t const *b);
 int		fr_pair_list_cmp(fr_pair_list_t const *a, fr_pair_list_t const *b) CC_HINT(nonnull);
 
 /* Filtering */
-void		fr_pair_validate_debug(TALLOC_CTX *ctx, fr_pair_t const *failed[2]) CC_HINT(nonnull(2));
+void		fr_pair_validate_debug(fr_pair_t const *failed[2]) CC_HINT(nonnull);
 
 bool		fr_pair_validate(fr_pair_t const *failed[2], fr_pair_list_t *filter,
 				 fr_pair_list_t *list) CC_HINT(nonnull(2,3));
@@ -686,7 +687,13 @@ bool		fr_pair_immutable(fr_pair_t const *vp) CC_HINT(nonnull);
 static inline CC_HINT(nonnull, always_inline)
 void fr_pair_set_immutable(fr_pair_t *vp)
 {
-	fr_value_box_set_immutable(&vp->data);
+	vp->vp_immutable = true;
+}
+
+static inline CC_HINT(nonnull, always_inline)
+void fr_pair_clear_immutable(fr_pair_t *vp)
+{
+	vp->vp_immutable = false;
 }
 
 

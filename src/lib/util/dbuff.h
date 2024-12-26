@@ -374,6 +374,11 @@ _fr_dbuff_init(_out, \
 DIAG_ON(maybe-uninitialized)
 #endif
 
+#define FR_DBUFF_INIT(_out, _start, _len_or_end) do { \
+	fr_dbuff_init(_out, _start, _len_or_end); \
+	*(unsigned char *) _start = '\0'; \
+  } while (0)
+
 size_t	_fr_dbuff_extend_talloc(fr_dbuff_t *dbuff, size_t extension);
 
 int	fr_dbuff_trim_talloc(fr_dbuff_t *dbuff, size_t len);
@@ -1588,6 +1593,9 @@ static inline ssize_t _fr_dbuff_in_uint64v(uint8_t **pos_p, fr_dbuff_t *dbuff, u
 	uint8_t swapped[sizeof(uint64_t)];
 
 	ret = ROUND_UP_DIV((size_t)fr_high_bit_pos(num | 0x08), 8);
+#ifdef __COVERITY__
+	if (ret > sizeof(uint64_t)) return -1;
+#endif
 	fr_nbo_from_uint64(swapped, num);
 
 	return _fr_dbuff_in_memcpy(pos_p, dbuff, (swapped + (sizeof(uint64_t) - ret)), ret);
@@ -1762,6 +1770,18 @@ FR_DBUFF_OUT_DEF(uint64)
 FR_DBUFF_OUT_DEF(int16)
 FR_DBUFF_OUT_DEF(int32)
 FR_DBUFF_OUT_DEF(int64)
+
+#define FR_DBUFF_OUT_DEF_NO_SWAP(_type) \
+static inline ssize_t _fr_dbuff_out_##_type(_type##_t *out, uint8_t **pos_p, fr_dbuff_t *in) \
+{ \
+	fr_assert(out); \
+	FR_DBUFF_EXTEND_LOWAT_OR_RETURN(in, sizeof(_type##_t)); \
+	*out = **pos_p; \
+	return _fr_dbuff_set(pos_p, in, (*pos_p) + sizeof(_type##_t)); \
+}
+
+FR_DBUFF_OUT_DEF_NO_SWAP(uint8)
+FR_DBUFF_OUT_DEF_NO_SWAP(int8)
 /** @endcond */
 
 /** Copy data from a dbuff or marker to a fixed sized C type
@@ -1778,11 +1798,11 @@ FR_DBUFF_OUT_DEF(int64)
  */
 #define fr_dbuff_out(_out, _dbuff_or_marker) \
 	_Generic((_out), \
-		uint8_t *	: _fr_dbuff_out_memcpy((uint8_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker), 1), \
+		uint8_t *	: _fr_dbuff_out_uint8((uint8_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		uint16_t *	: _fr_dbuff_out_uint16((uint16_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		uint32_t *	: _fr_dbuff_out_uint32((uint32_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		uint64_t *	: _fr_dbuff_out_uint64((uint64_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
-		int8_t *	: _fr_dbuff_out_memcpy((uint8_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker), 1), \
+		int8_t *	: _fr_dbuff_out_int8((int8_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		int16_t *	: _fr_dbuff_out_int16((int16_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		int32_t *	: _fr_dbuff_out_int32((int32_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
 		int64_t *	: _fr_dbuff_out_int64((int64_t *)(_out), _fr_dbuff_current_ptr(_dbuff_or_marker), fr_dbuff_ptr(_dbuff_or_marker)), \
@@ -1794,7 +1814,11 @@ FR_DBUFF_OUT_DEF(int64)
  *
  * @copydetails fr_dbuff_out
  */
+#ifndef STATIC_ANALYZER
 #define FR_DBUFF_OUT_RETURN(_out, _dbuff_or_marker) FR_DBUFF_RETURN(fr_dbuff_out, _out, _dbuff_or_marker)
+#else
+#define FR_DBUFF_OUT_RETURN(_out, _dbuff_or_marker) do { *_out = 0; FR_DBUFF_RETURN(fr_dbuff_out, _out, _dbuff_or_marker); } while (0)
+#endif
 
 /** Internal function - do not call directly
  * @private

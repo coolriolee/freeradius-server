@@ -51,21 +51,17 @@ int fr_openssl_version_consistent(void)
 {
 	unsigned long ssl_linked;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	ssl_linked = OpenSSL_version_num();
-#else
-	ssl_linked = (unsigned long)SSLeay();
-#endif
+
 
 	/*
-	 *	Major and minor versions mismatch, that's bad.
+	 *	Major mismatch, that's bad.
 	 *
-	 *	We still allow mismatches between patch versions
-	 *	as they should be ABI compatible.
+	 *	For OpenSSL 3, the minor versions are API/ABI compatible.
 	 *
-	 *	This should work for >= 1.1.0 including 3.0.0
+	 *	https://openssl-library.org/policies/releasestrat/index.html
 	 */
-	if ((ssl_linked & 0xfff00000) != (ssl_built & 0xfff00000)) {
+	if ((ssl_linked & 0xff000000) != (ssl_built & 0xff000000)) {
 		ERROR("libssl version mismatch.  built: %lx linked: %lx",
 		      (unsigned long) ssl_built,
 		      (unsigned long) ssl_linked);
@@ -86,43 +82,9 @@ char const *fr_openssl_version_str_from_num(uint32_t v)
 {
 	/* 2 (%s) + 1 (.) + 2 (%i) + 1 (.) + 2 (%i) + 1 (c) + 8 (%s) + \0 */
 	static char buffer[18];
-	char *p = buffer, *end = buffer + sizeof(buffer);
 
 	/*
-	 *	If OpenSSL major version is less than three
-	 *	use the old version number layout.
-	 */
-	if (((v & 0xf0000000) >> 28) < 3) {
-		p += snprintf(p, end - p, "%u.%u.%u",
-			      (0xf0000000 & v) >> 28,
-			      (0x0ff00000 & v) >> 20,
-			      (0x000ff000 & v) >> 12);
-
-		if ((0x00000ff0 & v) >> 4) {
-			*p++ =  (char) (0x60 + ((0x00000ff0 & v) >> 4));
-		}
-
-		*p++ = ' ';
-
-		/*
-		 *	Development (0)
-		 */
-		if ((0x0000000f & v) == 0) {
-			strlcpy(p, "dev", end - p);
-		/*
-		 *	Beta (1-14)
-		 */
-		} else if ((0x0000000f & v) <= 14) {
-			snprintf(p, end - p, "beta %u", 0x0000000f & v);
-		} else {
-			strlcpy(p, "release", end - p);
-		}
-
-		return buffer;
-	}
-
-	/*
-	 *	If OpenSSL major version is >= 3 us the
+	 *	OpenSSL major versions >= 3 (which FreeRADIUS requires) use the
 	 *	new version number layout
 	 *
 	 * 	OPENSSL_VERSION_NUMBER is a combination of the major, minor
@@ -159,7 +121,6 @@ char const *fr_openssl_version_range(uint32_t low, uint32_t high)
 	return buffer;
 }
 
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 /** Return the linked SSL version number as a string
  *
  * @return pointer to a static buffer containing the version string.
@@ -191,40 +152,6 @@ char const *fr_openssl_version_expanded(void)
 
 	return buffer;
 }
-#  else
-/** Return the linked SSL version number as a string
- *
- * @return pointer to a static buffer containing the version string.
- */
-char const *fr_openssl_version_basic(void)
-{
-	long ssl_linked;
-
-	ssl_linked = SSLeay();
-	return fr_openssl_version_str_from_num((uint32_t)ssl_linked);
-}
-
-/** Print the current linked version of Openssl
- *
- * Print the currently linked version of the OpenSSL library.
- *
- * @note Not thread safe.
- *
- * @return pointer to a static buffer containing libssl version information.
- */
-char const *fr_openssl_version_expanded(void)
-{
-	static _Thread_local char buffer[256];
-	long ssl_linked = SSLeay();
-
-	snprintf(buffer, sizeof(buffer), "%s 0x%.8x (%s)",
-		 SSLeay_version(SSLEAY_VERSION),		/* Not all builds include a useful version number */
-		 ssl_linked,
-		 fr_openssl_version_str_from_num(v));
-
-	return buffer;
-}
-#  endif
 
 #  ifdef ENABLE_OPENSSL_VERSION_CHECK
 typedef struct {
@@ -284,13 +211,7 @@ int fr_openssl_version_check(char const *acknowledged)
 	if (strcmp(acknowledged, "yes") == 0) return 0;
 
 	/* Check for bad versions */
-
-#    if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	ssl_linked = OpenSSL_version_num();
-#    else
-	ssl_linked = (unsigned long)SSLeay();
-#    endif
-
 	for (i = 0; i < (NUM_ELEMENTS(fr_openssl_defects)); i++) {
 		fr_openssl_defect_t *defect = &fr_openssl_defects[i];
 

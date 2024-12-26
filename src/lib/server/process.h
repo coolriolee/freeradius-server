@@ -90,14 +90,14 @@ typedef struct {
 	size_t			section_offset;	//!< Where to look in the process instance for
 						///< a pointer to the section we should execute.
 	rlm_rcode_t		rcode;		//!< Default rcode
-	module_method_t	resume;		//!< Function to call after running a recv section.
+	module_method_t		resume;		//!< Function to call after running a recv section.
 
 	/*
 	 *	Each state has only one "recv" or "send".
 	 */
 	union {
 		module_method_t		recv;		//!< Method to call when receiving this type of packet.
-		module_method_t	send;		//!< Method to call when sending this type of packet.
+		module_method_t		send;		//!< Method to call when sending this type of packet.
 	};
 	PROCESS_STATE_EXTRA_FIELDS
 } fr_process_state_t;
@@ -130,9 +130,34 @@ do { \
 #define RESUME(_x) static inline unlang_action_t resume_ ## _x(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 #define RESUME_NO_MCTX(_x) static inline unlang_action_t resume_ ## _x(rlm_rcode_t *p_result, UNUSED module_ctx_t const *mctx, request_t *request)
 
+/** Call a module method with a new rctx
+ *
+ * @note This should be used to add a rctxs when calling the initial recv section.
+ *
+ * @param[out] p_result		Pointer to the result code.
+ * @param[in] mctx		Module context.
+ * @param[in] request		Request.
+ * @param[in] method		Method to call.
+ * @param[in] rctx		Resume context to use to override the one in the mctx.
+ * @return			Result of the method call.
+ */
+static inline CC_HINT(always_inline)
+unlang_action_t process_with_rctx(rlm_rcode_t *p_result, module_ctx_t const *mctx,
+				  request_t *request, module_method_t method, void *rctx)
+{
+	module_ctx_t our_mctx = *mctx;
+	our_mctx.rctx = rctx;
+
+	return method(p_result, &our_mctx, request);
+}
+
 /** Call a named recv function directly
  */
 #define CALL_RECV(_x) recv_ ## _x(p_result, mctx, request)
+
+/** Call a named recv function directly with a new rctx
+ */
+#define CALL_RECV_RCTX(_x, _rctx) process_with_rctx(p_result, mctx, request, recv_ ## _x, _rctx);
 
 /** Call a named send function directly
  */
@@ -166,7 +191,7 @@ RECV(generic)
 {
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	PROCESS_INST const		*inst = mctx->inst->data;
+	PROCESS_INST const		*inst = mctx->mi->data;
 
 	PROCESS_TRACE;
 
@@ -242,7 +267,7 @@ SEND(generic)
 	fr_pair_t 			*vp;
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	PROCESS_INST const   		*inst = mctx->inst->data;
+	PROCESS_INST const   		*inst = mctx->mi->data;
 
 	PROCESS_TRACE;
 
@@ -304,7 +329,7 @@ RESUME(send_generic)
 	rlm_rcode_t			rcode = *p_result;
 	CONF_SECTION			*cs;
 	fr_process_state_t const	*state;
-	PROCESS_INST const   		*inst = mctx->inst->data;
+	PROCESS_INST const   		*inst = mctx->mi->data;
 
 	PROCESS_TRACE;
 
@@ -323,7 +348,6 @@ RESUME(send_generic)
 	fr_assert(rcode < RLM_MODULE_NUMCODES);
 	switch (state->packet_type[rcode]) {
 	case 0:			/* don't change the reply */
-		fr_assert(request->reply->code != 0);
 		break;
 
 	default:
@@ -401,7 +425,7 @@ RESUME(new_client)
 {
 	rlm_rcode_t			rcode = *p_result;
 	CONF_SECTION			*cs;
-	PROCESS_INST const		*inst = mctx->inst->data;
+	PROCESS_INST const		*inst = mctx->mi->data;
 
 	switch (rcode) {
 	case RLM_MODULE_OK:
@@ -429,7 +453,7 @@ RESUME(new_client)
 static inline unlang_action_t new_client(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	CONF_SECTION			*cs;
-	PROCESS_INST const		*inst = mctx->inst->data;
+	PROCESS_INST const		*inst = mctx->mi->data;
 
 	PROCESS_TRACE;
 	fr_assert(inst->sections.new_client != NULL);
@@ -443,21 +467,18 @@ static inline unlang_action_t new_client(rlm_rcode_t *p_result, module_ctx_t con
 
 #define DYNAMIC_CLIENT_SECTIONS \
 	{ \
-		.name = "new", \
-		.name2 = "client", \
-		.component = MOD_AUTHORIZE, \
+		.section = SECTION_NAME("new", "client"), \
+		.actions = &mod_actions_authorize, \
 		.offset = PROCESS_CONF_OFFSET(new_client), \
 	}, \
 	{ \
-		.name = "add", \
-		.name2 = "client", \
-		.component = MOD_AUTHORIZE, \
+		.section = SECTION_NAME("add", "client"), \
+		.actions = &mod_actions_authorize, \
 		.offset = PROCESS_CONF_OFFSET(add_client), \
 	}, \
 	{ \
-		.name = "deny", \
-		.name2 = "client", \
-		.component = MOD_AUTHORIZE, \
+		.section = SECTION_NAME("deny", "client"), \
+		.actions = &mod_actions_authorize, \
 		.offset = PROCESS_CONF_OFFSET(deny_client), \
 	}
 

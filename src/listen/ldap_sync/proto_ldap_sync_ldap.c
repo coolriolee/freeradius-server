@@ -119,7 +119,7 @@ size_t sync_op_table_len = NUM_ELEMENTS(sync_op_table);
 typedef struct {
 	fr_listen_t		*main_listen;
 	fr_listen_t		*child_listen;
-	fr_connection_t		*conn;
+	connection_t		*conn;
 	int			msgid;
 } proto_ldap_dir_ctx;
 
@@ -521,11 +521,11 @@ int ldap_sync_entry_send(sync_state_t *sync, uint8_t const uuid[SYNC_UUID_LENGTH
 	return 0;
 }
 
-static void _proto_ldap_socket_init(fr_connection_t *conn, UNUSED fr_connection_state_t prev,
-				    UNUSED fr_connection_state_t state, void *uctx);
+static void _proto_ldap_socket_init(connection_t *conn, UNUSED connection_state_t prev,
+				    UNUSED connection_state_t state, void *uctx);
 
-static void _proto_ldap_socket_open_connected(fr_connection_t *conn, UNUSED fr_connection_state_t prev,
-					      UNUSED fr_connection_state_t state, void *uctx);
+static void _proto_ldap_socket_open_connected(connection_t *conn, UNUSED connection_state_t prev,
+					      UNUSED connection_state_t state, void *uctx);
 
 /** Attempt to (re)initialise a connection
  *
@@ -563,16 +563,16 @@ static void proto_ldap_connection_init(UNUSED fr_event_list_t *el, UNUSED fr_tim
 	/*
 	 *	Add watch functions on the LDAP connection
 	 */
-	fr_connection_add_watch_post(thread->conn, FR_CONNECTION_STATE_INIT,
+	connection_add_watch_post(thread->conn, CONNECTION_STATE_INIT,
 				     _proto_ldap_socket_init, true, thread);
 
-	fr_connection_add_watch_post(thread->conn, FR_CONNECTION_STATE_CONNECTED,
+	connection_add_watch_post(thread->conn, CONNECTION_STATE_CONNECTED,
 				     _proto_ldap_socket_open_connected, true, thread);
 
 	/*
 	 *	Signal the connection to start
 	 */
-	fr_connection_signal_init(thread->conn);
+	connection_signal_init(thread->conn);
 
 	return;
 }
@@ -586,7 +586,7 @@ static int proto_ldap_child_mod_close(fr_listen_t *li)
 {
 	proto_ldap_sync_ldap_thread_t	*thread = talloc_get_type_abort(li->thread_instance, proto_ldap_sync_ldap_thread_t);
 
-	fr_connection_signal_shutdown(thread->conn);
+	connection_signal_shutdown(thread->conn);
 	return 0;
 }
 
@@ -718,7 +718,6 @@ static ssize_t proto_ldap_child_mod_read(fr_listen_t *li, UNUSED void **packet_c
 		goto free_msg;
 
 	default:
-	sync_error:
 		PERROR("Sync error");
 		ret = -1;
 		goto free_msg;
@@ -745,6 +744,7 @@ static ssize_t proto_ldap_child_mod_read(fr_listen_t *li, UNUSED void **packet_c
 
 	if (callback) {
 		ret = callback(sync, msg, ctrls);
+		if (ret < 0) PERROR("Sync callback error");
 	} else {
 	/*
 	 *	Callbacks are responsible for freeing the msg
@@ -752,11 +752,10 @@ static ssize_t proto_ldap_child_mod_read(fr_listen_t *li, UNUSED void **packet_c
 	 */
 		ldap_msgfree(msg);
 	}
-	if (ret < 0) goto sync_error;
 
 	ldap_controls_free(ctrls);
 
-	return 0;
+	return ret;
 }
 
 /** Send a fake packet to run the "load Cookie" section
@@ -1079,7 +1078,7 @@ static void _proto_ldap_socket_open_read(fr_event_list_t *el, int fd, UNUSED int
 	error:
 		talloc_free(dir_ctx);
 		if (local) talloc_free(local);
-		fr_connection_signal_reconnect(ldap_conn->conn, FR_CONNECTION_FAILED);
+		connection_signal_reconnect(ldap_conn->conn, CONNECTION_FAILED);
 		return;
 	}
 
@@ -1093,7 +1092,7 @@ static void _proto_ldap_socket_open_read(fr_event_list_t *el, int fd, UNUSED int
 	if (ldap_conn->directory->sync_type == FR_LDAP_SYNC_NONE) {
 		ERROR("LDAP sync configured for directory which does not support any suitable control");
 		talloc_free(dir_ctx);
-		fr_connection_signal_halt(ldap_conn->conn);
+		connection_signal_halt(ldap_conn->conn);
 		return;
 	}
 
@@ -1124,8 +1123,8 @@ static void _proto_ldap_socket_open_read(fr_event_list_t *el, int fd, UNUSED int
  *
  * Called as a watch function when the LDAP connection enters the INIT state
  */
-static void _proto_ldap_socket_init(fr_connection_t *conn, UNUSED fr_connection_state_t prev,
-				    UNUSED fr_connection_state_t state, void *uctx)
+static void _proto_ldap_socket_init(connection_t *conn, UNUSED connection_state_t prev,
+				    UNUSED connection_state_t state, void *uctx)
 {
 	proto_ldap_sync_ldap_thread_t	*thread = talloc_get_type_abort(uctx, proto_ldap_sync_ldap_thread_t);
 	fr_listen_t			*li;
@@ -1152,8 +1151,8 @@ static void _proto_ldap_socket_init(fr_connection_t *conn, UNUSED fr_connection_
  *
  * Schedules re-start of the connection if appropriate
  */
-static void _proto_ldap_socket_closed(UNUSED fr_connection_t *conn, fr_connection_state_t prev,
-				      UNUSED fr_connection_state_t state, void *uctx)
+static void _proto_ldap_socket_closed(UNUSED connection_t *conn, connection_state_t prev,
+				      UNUSED connection_state_t state, void *uctx)
 {
 	fr_listen_t			*listen = talloc_get_type_abort(uctx, fr_listen_t);
 	proto_ldap_sync_ldap_thread_t	*thread = talloc_get_type_abort(listen->thread_instance, proto_ldap_sync_ldap_thread_t);
@@ -1161,7 +1160,7 @@ static void _proto_ldap_socket_closed(UNUSED fr_connection_t *conn, fr_connectio
 
 	if (fr_event_loop_exiting(thread->el)) return;
 
-	if (prev == FR_CONNECTION_STATE_CONNECTED) {
+	if (prev == CONNECTION_STATE_CONNECTED) {
 		ERROR("LDAP connection closed.  Scheduling restart in %pVs",
 		       fr_box_time_delta(inst->handle_config.reconnection_delay));
 		if (fr_event_timer_in(thread, thread->el, &thread->conn_retry_ev,
@@ -1179,8 +1178,8 @@ static void _proto_ldap_socket_closed(UNUSED fr_connection_t *conn, fr_connectio
  * There are three different forms of LDAP sync/persistent search - so we need
  * to know what we're dealing with, and whether the relevant options have been enabled.
  */
-static void _proto_ldap_socket_open_connected(fr_connection_t *conn, UNUSED fr_connection_state_t prev,
-					      UNUSED fr_connection_state_t state, void *uctx)
+static void _proto_ldap_socket_open_connected(connection_t *conn, UNUSED connection_state_t prev,
+					      UNUSED connection_state_t state, void *uctx)
 {
 	proto_ldap_sync_ldap_thread_t	*thread = talloc_get_type_abort(uctx, proto_ldap_sync_ldap_thread_t);
 	fr_listen_t			*listen = talloc_get_type_abort(thread->parent, fr_listen_t);
@@ -1223,7 +1222,7 @@ static void _proto_ldap_socket_open_connected(fr_connection_t *conn, UNUSED fr_c
 	/*
 	 *	Set the callback which will handle the results of this query
 	 */
-	if (fr_event_fd_insert(conn, conn->el, ldap_conn->fd,
+	if (fr_event_fd_insert(conn, NULL, conn->el, ldap_conn->fd,
 			       _proto_ldap_socket_open_read,
 			       NULL,
 			       _proto_ldap_socket_open_error,
@@ -1244,7 +1243,7 @@ static void _proto_ldap_socket_open_connected(fr_connection_t *conn, UNUSED fr_c
 	/*
 	 *	Add a watch to catch closed LDAP connections
 	 */
-	fr_connection_add_watch_post(thread->conn, FR_CONNECTION_STATE_CLOSED,
+	connection_add_watch_post(thread->conn, CONNECTION_STATE_CLOSED,
 				     _proto_ldap_socket_closed, true, listen);
 }
 
@@ -1278,8 +1277,8 @@ static void mod_event_list_set(fr_listen_t *li, fr_event_list_t *el, void *nr)
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_ldap_sync_ldap_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_ldap_sync_ldap_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_ldap_sync_ldap_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_ldap_sync_ldap_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	char const		*server;
 
 	/*
@@ -1287,6 +1286,14 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	 *	distinct server and port or an LDAP url.
 	 */
 	fr_assert(inst->server);
+
+	inst->parent = talloc_get_type_abort(mctx->mi->parent->data, proto_ldap_sync_t);
+	inst->cs = conf;
+
+	if (inst->recv_buff_is_set) {
+		FR_INTEGER_BOUND_CHECK("recv_buff", inst->recv_buff, >=, 32);
+		FR_INTEGER_BOUND_CHECK("recv_buff", inst->recv_buff, <=, INT_MAX);
+	}
 
 	server = inst->server;
 	inst->handle_config.server = talloc_strdup(inst, "");
@@ -1301,26 +1308,6 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 	inst->handle_config.name = talloc_typed_asprintf(inst, "proto_ldap_conn (%s)",
 							 cf_section_name(cf_item_to_section(cf_parent(cf_parent(conf)))));
-
-	return 0;
-}
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_ldap_sync_ldap_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_ldap_sync_ldap_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-	dl_module_inst_t const	*dl_inst;
-
-	dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(dl_inst);
-
-	inst->parent = talloc_get_type_abort(dl_inst->parent->data, proto_ldap_sync_t);
-	inst->cs = conf;
-
-	if (inst->recv_buff_is_set) {
-		FR_INTEGER_BOUND_CHECK("recv_buff", inst->recv_buff, >=, 32);
-		FR_INTEGER_BOUND_CHECK("recv_buff", inst->recv_buff, <=, INT_MAX);
-	}
 
 	return 0;
 }
@@ -1345,8 +1332,6 @@ fr_app_io_t proto_ldap_sync_ldap = {
 		.config			= proto_ldap_sync_ldap_config,
 		.inst_size		= sizeof(proto_ldap_sync_ldap_t),
 		.thread_inst_size	= sizeof(proto_ldap_sync_ldap_thread_t),
-
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 

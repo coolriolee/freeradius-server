@@ -54,15 +54,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *      identities.
 	 */
 	{
-		.name = "recv",
-		.name2 = "Identity-Response",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Identity-Response"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_common_identity_response)
 	},
 	{
-		.name = "send",
-		.name2 = "Identity-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "Identity-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_common_identity_request)
 	},
 
@@ -72,15 +70,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	request/response rounds.
 	 */
 	{
-		.name = "send",
-		.name2 = "AKA-Identity-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "AKA-Identity-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_aka_identity_request)
 	},
 	{
-		.name = "recv",
-		.name2 = "AKA-Identity-Response",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "AKA-Identity-Response"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_aka_identity_response)
 	},
 
@@ -88,15 +84,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Full-Authentication
 	 */
 	{
-		.name = "send",
-		.name2 = "Challenge-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "Challenge-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_aka_challenge_request)
 	},
 	{
-		.name = "recv",
-		.name2 = "Challenge-Response",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Challenge-Response"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_aka_challenge_response)
 	},
 
@@ -104,15 +98,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Fast-Re-Authentication
 	 */
 	{
-		.name = "send",
-		.name2 = "Reauthentication-Request",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "Reauthentication-Request"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_common_reauthentication_request)
 	},
 	{
-		.name = "recv",
-		.name2 = "Reauthentication-Response",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Reauthentication-Response"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_common_reauthentication_response)
 	},
 
@@ -120,21 +112,18 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Failures originating from the supplicant
 	 */
 	{
-		.name = "recv",
-		.name2 = "Client-Error",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Client-Error"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_common_client_error)
 	},
 	{
-		.name = "recv",
-		.name2 = "Authentication-Reject",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Authentication-Reject"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_aka_authentication_reject)
 	},
 	{
-		.name = "recv",
-		.name2 = "Synchronization-Failure",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Synchronization-Failure"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_aka_synchronization_failure)
 	},
 
@@ -142,15 +131,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Failure originating from the server
 	 */
 	{
-		.name = "send",
-		.name2 = "Failure-Notification",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "Failure-Notification"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_common_failure_notification)
 	},
 	{
-		.name = "recv",
-		.name2 = "Failure-Notification-ACK",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Failure-Notification-ACK"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_common_failure_notification_ack)
 	},
 
@@ -158,15 +145,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Protected success indication
 	 */
 	{
-		.name = "send",
-		.name2 = "Success-Notification",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "Success-Notification"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_common_success_notification)
 	},
 	{
-		.name = "recv",
-		.name2 = "Success-Notification-ACK",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("recv", "Success-Notification-ACK"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.recv_common_success_notification_ack)
 	},
 
@@ -174,15 +159,13 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Final EAP-Success and EAP-Failure messages
 	 */
 	{
-		.name = "send",
-		.name2 = "EAP-Success",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "EAP-Success"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_eap_success)
 	},
 	{
-		.name = "send",
-		.name2 = "EAP-Failure",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("send", "EAP-Failure"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.send_eap_failure)
 	},
 
@@ -190,21 +173,18 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Fast-Reauth vectors
 	 */
 	{
-		.name = "store",
-		.name2 = "session",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("store", "session"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.store_session)
 	},
 	{
-		.name = "load",
-		.name2 = "session",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("load", "session"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.load_session)
 	},
 	{
-		.name = "clear",
-		.name2 = "session",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("clear", "session"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.clear_session)
 	},
 
@@ -212,21 +192,18 @@ static virtual_server_compile_t const compile_list[] = {
 	 *	Pseudonym processing
 	 */
 	{
-		.name = "store",
-		.name2 = "pseudonym",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("store", "pseudonym"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.store_pseudonym)
 	},
 	{
-		.name = "load",
-		.name2 = "pseudonym",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("load", "pseudonym"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.load_pseudonym)
 	},
 	{
-		.name = "clear",
-		.name2 = "pseudonym",
-		.component = MOD_AUTHORIZE,
+		.section = SECTION_NAME("clear", "pseudonym"),
+		.actions = &mod_actions_authorize,
 		.offset = offsetof(eap_aka_sim_process_conf_t, actions.clear_pseudonym)
 	},
 
@@ -235,7 +212,7 @@ static virtual_server_compile_t const compile_list[] = {
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	eap_aka_sim_process_conf_t	*inst = talloc_get_type_abort(mctx->inst->data, eap_aka_sim_process_conf_t);
+	eap_aka_sim_process_conf_t	*inst = talloc_get_type_abort(mctx->mi->data, eap_aka_sim_process_conf_t);
 
 	inst->type = FR_EAP_METHOD_AKA;
 

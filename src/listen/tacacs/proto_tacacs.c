@@ -33,8 +33,8 @@
 
 extern fr_app_t proto_tacacs;
 
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 static int type_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, UNUSED conf_parser_t const *rule);
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 
 static conf_parser_t const limit_config[] = {
 	{ FR_CONF_OFFSET("idle_timeout", proto_tacacs_t, io.idle_timeout), .dflt = "30.0" } ,
@@ -92,13 +92,30 @@ fr_dict_attr_autoload_t proto_tacacs_dict_attr[] = {
 	{ NULL }
 };
 
-/** Wrapper around dl_instance which translates the packet-type into a submodule name
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule)
+{
+	proto_tacacs_t		*inst = talloc_get_type_abort(parent, proto_tacacs_t);
+	module_instance_t	*mi;
+
+	if (unlikely(virtual_server_listen_transport_parse(ctx, out, parent, ci, rule) < 0)) {
+		return -1;
+	}
+
+	mi = talloc_get_type_abort(*(void **)out, module_instance_t);
+	inst->io.app_io = (fr_app_io_t const *)mi->exported;
+	inst->io.app_io_instance = mi->data;
+	inst->io.app_io_conf = mi->conf;
+
+	return 0;
+}
+
+/** Translates the packet-type into a submodule name
  *
  * If we found a Packet-Type = Authentication-Start CONF_PAIR for example, here's we'd load
  * the proto_tacacs_auth module.
  *
  * @param[in] ctx	to allocate data in (instance of proto_tacacs).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
+ * @param[out] out	Where to write a module_instance_t containing the module handle and instance.
  * @param[in] parent	Base structure address.
  * @param[in] ci	#CONF_PAIR specifying the name of the type module.
  * @param[in] rule	unused.
@@ -124,58 +141,6 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM
 
 	inst->allowed[dv->value->vb_uint32] = true;
 	*((char const **) out) = value;
-
-	return 0;
-}
-
-/** Wrapper around dl_instance
- *
- * @param[in] ctx	to allocate data in (instance of proto_tacacs).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
- * @param[in] parent	Base structure address.
- * @param[in] ci	#CONF_PAIR specifying the name of the type module.
- * @param[in] rule	unused.
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, UNUSED conf_parser_t const *rule)
-{
-	char const		*name = cf_pair_value(cf_item_to_pair(ci));
-	dl_module_inst_t	*parent_inst;
-	proto_tacacs_t		*inst;
-	CONF_SECTION		*listen_cs = cf_item_to_section(cf_parent(ci));
-	CONF_SECTION		*transport_cs;
-	dl_module_inst_t	*dl_mod_inst;
-
-	transport_cs = cf_section_find(listen_cs, name, NULL);
-
-	parent_inst = cf_data_value(cf_data_find(listen_cs, dl_module_inst_t, "proto_tacacs"));
-	fr_assert(parent_inst);
-
-	/*
-	 *	Set the allowed codes so that we can compile them as
-	 *	necessary.
-	 */
-	inst = talloc_get_type_abort(parent_inst->data, proto_tacacs_t);
-	inst->io.transport = name;
-
-	/*
-	 *	Allocate an empty section if one doesn't exist
-	 *	this is so defaults get parsed.
-	 */
-	if (!transport_cs) {
-		transport_cs = cf_section_alloc(listen_cs, listen_cs, name, NULL);
-		inst->io.app_io_conf = transport_cs;
-	}
-
-	if (dl_module_instance(ctx, &dl_mod_inst, parent_inst,
-			       DL_MODULE_TYPE_SUBMODULE, name, dl_module_inst_name_from_conf(transport_cs)) < 0) return -1;
-	if (dl_module_conf_parse(dl_mod_inst, transport_cs) < 0) {
-		talloc_free(dl_mod_inst);
-		return -1;
-	}
-	*((dl_module_inst_t **)out) = dl_mod_inst;
 
 	return 0;
 }
@@ -490,7 +455,7 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
 	/*
 	 *	io.app_io should already be set
 	 */
-	return fr_master_io_listen(inst, &inst->io, sc, inst->max_packet_size, inst->num_messages);
+	return fr_master_io_listen(&inst->io, sc, inst->max_packet_size, inst->num_messages);
 }
 
 /** Instantiate the application
@@ -503,50 +468,12 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_tacacs_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_tacacs_t);
-
-	/*
-	 *	No IO module, it's an empty listener.
-	 */
-	if (!inst->io.submodule) return 0;
-
-	/*
-	 *	These configuration items are not printed by default,
-	 *	because normal people shouldn't be touching them.
-	 */
-	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
-
-	if (!inst->num_messages) inst->num_messages = 256;
-
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
-
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
-
-	/*
-	 *	Instantiate the master io submodule
-	 */
-	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.dl_inst));
-}
-
-
-/** Bootstrap the application
- *
- * Bootstrap I/O and type submodules.
- *
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_tacacs_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_tacacs_t);
+	proto_tacacs_t		*inst = talloc_get_type_abort(mctx->mi->data, proto_tacacs_t);
 
 	/*
 	 *	Ensure that the server CONF_SECTION is always set.
 	 */
-	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
+	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
 	fr_assert(dict_tacacs != NULL);
 
@@ -573,13 +500,32 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	We will need this for dynamic clients and connected sockets.
 	 */
-	inst->io.dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(inst != NULL);
+	inst->io.mi = mctx->mi;
 
 	/*
-	 *	Bootstrap the master IO handler.
+	 *	These configuration items are not printed by default,
+	 *	because normal people shouldn't be touching them.
 	 */
-	return fr_master_app_io.common.bootstrap(MODULE_INST_CTX(inst->io.dl_inst));
+	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
+
+	if (!inst->num_messages) inst->num_messages = 256;
+
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
+
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
+
+	/*
+	 *	Instantiate the transport module before calling the
+	 *	common instantiation function.
+	 */
+	if (module_instantiate(inst->io.submodule) < 0) return -1;
+
+	/*
+	 *	Instantiate the master io submodule
+	 */
+	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.mi));
 }
 
 static int mod_load(void)
@@ -606,7 +552,6 @@ fr_app_t proto_tacacs = {
 
 		.onload			= mod_load,
 		.unload			= mod_unload,
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.dict			= &dict_tacacs,

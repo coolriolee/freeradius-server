@@ -22,7 +22,6 @@
  * @copyright 2017 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
  * @copyright 2016 Alan DeKok (aland@freeradius.org)
  */
-#include <freeradius-devel/radius/radius.h>
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/internal/internal.h>
@@ -31,7 +30,7 @@
 
 extern fr_app_t proto_bfd;
 
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 static int auth_type_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 
 /** How to parse a BFD listen section
@@ -84,6 +83,22 @@ fr_dict_attr_autoload_t proto_bfd_dict_attr[] = {
 	{ NULL }
 };
 
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule)
+{
+	proto_bfd_t		*inst = talloc_get_type_abort(parent, proto_bfd_t);
+	module_instance_t	*mi;
+
+	if (unlikely(virtual_server_listen_transport_parse(ctx, out, parent, ci, rule) < 0)) {
+		return -1;
+	}
+
+	mi = talloc_get_type_abort(*(void **)out, module_instance_t);
+	inst->io.app_io = (fr_app_io_t const *)mi->exported;
+	inst->io.app_io_instance = mi->data;
+	inst->io.app_io_conf = mi->conf;
+
+	return 0;
+}
 /*
  *	They all have to be UDP.
  */
@@ -93,58 +108,6 @@ static int8_t client_cmp(void const *one, void const *two)
 	fr_client_t const *b = two;
 
 	return fr_ipaddr_cmp(&a->ipaddr, &b->ipaddr);
-}
-
-/** Wrapper around dl_instance
- *
- * @param[in] ctx	to allocate data in (instance of proto_bfd).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
- * @param[in] parent	Base structure address.
- * @param[in] ci	#CONF_PAIR specifying the name of the type module.
- * @param[in] rule	unused.
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, UNUSED conf_parser_t const *rule)
-{
-	char const		*name = cf_pair_value(cf_item_to_pair(ci));
-	dl_module_inst_t	*parent_inst;
-	proto_bfd_t		*inst;
-	CONF_SECTION		*listen_cs = cf_item_to_section(cf_parent(ci));
-	CONF_SECTION		*transport_cs;
-	dl_module_inst_t	*dl_mod_inst;
-
-	transport_cs = cf_section_find(listen_cs, name, NULL);
-
-	parent_inst = cf_data_value(cf_data_find(listen_cs, dl_module_inst_t, "proto_bfd"));
-	fr_assert(parent_inst);
-
-	/*
-	 *	Set the allowed codes so that we can compile them as
-	 *	necessary.
-	 */
-	inst = talloc_get_type_abort(parent_inst->data, proto_bfd_t);
-	inst->io.transport = name;
-
-	/*
-	 *	Allocate an empty section if one doesn't exist
-	 *	this is so defaults get parsed.
-	 */
-	if (!transport_cs) {
-		transport_cs = cf_section_alloc(listen_cs, listen_cs, name, NULL);
-		inst->io.app_io_conf = transport_cs;
-	}
-
-	if (dl_module_instance(ctx, &dl_mod_inst, parent_inst,
-			       DL_MODULE_TYPE_SUBMODULE, name, dl_module_inst_name_from_conf(transport_cs)) < 0) return -1;
-	if (dl_module_conf_parse(dl_mod_inst, transport_cs) < 0) {
-		talloc_free(dl_mod_inst);
-		return -1;
-	}
-	*((dl_module_inst_t **)out) = dl_mod_inst;
-
-	return 0;
 }
 
 /** Parse auth_type
@@ -232,11 +195,6 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 		return 0;
 	}
 
-	/*
-	 *	Note that we don't set a limit on max_attributes here.
-	 *	That MUST be set and checked in the underlying
-	 *	transport, via a call to fr_radius_ok().
-	 */
 	if (fr_bfd_decode(request->request_ctx, &request->request_pairs,
 			  (uint8_t const *) bfd, bfd->length,
 			  client->secret, talloc_array_length(client->secret) - 1) < 0) {
@@ -261,43 +219,6 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 
 		your->vp_uint32 = my->vp_uint32;
 		my->vp_uint32 = tmp;
-	}
-
-	/*
-	 *	If we're defining a dynamic client, this packet is
-	 *	fake.  We don't have a secret, so we mash all of the
-	 *	encrypted attributes to sane (i.e. non-hurtful)
-	 *	values.
-	 */
-	if (!client->active) {
-		fr_assert(client->dynamic);
-
-		for (vp = fr_pair_list_head(&request->request_pairs);
-		     vp != NULL;
-		     vp = fr_pair_list_next(&request->request_pairs, vp)) {
-			if (!flag_encrypted(&vp->da->flags)) {
-				switch (vp->vp_type) {
-				default:
-					break;
-
-				case FR_TYPE_UINT32:
-					vp->vp_uint32 = 0;
-					break;
-
-				case FR_TYPE_IPV4_ADDR:
-					vp->vp_ipv4addr = INADDR_ANY;
-					break;
-
-				case FR_TYPE_OCTETS:
-					fr_pair_value_memdup(vp, (uint8_t const *) "", 1, true);
-					break;
-
-				case FR_TYPE_STRING:
-					fr_pair_value_strdup(vp, "", true);
-					break;
-				}
-			}
-		}
 	}
 
 	if (fr_packet_pairs_from_packet(request->request_ctx, &request->request_pairs, request->packet) < 0) {
@@ -330,7 +251,7 @@ static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8
 	client = address->radclient;
 	fr_assert(client);
 
-	fr_packet_pairs_to_packet(request->reply, &request->reply_pairs);
+	fr_packet_net_from_pairs(request->reply, &request->reply_pairs);
 
 	/*
 	 *	Dynamic client stuff
@@ -399,47 +320,9 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
 	/*
 	 *	io.app_io should already be set
 	 */
-	return fr_master_io_listen(inst, &inst->io, sc,
+	return fr_master_io_listen(&inst->io, sc,
 				   inst->max_packet_size, inst->num_messages);
 }
-
-/** Instantiate the application
- *
- * Instantiate I/O and type submodules.
- *
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int mod_instantiate(module_inst_ctx_t const *mctx)
-{
-	proto_bfd_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_bfd_t);
-
-	/*
-	 *	No IO module, it's an empty listener.
-	 */
-	if (!inst->io.submodule) return 0;
-
-	/*
-	 *	These configuration items are not printed by default,
-	 *	because normal people shouldn't be touching them.
-	 */
-	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
-
-	if (!inst->num_messages) inst->num_messages = 256;
-
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
-
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
-
-	/*
-	 *	Instantiate the master io submodule
-	 */
-	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.dl_inst));
-}
-
 
 /** Bootstrap the application
  *
@@ -449,15 +332,15 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
  *	- 0 on success.
  *	- -1 on failure.
  */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_bfd_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_bfd_t);
+	proto_bfd_t 		*inst = talloc_get_type_abort(mctx->mi->data, proto_bfd_t);
 	CONF_SECTION		*server;
 
 	/*
 	 *	Ensure that the server CONF_SECTION is always set.
 	 */
-	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
+	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
 
 	/*
 	 *	No IO module, it's an empty listener.
@@ -473,9 +356,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	We will need this for dynamic clients and connected sockets.
 	 */
-	inst->io.dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(inst != NULL);
-
+	inst->io.mi = mctx->mi;
 	server = inst->io.server_cs;
 
 	inst->peers = cf_data_value(cf_data_find(server, fr_rb_tree_t, "peers"));
@@ -579,9 +460,29 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	}
 
 	/*
-	 *	Bootstrap the master IO handler.
+	 *	These configuration items are not printed by default,
+	 *	because normal people shouldn't be touching them.
 	 */
-	return fr_master_app_io.common.bootstrap(MODULE_INST_CTX(inst->io.dl_inst));
+	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
+
+	if (!inst->num_messages) inst->num_messages = 256;
+
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
+
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
+
+	/*
+	 *	Instantiate the transport module before calling the
+	 *	common instantiation function.
+	 */
+	if (module_instantiate(inst->io.submodule) < 0) return -1;
+
+	/*
+	 *	Instantiate the master io submodule
+	 */
+	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.mi));
 }
 
 static int mod_load(void)
@@ -606,7 +507,6 @@ fr_app_t proto_bfd = {
 		.inst_size		= sizeof(proto_bfd_t),
 		.onload			= mod_load,
 		.unload			= mod_unload,
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.dict			= &dict_bfd,

@@ -26,12 +26,13 @@
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <stdbool.h>
 #include "proto_radius.h"
 
 extern fr_app_t proto_radius;
 
 static int type_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 
 static conf_parser_t const limit_config[] = {
 	{ FR_CONF_OFFSET("cleanup_delay", proto_radius_t, io.cleanup_delay), .dflt = "5.0" } ,
@@ -83,6 +84,16 @@ static conf_parser_t const proto_radius_config[] = {
 	{ FR_CONF_POINTER("limit", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) limit_config },
 	{ FR_CONF_POINTER("priority", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) priority_config },
 
+	{ FR_CONF_OFFSET("require_message_authenticator", proto_radius_t, require_message_authenticator),
+	  .func = cf_table_parse_int,
+	  .uctx = &(cf_table_parse_ctx_t){ .table = fr_radius_require_ma_table, .len = &fr_radius_require_ma_table_len },
+	  .dflt = "no" },
+
+	{ FR_CONF_OFFSET("limit_proxy_state", proto_radius_t, limit_proxy_state),
+	  .func = cf_table_parse_int,
+	  .uctx = &(cf_table_parse_ctx_t){ .table = fr_radius_limit_proxy_state_table, .len = &fr_radius_limit_proxy_state_table_len },
+	  .dflt = "auto" },
+
 	CONF_PARSER_TERMINATOR
 };
 
@@ -97,22 +108,26 @@ fr_dict_autoload_t proto_radius_dict[] = {
 static fr_dict_attr_t const *attr_packet_type;
 static fr_dict_attr_t const *attr_user_name;
 static fr_dict_attr_t const *attr_state;
+static fr_dict_attr_t const *attr_proxy_state;
+static fr_dict_attr_t const *attr_message_authenticator;
 
 extern fr_dict_attr_autoload_t proto_radius_dict_attr[];
 fr_dict_attr_autoload_t proto_radius_dict_attr[] = {
 	{ .out = &attr_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius},
 	{ .out = &attr_user_name, .name = "User-Name", .type = FR_TYPE_STRING, .dict = &dict_radius},
 	{ .out = &attr_state, .name = "State", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
+	{ .out = &attr_proxy_state, .name = "Proxy-State", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
+	{ .out = &attr_message_authenticator, .name = "Message-Authenticator", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
 	{ NULL }
 };
 
-/** Wrapper around dl_instance which translates the packet-type into a submodule name
+/** Translates the packet-type into a submodule name
  *
  * If we found a Packet-Type = Access-Request CONF_PAIR for example, here's we'd load
  * the proto_radius_auth module.
  *
  * @param[in] ctx	to allocate data in (instance of proto_radius).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
+ * @param[out] out	Where to write a module_instance_t containing the module handle and instance.
  * @param[in] parent	Base structure address.
  * @param[in] ci	#CONF_PAIR specifying the name of the type module.
  * @param[in] rule	unused.
@@ -142,54 +157,19 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM
 	return 0;
 }
 
-/** Wrapper around dl_instance
- *
- * @param[in] ctx	to allocate data in (instance of proto_radius).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
- * @param[in] parent	Base structure address.
- * @param[in] ci	#CONF_PAIR specifying the name of the type module.
- * @param[in] rule	unused.
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, UNUSED conf_parser_t const *rule)
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule)
 {
-	char const		*name = cf_pair_value(cf_item_to_pair(ci));
-	dl_module_inst_t	*parent_inst;
-	proto_radius_t		*inst;
-	CONF_SECTION		*listen_cs = cf_item_to_section(cf_parent(ci));
-	CONF_SECTION		*transport_cs;
-	dl_module_inst_t	*dl_mod_inst;
+	proto_radius_t		*inst = talloc_get_type_abort(parent, proto_radius_t);
+	module_instance_t	*mi;
 
-	transport_cs = cf_section_find(listen_cs, name, NULL);
-
-	parent_inst = cf_data_value(cf_data_find(listen_cs, dl_module_inst_t, "proto_radius"));
-	fr_assert(parent_inst);
-
-	/*
-	 *	Set the allowed codes so that we can compile them as
-	 *	necessary.
-	 */
-	inst = talloc_get_type_abort(parent_inst->data, proto_radius_t);
-	inst->io.transport = name;
-
-	/*
-	 *	Allocate an empty section if one doesn't exist
-	 *	this is so defaults get parsed.
-	 */
-	if (!transport_cs) {
-		transport_cs = cf_section_alloc(listen_cs, listen_cs, name, NULL);
-		inst->io.app_io_conf = transport_cs;
-	}
-
-	if (dl_module_instance(ctx, &dl_mod_inst, parent_inst,
-			       DL_MODULE_TYPE_SUBMODULE, name, dl_module_inst_name_from_conf(transport_cs)) < 0) return -1;
-	if (dl_module_conf_parse(dl_mod_inst, transport_cs) < 0) {
-		talloc_free(dl_mod_inst);
+	if (unlikely(virtual_server_listen_transport_parse(ctx, out, parent, ci, rule) < 0)) {
 		return -1;
 	}
-	*((dl_module_inst_t **)out) = dl_mod_inst;
+
+	mi = talloc_get_type_abort(*(void **)out, module_instance_t);
+	inst->io.app_io = (fr_app_io_t const *)mi->exported;
+	inst->io.app_io_instance = mi->data;
+	inst->io.app_io_conf = mi->conf;
 
 	return 0;
 }
@@ -197,13 +177,20 @@ static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF
 /** Decode the packet
  *
  */
-static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *const data, size_t data_len)
+static int mod_decode(void const *instance, request_t *request, uint8_t *const data, size_t data_len)
 {
-	fr_io_track_t const	*track = talloc_get_type_abort_const(request->async->packet_ctx, fr_io_track_t);
-	fr_io_address_t const  	*address = track->address;
-	fr_client_t const	*client;
-	fr_radius_ctx_t		common_ctx;
-	fr_radius_decode_ctx_t	decode_ctx;
+	proto_radius_t const		*inst = talloc_get_type_abort_const(instance, proto_radius_t);
+	fr_io_track_t const		*track = talloc_get_type_abort_const(request->async->packet_ctx, fr_io_track_t);
+	fr_io_address_t const  		*address = track->address;
+	fr_client_t			*client = UNCONST(fr_client_t *, address->radclient);
+	fr_radius_ctx_t			common_ctx;
+	fr_radius_decode_ctx_t		decode_ctx;
+	fr_radius_require_ma_t		require_message_authenticator = client->require_message_authenticator_is_set ?
+									client->require_message_authenticator:
+									inst->require_message_authenticator;
+	fr_radius_limit_proxy_state_t	limit_proxy_state = client->limit_proxy_state_is_set ?
+							    client->limit_proxy_state:
+							    inst->limit_proxy_state;
 
 	fr_assert(data[0] < FR_RADIUS_CODE_MAX);
 
@@ -214,12 +201,12 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 	 */
 	request->dict = dict_radius;
 
-	client = address->radclient;
-
 	common_ctx = (fr_radius_ctx_t) {
 		.secret = client->secret,
 		.secret_length = talloc_array_length(client->secret) - 1,
 	};
+
+	request->packet->code = data[0];
 
 	decode_ctx = (fr_radius_decode_ctx_t) {
 		.common = &common_ctx,
@@ -227,15 +214,29 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 		/* decode figures out request_authenticator */
 		.end = data + data_len,
 		.verify = client->active,
-		.require_message_authenticator = client->message_authenticator,
 	};
+
+	if (request->packet->code == FR_RADIUS_CODE_ACCESS_REQUEST) {
+		/*
+		 *	bit1 is set if we've seen a packet, and the auto bit in require_message_authenticator is set/
+		 *	bit2 is set if we always require a message_authenticator.
+		 *	If either bit is high we require a message authenticator in the packet.
+		 */
+		decode_ctx.require_message_authenticator = (
+				(client->received_message_authenticator & require_message_authenticator) |
+				(require_message_authenticator & FR_RADIUS_REQUIRE_MA_YES)
+			) > 0;
+		decode_ctx.limit_proxy_state = (
+				(client->first_packet_no_proxy_state & limit_proxy_state) |
+				(limit_proxy_state & FR_RADIUS_LIMIT_PROXY_STATE_YES)
+			) > 0;
+	}
 
 	/*
 	 *	The verify() routine over-writes the request packet vector.
 	 *
 	 *	@todo - That needs to be changed.
 	 */
-	request->packet->code = data[0];
 	request->packet->id = data[1];
 	request->reply->id = data[1];
 	memcpy(request->packet->vector, data + 4, sizeof(request->packet->vector));
@@ -258,10 +259,73 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 	/*
 	 *	Set the rest of the fields.
 	 */
-	request->client = UNCONST(fr_client_t *, client);
+	request->client = client;
 
 	request->packet->socket = address->socket;
 	fr_socket_addr_swap(&request->reply->socket, &address->socket);
+
+	if (request->packet->code == FR_RADIUS_CODE_ACCESS_REQUEST) {
+		/*
+		 *	If require_message_authenticator is "auto" then
+		 *	we start requiring messages authenticator after
+		 *	the first Access-Request packet containing a
+		 *	verified one.  This isn't vulnerable to the same
+		 *	attack as limit_proxy_state, as the attacker would
+		 *	need knowledge of the secret.
+		 *
+		 *	Unfortunately there are too many cases where
+		 *	auto mode could break things (dealing with
+		 *	multiple clients behind a NAT for example).
+		 */
+		if ((require_message_authenticator == FR_RADIUS_REQUIRE_MA_AUTO) &&
+		    !client->received_message_authenticator &&
+		    fr_pair_find_by_da(&request->request_pairs, NULL, attr_message_authenticator)) {
+			client->received_message_authenticator = true;
+
+			RINFO("Packet from client %pV (%pV) contained a valid Message-Authenticator.  Setting \"require_message_authenticator = yes\"",
+			      fr_box_ipaddr(client->ipaddr),
+			      fr_box_strvalue_buffer(client->shortname));
+		}
+
+		/*
+		 *	It's important we only evaluate this on the
+		 *	first packet.  Otherwise an attacker could send
+		 *	Access-Requests with no Proxy-State whilst
+		 *	spoofing a legitimate Proxy-Server, and causing an
+		 *	outage.
+		 *
+		 *	The likelihood of an attacker sending a packet
+		 *	to coincide with the reboot of a RADIUS
+		 *	server is low. That said, 'auto' should likely
+		 * 	not be enabled for internet facing servers.
+		 */
+		if (!client->received_message_authenticator &&
+		    (limit_proxy_state == FR_RADIUS_LIMIT_PROXY_STATE_AUTO) &&
+		    client->active && !client->seen_first_packet) {
+			client->seen_first_packet = true;
+			client->first_packet_no_proxy_state = fr_pair_find_by_da(&request->request_pairs, NULL, attr_proxy_state) == NULL;
+
+			RINFO("First packet from %pV (%pV) %s Proxy-State.  Setting \"limit_proxy_state = %s\"",
+			      fr_box_ipaddr(client->ipaddr),
+			      fr_box_strvalue_buffer(client->shortname),
+			      client->first_packet_no_proxy_state ? "did not contain" : "contained",
+			      client->first_packet_no_proxy_state ? "yes" : "no");
+
+			if (!client->received_message_authenticator) {
+				RWARN("Received packet from %pV (%pV) which did not contain Message-Authenticator:",
+				      fr_box_ipaddr(client->ipaddr),
+				      fr_box_strvalue_buffer(client->shortname));
+				RWARN("- Enable Message-Authenticator on the client");
+				RWARN("- Require Message-Authenticator in the client definition (client { require_message_authenticator = yes })");
+			}
+
+			if (!client->first_packet_no_proxy_state) {
+				RWARN("As configured, your client HIGHLY VULNERABLE to the BlastRADIUS response spoofing attack, TAKE ACTION IMMEDIATELY!");
+			} else {
+				RWARN("As configured, your client is vulnerable to the BlastRADIUS response spoofing attack");
+			}
+		}
+	}
 
 	REQUEST_VERIFY(request);
 
@@ -281,7 +345,7 @@ static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *
 		for (vp = fr_pair_list_head(&request->request_pairs);
 		     vp != NULL;
 		     vp = fr_pair_list_next(&request->request_pairs, vp)) {
-			if (flag_encrypted(&vp->da->flags)) {
+			if (fr_radius_flag_encrypted(vp->da)) {
 				switch (vp->vp_type) {
 				default:
 					break;
@@ -332,7 +396,9 @@ static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8
 	fr_io_track_t		*track = talloc_get_type_abort(request->async->packet_ctx, fr_io_track_t);
 	fr_io_address_t const  	*address = track->address;
 	ssize_t			data_len;
-	fr_client_t const		*client;
+	fr_client_t const	*client;
+	fr_radius_ctx_t		common_ctx = {};
+	fr_radius_encode_ctx_t  encode_ctx;
 
 	/*
 	 *	Process layer NAK, or "Do not respond".
@@ -395,9 +461,23 @@ static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8
 		request->reply->socket.inet.src_ipaddr = client->src_ipaddr;
 	}
 
-	data_len = fr_radius_encode(buffer, buffer_len, request->packet->data,
-				    client->secret, talloc_array_length(client->secret) - 1,
-				    request->reply->code, request->reply->id, &request->reply_pairs);
+	common_ctx = (fr_radius_ctx_t) {
+		.secret = client->secret,
+		.secret_length = talloc_array_length(client->secret) - 1,
+	};
+	encode_ctx = (fr_radius_encode_ctx_t) {
+		.common = &common_ctx,
+		.request_authenticator = request->packet->data + 4,
+		.rand_ctx = (fr_fast_rand_t) {
+			.a = fr_rand(),
+			.b = fr_rand(),
+		},
+		.request_code = request->packet->data[0],
+		.code = request->reply->code,
+		.id = request->reply->id,
+	};
+
+	data_len = fr_radius_encode(&FR_DBUFF_TMP(buffer, buffer_len), &request->reply_pairs, &encode_ctx);
 	if (data_len < 0) {
 		RPEDEBUG("Failed encoding RADIUS reply");
 		return -1;
@@ -409,11 +489,11 @@ static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8
 		return -1;
 	}
 
-	fr_packet_pairs_to_packet(request->reply, &request->reply_pairs);
+	fr_packet_net_from_pairs(request->reply, &request->reply_pairs);
 
 	if (RDEBUG_ENABLED) {
 		RDEBUG("Sending %s ID %i from %pV:%i to %pV:%i length %zu via socket %s",
-		       fr_radius_packet_names[request->reply->code],
+		       fr_radius_packet_name[request->reply->code],
 		       request->reply->id,
 		       fr_box_ipaddr(request->reply->socket.inet.src_ipaddr),
 		       request->reply->socket.inet.src_port,
@@ -468,13 +548,10 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
 {
 	proto_radius_t 	*inst = talloc_get_type_abort(instance, proto_radius_t);
 
-	inst->io.app = &proto_radius;
-	inst->io.app_instance = instance;
-
 	/*
 	 *	io.app_io should already be set
 	 */
-	return fr_master_io_listen(inst, &inst->io, sc,
+	return fr_master_io_listen(&inst->io, sc,
 				   inst->max_packet_size, inst->num_messages);
 }
 
@@ -488,50 +565,7 @@ static int mod_open(void *instance, fr_schedule_t *sc, UNUSED CONF_SECTION *conf
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_radius_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_radius_t);
-
-	/*
-	 *	No IO module, it's an empty listener.
-	 */
-	if (!inst->io.submodule) return 0;
-
-	/*
-	 *	These configuration items are not printed by default,
-	 *	because normal people shouldn't be touching them.
-	 */
-	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
-
-	if (!inst->num_messages) inst->num_messages = 256;
-
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
-	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
-
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
-	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
-
-	/*
-	 *	Instantiate the master io submodule
-	 */
-	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.dl_inst));
-}
-
-
-/** Bootstrap the application
- *
- * Bootstrap I/O and type submodules.
- *
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_radius_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_radius_t);
-
-	/*
-	 *	Ensure that the server CONF_SECTION is always set.
-	 */
-	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
+	proto_radius_t		*inst = talloc_get_type_abort(mctx->mi->data, proto_radius_t);
 
 	/*
 	 *	No IO module, it's an empty listener.
@@ -560,6 +594,25 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 #endif
 
 	/*
+	 *	Ensure that the server CONF_SECTION is always set.
+	 */
+	inst->io.server_cs = cf_item_to_section(cf_parent(mctx->mi->conf));
+
+	/*
+	 *	These configuration items are not printed by default,
+	 *	because normal people shouldn't be touching them.
+	 */
+	if (!inst->max_packet_size && inst->io.app_io) inst->max_packet_size = inst->io.app_io->default_message_size;
+
+	if (!inst->num_messages) inst->num_messages = 256;
+
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, >=, 32);
+	FR_INTEGER_BOUND_CHECK("num_messages", inst->num_messages, <=, 65535);
+
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 1024);
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
+
+	/*
 	 *	Tell the master handler about the main protocol instance.
 	 */
 	inst->io.app = &proto_radius;
@@ -568,13 +621,18 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	We will need this for dynamic clients and connected sockets.
 	 */
-	inst->io.dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(inst != NULL);
+	inst->io.mi = mctx->mi;
 
 	/*
-	 *	Bootstrap the master IO handler.
+	 *	Instantiate the transport module before calling the
+	 *	common instantiation function.
 	 */
-	return fr_master_app_io.common.bootstrap(MODULE_INST_CTX(inst->io.dl_inst));
+	if (module_instantiate(inst->io.submodule) < 0) return -1;
+
+	/*
+	 *	Instantiate the master io submodule
+	 */
+	return fr_master_app_io.common.instantiate(MODULE_INST_CTX(inst->io.mi));
 }
 
 /** Get the authentication vector.
@@ -631,7 +689,6 @@ fr_app_t proto_radius = {
 		.inst_size		= sizeof(proto_radius_t),
 		.onload			= mod_load,
 		.unload			= mod_unload,
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.dict			= &dict_radius,

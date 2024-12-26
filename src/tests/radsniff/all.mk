@@ -65,7 +65,7 @@ $(OUTPUT)/%.txt: $(DIR)/%.txt $(TEST_BIN_DIR)/radsniff $(PCAP_IN)
 			echo "RADSNIFF FAILED $@";                                                                \
 			echo "RADSNIFF: $(TEST_BIN)/radsniff $(ARGV) -I $(PCAP_IN) -D share/dictionary -xx";        \
 			echo "ERROR: File $(FOUND) is not the same as $(EXPECTED).simple";                        \
-			echo "If you did some update on the radsniff code, please be sure to update the unit tests."; \
+			echo "If radsniff has been modified, please update the unit tests."; \
 			echo "e.g: $(EXPECTED)";                                                                      \
 			diff $(EXPECTED).simple $(FOUND);                                                             \
 			echo "diff $(EXPECTED).simple $(FOUND)";                                                      \
@@ -76,12 +76,13 @@ $(OUTPUT)/%.txt: $(DIR)/%.txt $(TEST_BIN_DIR)/radsniff $(PCAP_IN)
 		echo "RADSNIFF FAILED $@";                                                                    \
 		echo "RADSNIFF:   $(RADIUSD_RUN)";                                                            \
 		echo "ERROR: The script $(CMD_TEST) can't validate the content of $(FOUND)";                  \
-		echo "If you did some update on the radsniff code, please be sure to update the unit tests."; \
+		echo "If radsniff has been modified, please update the unit tests."; \
 		rm -f $@;										      \
 		exit 1;                                                                                       \
 	else                                                                                                  \
 		echo "ERROR! We should have at least one .txt or .cmd test";                                  \
 		exit 1;                                                                                       \
 	fi
+	${Q}rm -f ${EXPECTED}.simple
 	${Q}touch $@
 endif

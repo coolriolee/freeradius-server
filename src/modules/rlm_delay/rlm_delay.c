@@ -47,13 +47,18 @@ static const conf_parser_t module_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
+typedef struct {
+	fr_retry_config_t	retry_cfg;
+	fr_time_t		when;
+} rlm_delay_retry_t;
+
 /** Called when the timeout has expired
  *
  * Marks the request as resumable, and prints the delayed delay time.
  */
-static void _delay_done(module_ctx_t const *mctx, request_t *request, fr_time_t fired)
+static void _delay_done(module_ctx_t const *mctx, request_t *request, fr_retry_t const *retry)
 {
-	fr_time_t *yielded = talloc_get_type_abort(mctx->rctx, fr_time_t);
+	rlm_delay_retry_t *yielded = talloc_get_type_abort(mctx->rctx, rlm_delay_retry_t);
 
 	RDEBUG2("Delay done");
 
@@ -61,9 +66,7 @@ static void _delay_done(module_ctx_t const *mctx, request_t *request, fr_time_t 
 	 *	timeout should never be *before* the scheduled time,
 	 *	if it is, something is very broken.
 	 */
-	if (!fr_cond_assert(fr_time_gteq(fired, *yielded))) REDEBUG("Unexpected resume time");
-
-	unlang_interpret_mark_runnable(request);
+	if (!fr_cond_assert(fr_time_gteq(retry->updated, yielded->when))) REDEBUG("Unexpected resume time");
 }
 
 static void _xlat_delay_done(xlat_ctx_t const *xctx, request_t *request, fr_time_t fired)
@@ -117,29 +120,23 @@ static int delay_add(request_t *request, fr_time_t *resume_at, fr_time_t now,
  */
 static unlang_action_t mod_delay_return(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	fr_time_t *yielded = talloc_get_type_abort(mctx->rctx, fr_time_t);
+	rlm_delay_retry_t *yielded = talloc_get_type_abort(mctx->rctx, rlm_delay_retry_t);
 
 	/*
 	 *	Print how long the delay *really* was.
 	 */
-	RDEBUG3("Request delayed by %pV", fr_box_time_delta(fr_time_sub(fr_time(), *yielded)));
+	RDEBUG3("Request delayed by %pV", fr_box_time_delta(fr_time_sub(fr_time(), yielded->when)));
 	talloc_free(yielded);
 
 	RETURN_MODULE_OK;
 }
 
-static void mod_delay_cancel(module_ctx_t const *mctx, request_t *request, UNUSED fr_signal_t action)
-{
-	RDEBUG2("Cancelling delay");
-
-	(void) unlang_module_timeout_delete(request, mctx->rctx);
-}
-
 static unlang_action_t CC_HINT(nonnull) mod_delay(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_delay_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_delay_t);
+	rlm_delay_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_delay_t);
 	fr_time_delta_t		delay;
-	fr_time_t		resume_at, *yielded_at;
+	rlm_delay_retry_t	*yielded;
+	fr_time_t		resume_at;
 
 	if (inst->delay) {
 		if (tmpl_aexpand_type(request, &delay, FR_TYPE_TIME_DELTA,
@@ -154,26 +151,30 @@ static unlang_action_t CC_HINT(nonnull) mod_delay(rlm_rcode_t *p_result, module_
 	/*
 	 *	Record the time that we yielded the request
 	 */
-	MEM(yielded_at = talloc(request, fr_time_t));
-	*yielded_at = fr_time();
+	MEM(yielded = talloc(unlang_interpret_frame_talloc_ctx(request), rlm_delay_retry_t));
+	yielded->when = fr_time();
 
 	/*
 	 *	Setup the delay for this request
 	 */
-	if (delay_add(request, &resume_at, *yielded_at, delay,
+	if (delay_add(request, &resume_at, yielded->when, delay,
 		      inst->force_reschedule, inst->relative) != 0) {
 		RETURN_MODULE_NOOP;
 	}
 
 	RDEBUG3("Current time %pVs, resume time %pVs",
-		fr_box_time(*yielded_at), fr_box_time(resume_at));
+		fr_box_time(yielded->when), fr_box_time(resume_at));
 
-	if (unlang_module_timeout_add(request, _delay_done, yielded_at, resume_at) < 0) {
-		RPEDEBUG("Adding event failed");
-		RETURN_MODULE_FAIL;
-	}
+	/*
+	 *
+	 */
+	yielded->retry_cfg = (fr_retry_config_t) {
+		.mrd = delay,
+		.mrc = 1,
+	};
 
-	return unlang_module_yield(request, mod_delay_return, mod_delay_cancel, ~FR_SIGNAL_CANCEL, yielded_at);
+	return unlang_module_yield_to_retry(request, mod_delay_return, _delay_done, NULL, 0,
+					    yielded, &yielded->retry_cfg);
 }
 
 static xlat_action_t xlat_delay_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
@@ -220,7 +221,7 @@ static xlat_action_t xlat_delay(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out
 				xlat_ctx_t const *xctx,
 				request_t *request, fr_value_box_list_t *in)
 {
-	rlm_delay_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_delay_t);
+	rlm_delay_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_delay_t);
 	fr_time_t		resume_at, *yielded_at;
 	fr_value_box_t		*delay = fr_value_box_list_head(in);
 
@@ -262,10 +263,9 @@ yield:
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_delay_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_delay_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_delay, FR_TYPE_TIME_DELTA);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, xlat_delay, FR_TYPE_TIME_DELTA);
 	xlat_func_args_set(xlat, xlat_delay_args);
 	return 0;
 }
@@ -280,8 +280,10 @@ module_rlm_t rlm_delay = {
 		.config		= module_config,
 		.bootstrap	= mod_bootstrap
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,	.method = mod_delay },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_delay },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

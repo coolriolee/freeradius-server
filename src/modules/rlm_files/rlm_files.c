@@ -51,9 +51,10 @@ typedef struct {
 /**  Call_env structure
  */
 typedef struct {
-	rlm_files_data_t	*data;	//!< Data from parsed call_env
-	char const		*name;  //!< Name of module instance - for debug output
-	fr_value_box_list_t	values;	//!< Where the expanded tmpl value will be written.
+	rlm_files_data_t	*data;		//!< Data from parsed call_env.
+	tmpl_t			*match_attr;	//!< Attribute to populate with matched key value.
+	char const		*name;  	//!< Name of module instance - for debug output.
+	fr_value_box_list_t	values;		//!< Where the expanded tmpl value will be written.
 } rlm_files_env_t;
 
 static fr_dict_t const *dict_freeradius;
@@ -100,7 +101,7 @@ static int pairlist_to_key(uint8_t **out, size_t *outlen, void const *a)
 }
 
 static int getrecv_filename(TALLOC_CTX *ctx, char const *filename, fr_htrie_t **ptree, PAIR_LIST_LIST **pdefault,
-			    fr_type_t data_type, fr_dict_t const *dict)
+			    fr_type_t data_type, fr_dict_attr_t const *key_enum, fr_dict_t const *dict)
 {
 	int			rcode;
 	PAIR_LIST_LIST		users;
@@ -278,7 +279,7 @@ static int getrecv_filename(TALLOC_CTX *ctx, char const *filename, fr_htrie_t **
 		}
 	}
 
-	tree = fr_htrie_alloc(ctx,  htype, pairlist_hash, pairlist_cmp, pairlist_to_key, NULL);
+	tree = fr_htrie_alloc(ctx, htype, pairlist_hash, pairlist_cmp, pairlist_to_key, NULL);
 	if (!tree) {
 		while ((entry = fr_dlist_pop_head(&users.head))) {
 			talloc_free(entry);
@@ -287,7 +288,7 @@ static int getrecv_filename(TALLOC_CTX *ctx, char const *filename, fr_htrie_t **
 	}
 
 	default_list = NULL;
-	box = fr_value_box_alloc(ctx, data_type, NULL);
+	MEM(box = fr_value_box_alloc(ctx, data_type, NULL));
 
 	/*
 	 *	We've read the entries in linearly, but putting them
@@ -346,7 +347,7 @@ static int getrecv_filename(TALLOC_CTX *ctx, char const *filename, fr_htrie_t **
 		/*
 		 *	Has to be of the correct data type.
 		 */
-		if (fr_value_box_from_str(box, box, data_type, NULL,
+		if (fr_value_box_from_str(box, box, data_type, key_enum,
 					  entry->name, strlen(entry->name), NULL, false) < 0) {
 			ERROR("%s[%d] Failed parsing key %s - %s",
 			      entry->filename, entry->lineno, entry->name, fr_strerror());
@@ -535,6 +536,28 @@ redo:
 		RDEBUG2("%s - Found match \"%s\" on line %d of %s", env->name, pl->name, pl->lineno, pl->filename);
 		found = true;
 
+		/*
+		 *	If match_attr is configured, populate the requested attribute with the
+		 *	key value from the matching line.
+		 */
+		if (env->match_attr) {
+			tmpl_t	match_rhs;
+			map_t	match_map;
+
+			match_map = (map_t) {
+				.lhs = env->match_attr,
+				.op = T_OP_SET,
+				.rhs = &match_rhs
+			};
+
+			tmpl_init_shallow(&match_rhs, TMPL_TYPE_DATA, T_BARE_WORD, "", 0, NULL);
+			fr_value_box_bstrndup_shallow(&match_map.rhs->data.literal, NULL, pl->name,
+						      talloc_array_length(pl->name) - 1, false);
+			if (map_to_request(request, &match_map, map_to_vp, NULL) < 0) {
+				RWARN("Failed populating %s with key value %s", env->match_attr->name, pl->name);
+			}
+		}
+
 		if (map_list_num_elements(&pl->reply) > 0) {
 			RDEBUG2("%s - Preparing attribute updates:", env->name);
 			/* ctx may be reply */
@@ -609,7 +632,7 @@ static unlang_action_t CC_HINT(nonnull) mod_files(rlm_rcode_t *p_result, module_
 	rlm_files_env_t		*env = talloc_get_type_abort(mctx->env_data, rlm_files_env_t);
 
 	fr_value_box_list_init(&env->values);
-	env->name = mctx->inst->name;
+	env->name = mctx->mi->name;
 
 	/*
 	 *	Set mod_files_resume as the repeat function
@@ -627,18 +650,20 @@ static unlang_action_t CC_HINT(nonnull) mod_files(rlm_rcode_t *p_result, module_
  *
  */
 static int call_env_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci,
-			  void const *data, UNUSED call_env_parser_t const *rule)
+			  call_env_ctx_t const *cec, UNUSED call_env_parser_t const *rule)
 {
-	rlm_files_t const	*inst = talloc_get_type_abort_const(data, rlm_files_t);
-	CONF_PAIR const		*to_parse = cf_item_to_pair(ci);
-	rlm_files_data_t	*files_data;
-	fr_type_t		keytype;
+	rlm_files_t const		*inst = talloc_get_type_abort_const(cec->mi->data, rlm_files_t);
+	CONF_PAIR const			*to_parse = cf_item_to_pair(ci);
+	rlm_files_data_t		*files_data;
+	fr_type_t			keytype;
+	fr_dict_attr_t const		*key_enum = NULL;
 
 	MEM(files_data = talloc_zero(ctx, rlm_files_data_t));
 
 	if (tmpl_afrom_substr(ctx, &files_data->key_tmpl,
 			      &FR_SBUFF_IN(cf_pair_value(to_parse), talloc_array_length(cf_pair_value(to_parse)) - 1),
-			      cf_pair_value_quote(to_parse), NULL, t_rules) < 0) return -1;
+			      cf_pair_value_quote(to_parse), value_parse_rules_quoted[cf_pair_value_quote(to_parse)],
+			      t_rules) < 0) return -1;
 
 	keytype = tmpl_expanded_type(files_data->key_tmpl);
 	if (fr_htrie_hint(keytype) == FR_HTRIE_INVALID) {
@@ -648,8 +673,12 @@ static int call_env_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rule
 		return -1;
 	}
 
+	if (files_data->key_tmpl->type == TMPL_TYPE_ATTR) {
+		key_enum = tmpl_attr_tail_da(files_data->key_tmpl);
+	}
+
 	if (getrecv_filename(files_data, inst->filename, &files_data->htrie, &files_data->def,
-			     keytype, t_rules->attr.dict_def) < 0) goto error;
+			     keytype, key_enum, t_rules->attr.dict_def) < 0) goto error;
 
 	*(void **)out = files_data;
 	return 0;
@@ -661,6 +690,7 @@ static const call_env_method_t method_env = {
 		{ FR_CALL_ENV_PARSE_ONLY_OFFSET("key", FR_TYPE_VOID, CALL_ENV_FLAG_PARSE_ONLY, rlm_files_env_t, data),
 				     .pair.dflt = "%{%{Stripped-User-Name} || %{User-Name}}", .pair.dflt_quote = T_DOUBLE_QUOTED_STRING,
 				     .pair.func = call_env_parse },
+		{ FR_CALL_ENV_PARSE_ONLY_OFFSET("match_attr", FR_TYPE_VOID, CALL_ENV_FLAG_ATTRIBUTE, rlm_files_env_t, match_attr) },
 		CALL_ENV_TERMINATOR
 	},
 };
@@ -674,10 +704,10 @@ module_rlm_t rlm_files = {
 		.inst_size	= sizeof(rlm_files_t),
 		.config		= module_config,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_files,
-		  .method_env = &method_env	},
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_files, .method_env = &method_env },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
-
 };

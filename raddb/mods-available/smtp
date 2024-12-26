@@ -85,6 +85,10 @@ smtp {
 		#  is not known ahead of time (using a URL from an external source), and/or the CA used
 		#  to sign the SMTP server certificate is unknown.
 		#
+		#  If not set, then whatever libcurl has as its default will be used, which typically
+		#  will be the operating system's set of trusted CAs.  This will be visible in the debug
+		#  output when FreeRADIUS starts.
+		#
 #		ca_path	             = "${certdir}"
 
 		#
@@ -192,6 +196,18 @@ smtp {
 	#  from the SMTP server.
 	#
 	timeout = 5s
+
+	#
+	#  username_attribute:: Which attribute in the request should be used as
+	#  the user's username when performing SMTP authentication.
+	#
+#	username_attribute = &User-Name
+
+	#
+	#  password_attribute:: Which attribute in the request should be used as
+	#  the user's password when performing SMTP authentication.
+	#
+#	password_attribute = &User-Password
 
 	#
 	#  username:: User name to use when sending emails.  Can be a fixed

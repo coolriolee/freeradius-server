@@ -140,7 +140,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		 *
 		 *	https://tools.ietf.org/html/rfc8415#section-10
 		 */
-		if (da_is_dns_label(da)) {
+		if (fr_dhcpv6_flag_any_dns_label(da)) {
 			fr_dbuff_marker_t	last_byte, src;
 
 			fr_dbuff_marker(&last_byte, &work_dbuff);
@@ -154,7 +154,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 			 *	partial name, and we omit the trailing
 			 *	zero.
 			 */
-			if ((da->flags.subtype == FLAG_ENCODE_PARTIAL_DNS_LABEL) && slen > 0) {
+			if (fr_dhcpv6_flag_partial_dns_label(da) && slen > 0) {
 				uint8_t c = 0;
 
 				fr_dbuff_advance(&last_byte, (size_t)(slen - 1));
@@ -292,12 +292,15 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		if (!fr_pair_list_empty(&vp->vp_group)) {
 			(void) fr_pair_dcursor_child_iter_init(&child_cursor, &vp->vp_group, cursor);
 
+			/*
+			 *	@todo - encode from "ref" and not from the root?  But that's hard,
+			 *	due to the whole proto stack thing, which we largely don't need
+			 *	any more.
+			 */
 			while (fr_dcursor_current(&child_cursor) != NULL) {
 				slen = fr_dhcpv6_encode_option(&work_dbuff, &child_cursor, encode_ctx);
-				if (slen == PAIR_ENCODE_SKIPPED) continue;
 
 				if (slen < 0) return PAIR_ENCODE_FATAL_ERROR;
-				if (slen == 0) break;
 			}
 		}
 	}
@@ -635,7 +638,7 @@ static ssize_t encode_relay_message(fr_dbuff_t *dbuff,
 	if (fr_pair_list_empty(&vp->vp_group)) {
 		vp = fr_dcursor_next(cursor);
 		fr_proto_da_stack_build(da_stack, vp ? vp->da : NULL);
-		return PAIR_ENCODE_SKIPPED;
+		return 0;
 	}
 
 	/*
@@ -685,7 +688,7 @@ ssize_t fr_dhcpv6_encode_option(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void * 
 	if (vp->da->flags.internal) {
 		fr_strerror_printf("Attribute \"%s\" is not a DHCPv6 option", vp->da->name);
 		fr_dcursor_next(cursor);
-		return PAIR_ENCODE_SKIPPED;
+		return 0;
 	}
 
 	fr_proto_da_stack_build(&da_stack, vp->da);
@@ -742,7 +745,7 @@ ssize_t	fr_dhcpv6_encode_foreign(fr_dbuff_t *dbuff, fr_pair_list_t const *list)
 }
 
 
-static int encode_test_ctx(void **out, TALLOC_CTX *ctx)
+static int encode_test_ctx(void **out, TALLOC_CTX *ctx, UNUSED fr_dict_t const *dict)
 {
 	fr_dhcpv6_encode_ctx_t	*test_ctx;
 

@@ -62,7 +62,7 @@
 #
 server default {
 	#
-	#  namespace::
+	#  namespace:: The protocol namespace (i.e. dictionary) to use.
 	#
 	#  In v4, all "server" sections MUST start with a "namespace"
 	#  parameter.  This tells the server which protocol is being used.
@@ -71,6 +71,23 @@ server default {
 	#  only accept packets for that protocol.
 	#
 	namespace = radius
+
+	#
+	#  log:: The name of the logging section to use.
+	#
+	#  The top configuration section can contain multiple section "log foo { ... }".
+	#  Each of those sections is a different named logging destination.
+	#
+	#  This configuration item allows setting a different logging destination for an
+	#  individual virtual server.
+	#
+	#  There are some limitations.
+	#
+	#  * this logging is in _addition_ to the default logging to "log { .... }".
+	#  * it is not currently possible to _replace_ the default logging destination
+	#  * the name given here _must_ be a fixed string, and is not dynamically expanded.
+	#
+#	log = some_other_logging_destination
 
 	#
 	#  ### RADIUS Configuration
@@ -90,80 +107,6 @@ server default {
 		#  needed for other packet types.
 		#
 		Access-Request {
-			#
-			#  log:: Logging configuration for `Access-Request` packets
-			#
-			#  In v3, the `Access-Request` logging was
-			#  configured in the main `radiusd.conf` file,
-			#  in the main `log` subsection.  That
-			#  limitation meant that the configuration was
-			#  global to FreeRADIUS.  i.e. you could not
-			#  have different `Access-Request` logging for
-			#  different virtual server.
-			#
-			#  The extra configuration in v4 allows for
-			#  increased flexibility.
-			#
-			log {
-				#
-				#  stripped_names:: Log the full
-				#  `User-Name` attribute, as it was
-				#  found in the request.
-				#
-				#  allowed values: {no, yes}
-				#
-				stripped_names = no
-
-				#
-				#  auth:: Log authentication requests
-				#  to the log file.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth = no
-
-				#
-				#  auth_goodpass:: Log "good"
-				#  passwords with the authentication
-				#  requests.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth_goodpass = no
-
-				#
-				#  auth_badpass:: Log "bad"
-				#  passwords with the authentication
-				#  requests.
-				#
-				#  allowed values: {no, yes}
-				#
-				auth_badpass = no
-
-				#
-				#  msg_goodpass::
-				#  msg_badpass::
-				#
-				#  Log additional text at the end of the "Login OK" messages.
-				#  for these to work, the "auth" and "auth_goodpass" or "auth_badpass"
-				#  configurations above have to be set to "yes".
-				#
-				#  The strings below are dynamically expanded, which means that
-				#  you can put anything you want in them.  However, note that
-				#  this expansion can be slow, and can negatively impact server
-				#  performance.
-				#
-#				msg_goodpass = ""
-#				msg_badpass = ""
-
-				#
-				#  msg_denied::
-				#
-				#  The message when the user exceeds the Simultaneous-Use limit.
-				#
-				msg_denied = "You are already logged in - access denied"
-			}
-
 			#
 			#  session:: Controls how ongoing
 			#  (multi-round) sessions are handled
@@ -306,6 +249,60 @@ server default {
 		#  does not accept those packets from the network.
 		#
 		transport = udp
+
+		#
+		#  require_message_authenticator::Require Message-Authenticator
+		#  in Access-Requests.
+		#
+		#  RFC 5080 suggests that all clients *should* include it in an
+		#  Access-Request. The configuration item below allows the server
+		#  to require it. If a client is required to include a `Message-Authenticator`
+		#  and it does not, then the packet will be silently discarded.
+		#
+		#  If value is auto, then if any packet received from the client
+		#  contains a valid Message-Authenticator attribute, then the server
+		#  will require it from all future packets from that client.
+		#
+		#  Allowed values: yes, no, auto
+		#
+		#  The default is "no".
+		#
+		require_message_authenticator = auto
+
+		#
+		#  limit_proxy_state:: Control whether Proxy-State is allowed in
+		#  packets from this client which do not have a Message-Authenticator.
+		#
+		#  The blastradius prefix attack allows an attacker to manipulate
+		#  the contents of response packets without knowing the shared secret.
+		#
+		#  The attack relies on controlling a portion of the data sent back
+		#  in the response by the RADIUS server. As Proxy-State is always
+		#  echoed back verbatim from the request, it can be leveraged to
+		#  manipulate the data sent back from the server and facilitate the
+		#  attack.
+		#
+		#  The attack also relies on defficiencies in the original RADIUS
+		#  standards that provided no integrity protection for Access-Requests.
+		#
+		#  The attack is mitigated by requiring the Message-Authenticator,
+		#  which contains a HMAC over the entire request, preventing
+		#  modification of the request by the attacker.
+		#
+		#  If value is auto, and the first packet received from the client
+		#  does not contain a Proxy-State attribute, Proxy-State will be
+		#  disallowed in any future packets which do not contain a
+		#  Message-Authenticator.
+		#
+		#  This provides some level of protection against the blastradius
+		#  attack, without requiring Message-Authenticator, or breaking
+		#  existing deployments.
+		#
+		#  Allowed values: yes, no, auto
+		#
+		#  The default is "auto".
+		#
+		limit_proxy_state = auto
 
 		#
 		#  limit:: limits for this socket.
@@ -771,7 +768,7 @@ recv Access-Request {
 #	auth_log
 
 	#
-	#  The `chap` module will set `Auth-Type := CHAP` if the
+	#  The `chap` module will set `Auth-Type := ::CHAP` if the
 	#  packet contains a `CHAP-Challenge` attribute.  The module
 	#  does this only if the `Auth-Type` attribute has not already
 	#  been set.
@@ -779,7 +776,7 @@ recv Access-Request {
 	chap
 
 	#
-	#  The `mschap` module will set `Auth-Type := mschap` if the
+	#  The `mschap` module will set `Auth-Type := ::mschap` if the
 	#  packet contains an `MS-CHAP-Challenge` attribute.  The
 	#  module does this only if the `Auth-Type` attribute has not
 	#  already been set.
@@ -821,7 +818,7 @@ recv Access-Request {
 	#  The module also sets the EAP-Type attribute in the request
 	#  list, to the incoming EAP type.
 	#
-	#  The `eap` module returns `ok` if it is not yet ready to
+	#  The `eap` module returns `ok` or `updated` if it is not yet ready to
 	#  authenticate the user. The configuration below checks for
 	#  that return value, and if so, stops processing the current
 	#  section.
@@ -835,6 +832,7 @@ recv Access-Request {
 	#
 	eap {
 		ok = return
+		updated = return
 	}
 
 	#
@@ -888,7 +886,7 @@ recv Access-Request {
 	expiration
 
 	#
-	#  The `pap` module will set `Auth-Type := PAP` if the
+	#  The `pap` module will set `Auth-Type := ::PAP` if the
 	#  packet contains a `User-Password` attribute.  The module
 	#  does this only if the `Auth-Type` attribute has not already
 	#  been set.
@@ -941,11 +939,11 @@ recv Status-Server {
 #  authentication method will work, but all of the others will not.
 #
 #  The common reasons to set the `Auth-Type` attribute by hand are
-#  to forcibly reject the user (`Auth-Type := Reject`), to or
-#  forcibly accept the user (`Auth-Type := Accept`), or for
+#  to forcibly reject the user (`Auth-Type := ::Reject`), to or
+#  forcibly accept the user (`Auth-Type := ::Accept`), or for
 #  proxying.
 #
-#  Note that `Auth-Type := Accept` will NOT work with EAP.  The EAP
+#  Note that `Auth-Type := ::Accept` will NOT work with EAP.  The EAP
 #  authentication protocol uses a series of handshake messages.  All
 #  of the messages must be exchanged correctly in order for EAP
 #  authentication to succeed.  Bypassing that process with `Auth-Type
@@ -1069,12 +1067,11 @@ authenticate eap {
 #  The following example shows how proxying to three remote servers
 #  can be configured.
 #
-#  The `Auth-Type` attribute would need to be set to
-#  `proxy-example.com`.  The home servers MUST be defined in
-#  `mods-available/radius`.
+#  Proxying will be done by setting `Auth-Type := example.com`, and
+#  defining the home servers in `mods-available/radius`.
 #
 
-#authenticate proxy-example.com {
+#authenticate example.com {
 #	#
 #	#  Log the request before proxying.
 #	#
@@ -1125,7 +1122,7 @@ send Access-Accept {
 	#
 	#  If you need to have a State attribute, you can add it
 	#  here. e.g. for later CoA-Request with State, and
-	#  Service-Type = Authorize-Only.
+	#  Service-Type = ::Authorize-Only.
 	#
 #	if (!&reply.State) {
 #		&reply.State := "0x%randstr(16h)"
@@ -1172,13 +1169,6 @@ send Access-Accept {
 	#  After authenticating the user, do another SQL query.
 	#
 	-sql
-
-	#
-	#  Instead of sending the query to the SQL server in
-	#  real-time, write it into a log file to be picked up and
-	#  sent to the database later.
-	#
-#	sql_log
 
 	#
 	#  Uncomment the following if you want to modify the
@@ -1263,6 +1253,13 @@ send Access-Accept {
 #	}
 
 	#
+	#  Call an instance of `linelog` to log the authentication success
+	#  - equivalent to the previous log `auth = yes` option in v3.
+	#  See `mods-enabled/linelog` for message formats and destinations.
+	#
+#	log_auth_access_accept
+
+	#
 	#  Remove `Reply-Message` if the response contains an
 	#  `EAP-Message` attribute.  Some NAS equipment will
 	#  automatically convert the `Reply-Message` to an "EAP
@@ -1299,6 +1296,13 @@ send Access-Reject {
 	#  policy, instead of from an authentication failure.
 	#
 	eap
+
+	#
+	#  Call an instance of `linelog` to log the authentication failure
+	#  - equivalent to the previous log `auth = yes` option in v3.
+	#  See `mods-enabled/linelog` for message formats and destinations.
+	#
+#	log_auth_access_reject
 
 	#
 	#  Remove `Reply-Message` if the response contains an
@@ -1341,30 +1345,6 @@ recv Accounting-Request {
 #	acct_counters64
 
 	#
-	#  Session start times are *implied* in RADIUS. The NAS
-	#  never sends a "start time". Instead, it sends a start
-	#  packet, *possibly* with an Acct-Delay-Time. The server
-	#  is supposed to conclude that the start time was
-	#  "Acct-Delay-Time" seconds in the past.
-	#
-	#  The unlang below creates an explicit start time, which
-	#  can then be used in other modules. It will be *mostly*
-	#  correct. Any errors are due to the 1-second resolution
-	#  of RADIUS, and the possibility that the time on the NAS
-	#  may be off.
-	#
-	#  The start time is: NOW - delay - session_length
-	#
-#	&request.FreeRADIUS-Acct-Session-Start-Time = "%{(&Event-Timestamp || %l) - &Acct-Session-Time - &Acct-Delay-Time}"
-
-	#
-	#  The packet should have a timestamp.  If not, use "now" from the server.
-	#
-	if (!&Event-Timestamp) {
-		&request.Event-Timestamp := %{%l - &Acct-Delay-Time}
-	}
-
-	#
 	#  Ensure that we have a semi-unique identifier for every
 	#  request, as many NAS boxes are broken.
 	#
@@ -1392,6 +1372,13 @@ recv Accounting-Request {
 #
 accounting Start {
 	#
+	#  Log traffic to an SQL database.
+	#
+	#  See "Accounting Queries" in `mods-available/sql`.
+	#
+	-sql
+
+	#
 	#  Refresh leases when we see a start.
 	#
 	#  Ensure that &control.IP-Pool.Name is set to determine which
@@ -1406,6 +1393,26 @@ accounting Start {
 #
 accounting Stop {
 	#
+	#  Log traffic to an SQL database.
+	#
+	-sql
+
+	#
+	#  If you receive stop packets with zero session length,
+	#  they will NOT be logged in the database. The SQL
+	#  module will print a message (only in debugging mode),
+	#  and will return "noop".
+	#
+	#  You can ignore these packets by uncommenting the
+	#  following three lines. Otherwise, the server will not
+	#  respond to the accounting request, and the NAS will
+	#  retransmit.
+	#
+#	if (noop) {
+#		ok
+#	}
+
+	#
 	#  Return an address to the IP Pool when we see a stop record.
 	#
 #	sqlippool
@@ -1415,6 +1422,11 @@ accounting Stop {
 #  Session is still alive
 #
 accounting Interim-Update {
+	#
+	#  Log traffic to an SQL database.
+	#
+	-sql
+
 	#
 	#  Refresh leases when we see an alive.
 	#
@@ -1426,6 +1438,11 @@ accounting Interim-Update {
 #
 accounting Accounting-On {
 	#
+	#  Record that the NAS has booted to an SQL database
+	#
+	-sql
+
+	#
 	#  Return all addresses related to this NAS to the IP Pool
 	#
 #	sqlippool
@@ -1435,6 +1452,11 @@ accounting Accounting-On {
 #  The NAS is about to go down
 #
 accounting Accounting-Off {
+	#
+	#  Record that the NAS is shutting down to an SQL database
+	#
+	-sql
+
 	#
 	#  Return all addresses related to this NAS to the IP Pool
 	#
@@ -1493,9 +1515,9 @@ send Accounting-Response {
 	#
 	#  Update the wtmp file.
 	#
-	#  If you don't use "radlast", you can delete this line.
+	#  This is only relevant if you use "radlast".
 	#
-	unix
+#	unix
 
 	#
 	#  For Simultaneous-Use tracking.
@@ -1505,35 +1527,6 @@ send Accounting-Response {
 	#
 #	radutmp
 #	sradutmp
-
-	#
-	#  Log traffic to an SQL database.
-	#
-	#  See "Accounting Queries" in `mods-available/sql`.
-	#
-	-sql
-
-	#
-	#  If you receive stop packets with zero session length,
-	#  they will NOT be logged in the database. The SQL
-	#  module will print a message (only in debugging mode),
-	#  and will return "noop".
-	#
-	#  You can ignore these packets by uncommenting the
-	#  following three lines. Otherwise, the server will not
-	#  respond to the accounting request, and the NAS will
-	#  retransmit.
-	#
-#	if (noop) {
-#		ok
-#	}
-
-	#
-	#  Instead of sending the query to the SQL server in
-	#  real-time, write it into a log file to be picked up and
-	#  sent to the database later.
-	#
-#	sql_log
 
 	#
 	#  Cisco VoIP specific bulk accounting.

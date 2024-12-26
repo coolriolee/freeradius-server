@@ -27,8 +27,10 @@ RCSID("$Id$")
 
 #define LOG_PREFIX pool->log_prefix
 
-#include <freeradius-devel/server/base.h>
+#include <freeradius-devel/server/main_config.h>
 #include <freeradius-devel/server/modpriv.h>
+#include <freeradius-devel/server/trigger.h>
+
 #include <freeradius-devel/util/debug.h>
 
 #include <freeradius-devel/util/heap.h>
@@ -80,7 +82,7 @@ struct fr_pool_connection_s {
  * threads leaving the pool in an inconsistent state, and the callbacks
  * required to open, close and check the status of connections within the pool.
  *
- * @see fr_connection
+ * @see connection
  */
 struct fr_pool_s {
 	int		ref;			//!< Reference counter to prevent connection
@@ -432,7 +434,7 @@ static fr_pool_connection_t *connection_spawn(fr_pool_t *pool, request_t *reques
 	 *	Allocate a new top level ctx for the create callback
 	 *	to hang its memory off of.
 	 */
-	ctx = talloc_init("fr_connection_ctx");
+	ctx = talloc_init("connection_ctx");
 	if (!ctx) return NULL;
 
 	/*
@@ -774,7 +776,10 @@ static int connection_check(fr_pool_t *pool, request_t *request)
 	if (spare < pool->spare) {
 		/*
 		 *	Don't open too many pending connections.
+		 *	Again, coverity doesn't realize all callers have the lock,
+		 *	so we must annotate here as well.
 		 */
+		/* coverity[missing_lock] */
 		if (pool->state.pending >= pool->pending_window) goto manage_connections;
 
 		/*

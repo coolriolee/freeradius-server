@@ -28,11 +28,16 @@
 #include <freeradius-devel/radius/radius.h>
 #include <freeradius-devel/util/pair_legacy.h>
 
+#include <freeradius-devel/server/dl_module.h>
+#include <freeradius-devel/server/module.h>
+#include <freeradius-devel/server/module_rlm.h>
+
 #include "proto_detail.h"
 
 extern fr_app_t proto_detail;
+
 static int type_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 
 #if 0
 /*
@@ -99,10 +104,10 @@ fr_dict_attr_autoload_t proto_detail_dict_attr[] = {
 	{ NULL }
 };
 
-/** Wrapper around dl_instance which translates the packet-type into a submodule name
+/** Translates the packet-type into a submodule name
  *
  * @param[in] ctx	to allocate data in (instance of proto_detail).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
+ * @param[out] out	Where to write a module_instance_t containing the module handle and instance.
  * @param[in] parent	Base structure address.
  * @param[in] ci	#CONF_PAIR specifying the name of the type module.
  * @param[in] rule	unused.
@@ -146,44 +151,62 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM
 	return 0;
 }
 
-/** Wrapper around dl_instance
- *
- * @param[in] ctx	to allocate data in (instance of proto_detail).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
- * @param[in] parent	Base structure address.
- * @param[in] ci	#CONF_PAIR specifying the name of the type module.
- * @param[in] rule	unused.
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent,
-			   CONF_ITEM *ci, UNUSED conf_parser_t const *rule)
+static int transport_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule)
 {
-	char const		*name = cf_pair_value(cf_item_to_pair(ci));
-	dl_module_inst_t	*parent_inst;
-	CONF_SECTION		*listen_cs = cf_item_to_section(cf_parent(ci));
-	CONF_SECTION		*transport_cs;
-	dl_module_inst_t	*dl_mod_inst;
+	proto_detail_t *inst = talloc_get_type_abort(parent, proto_detail_t);
 
-	transport_cs = cf_section_find(listen_cs, name, NULL);
-
-	/*
-	 *	Allocate an empty section if one doesn't exist
-	 *	this is so defaults get parsed.
-	 */
-	if (!transport_cs) transport_cs = cf_section_alloc(listen_cs, listen_cs, name, NULL);
-
-	parent_inst = cf_data_value(cf_data_find(listen_cs, dl_module_inst_t, "proto_detail"));
-	fr_assert(parent_inst);
-
-	if (dl_module_instance(ctx, &dl_mod_inst, parent_inst,
-			       DL_MODULE_TYPE_SUBMODULE, name, dl_module_inst_name_from_conf(transport_cs)) < 0) return -1;
-	if (dl_module_conf_parse(dl_mod_inst, transport_cs) < 0) {
-		talloc_free(dl_mod_inst);
+	if (unlikely(virtual_server_listen_transport_parse(ctx, out, parent, ci, rule) < 0)) {
 		return -1;
 	}
-	*((dl_module_inst_t **)out) = dl_mod_inst;
+
+	/*
+	 *	If we're not loading the work submodule directly, then try to load it here.
+	 */
+	if (strcmp(inst->io_submodule->module->dl->name, "proto_detail_work") != 0) {
+		CONF_SECTION		*transport_cs;
+		module_instance_t	*mi;
+		char const		*inst_name;
+
+		inst->work_submodule = NULL;
+
+		mi = virtual_server_listener_by_data(parent);
+		fr_assert(mi);
+
+		transport_cs = cf_section_find(mi->conf, "work", NULL);
+		if (!transport_cs) {
+			transport_cs = cf_section_dup(mi->conf, mi->conf, inst->app_io_conf,
+						      "work", NULL, false);
+			if (!transport_cs) {
+				cf_log_err(mi->conf, "Failed to create configuration for worker");
+				return -1;
+			}
+		}
+
+		if (module_instance_name_from_conf(&inst_name, transport_cs) < 0) return -1;
+
+		/*
+		 *	This *should* get bootstrapped at some point after this module
+		 *	as it's inserted into the three the caller is iterating over.
+		 *
+		 *	We might want to revisit this, and use a linked list of modules
+		 *	to iterate over instead of a tree, so we can add this to the end
+		 *	of that list.
+		 */
+		inst->work_submodule = module_instance_alloc(mi->ml, mi, DL_MODULE_TYPE_SUBMODULE,
+							     "work", inst_name, 0);
+		if (inst->work_submodule == NULL) {
+		error:
+			cf_log_perr(mi->conf, "Failed to load proto_detail_work");
+			TALLOC_FREE(inst->work_submodule);
+			return -1;
+		}
+
+		if (module_instance_conf_parse(inst->work_submodule, transport_cs) < 0) goto error;
+
+		inst->work_io = (fr_app_io_t const *) inst->work_submodule->exported;
+		inst->work_io_instance = inst->work_submodule->data;
+		inst->work_io_conf = inst->work_submodule->conf;
+	}
 
 	return 0;
 }
@@ -416,11 +439,11 @@ static int mod_open(void *instance, fr_schedule_t *sc, CONF_SECTION *conf)
 	 *	path, data takes from the socket to the decoder and
 	 *	back again.
 	 */
-	li = talloc_zero(inst, fr_listen_t);
+	MEM(li = talloc_zero(inst, fr_listen_t));	/* Assigned thread steals the memory */
 	talloc_set_destructor(li, fr_io_listen_free);
 
 	li->app_io = inst->app_io;
-	li->thread_instance = talloc_zero_array(NULL, uint8_t, li->app_io->common.thread_inst_size);
+	li->thread_instance = talloc_zero_array(li, uint8_t, li->app_io->common.thread_inst_size);
 	talloc_set_name(li->thread_instance, "proto_%s_thread_t", inst->app_io->common.name);
 	li->app_io_instance = inst->app_io_instance;
 
@@ -498,18 +521,30 @@ static int mod_open(void *instance, fr_schedule_t *sc, CONF_SECTION *conf)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_detail_t		*inst = talloc_get_type_abort(mctx->inst->data, proto_detail_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_detail_t		*inst = talloc_get_type_abort(mctx->mi->data, proto_detail_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 
 	/*
-	 *	Instantiate the I/O module. But DON'T instantiate the
-	 *	work submodule.  We leave that until later.
+	 *	The listener is inside of a virtual server.
 	 */
-	if (inst->app_io->common.instantiate &&
-	    (inst->app_io->common.instantiate(MODULE_INST_CTX(inst->io_submodule)) < 0)) {
-		cf_log_err(conf, "Instantiation failed for \"%s\"", inst->app_io->common.name);
+	inst->server_cs = cf_item_to_section(cf_parent(conf));
+	inst->self = &proto_detail;
+
+	/*
+	 *	No IO module, it's an empty listener.  That's not
+	 *	allowed for the detail file reader.
+	 */
+	if (!inst->io_submodule) {
+		cf_log_err(conf, "Virtual server for detail files requires a 'transport' configuration");
 		return -1;
 	}
+
+	/*
+	 *	Bootstrap the I/O module
+	 */
+	inst->app_io = (fr_app_io_t const *) inst->io_submodule->exported;
+	inst->app_io_instance = inst->io_submodule->data;
+	inst->app_io_conf = inst->io_submodule->conf;
 
 	/*
 	 *	These configuration items are not printed by default,
@@ -527,113 +562,8 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 	if (!inst->priority) inst->priority = PRIORITY_NORMAL;
 
-	/*
-	 *	If the IO is "file" and not the worker, instantiate the worker now.
-	 */
-	if (strcmp(inst->io_submodule->module->dl->name, "proto_detail_work") != 0) {
-		if (inst->work_io->common.instantiate &&
-		    (inst->work_io->common.instantiate(MODULE_INST_CTX(inst->work_submodule)) < 0)) {
-			cf_log_err(inst->work_io_conf, "Instantiation failed for \"%s\"", inst->work_io->common.name);
-			return -1;
-		}
-	}
-
 	return 0;
 }
-
-/** Bootstrap the application
- *
- * Bootstrap I/O and type submodules.
- *
- * @return
- *	- 0 on success.
- *	- -1 on failure.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_detail_t 		*inst = talloc_get_type_abort(mctx->inst->data, proto_detail_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-
-	/*
-	 *	The listener is inside of a virtual server.
-	 */
-	inst->server_cs = cf_item_to_section(cf_parent(conf));
-	inst->cs = conf;
-	inst->self = &proto_detail;
-
-	/*
-	 *	No IO module, it's an empty listener.  That's not
-	 *	allowed for the detail file reader.
-	 */
-	if (!inst->io_submodule) {
-		cf_log_err(conf, "Virtual server for detail files requires a 'transport' configuration");
-		return -1;
-	}
-
-	/*
-	 *	Bootstrap the I/O module
-	 */
-	inst->app_io = (fr_app_io_t const *) inst->io_submodule->module->common;
-	inst->app_io_instance = inst->io_submodule->data;
-	inst->app_io_conf = inst->io_submodule->conf;
-
-	if (inst->app_io->common.bootstrap && (inst->app_io->common.bootstrap(MODULE_INST_CTX(inst->io_submodule)) < 0)) {
-		cf_log_err(inst->app_io_conf, "Bootstrap failed for \"%s\"", inst->app_io->common.name);
-		return -1;
-	}
-
-	/*
-	 *	If we're not loading the work submodule directly, then try to load it here.
-	 */
-	if (strcmp(inst->io_submodule->module->dl->name, "proto_detail_work") != 0) {
-		CONF_SECTION *transport_cs;
-		dl_module_inst_t *parent_inst;
-
-		inst->work_submodule = NULL;
-
-		transport_cs = cf_section_find(inst->cs, "work", NULL);
-		parent_inst = cf_data_value(cf_data_find(inst->cs, dl_module_inst_t, "proto_detail"));
-		fr_assert(parent_inst);
-
-		if (!transport_cs) {
-			transport_cs = cf_section_dup(inst->cs, inst->cs, inst->app_io_conf,
-						      "work", NULL, false);
-			if (!transport_cs) {
-				cf_log_err(inst->cs, "Failed to create configuration for worker");
-				return -1;
-			}
-		}
-
-		if (dl_module_instance(parent_inst, &inst->work_submodule,
-				       parent_inst,
-				       DL_MODULE_TYPE_SUBMODULE, "work", dl_module_inst_name_from_conf(transport_cs)) < 0) {
-			cf_log_perr(inst->cs, "Failed to load proto_detail_work");
-			return -1;
-		}
-
-		if (dl_module_conf_parse(inst->work_submodule, transport_cs) < 0) {
-			TALLOC_FREE(inst->work_submodule);
-			return -1;
-		}
-
-		/*
-		 *	Boot strap the work module.
-		 */
-		inst->work_io = (fr_app_io_t const *) inst->work_submodule->module->common;
-		inst->work_io_instance = inst->work_submodule->data;
-		inst->work_io_conf = inst->work_submodule->conf;
-
-		if (inst->work_io->common.bootstrap &&
-		    (inst->work_io->common.bootstrap(MODULE_INST_CTX(inst->work_submodule)) < 0)) {
-			cf_log_err(inst->work_io_conf, "Bootstrap failed for \"%s\"", inst->work_io->common.name);
-			TALLOC_FREE(inst->work_submodule);
-			return -1;
-		}
-	}
-
-	return 0;
-}
-
 
 fr_app_t proto_detail = {
 	.common = {
@@ -642,7 +572,6 @@ fr_app_t proto_detail = {
 		.config			= proto_detail_config,
 		.inst_size		= sizeof(proto_detail_t),
 
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate,
 	},
 	.open			= mod_open,

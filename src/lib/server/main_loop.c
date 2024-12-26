@@ -97,7 +97,10 @@ void main_loop_signal_raise(int flag)
 
 	buffer[0] |= flag;
 
-	if (write(self_pipe[1], buffer, 1) < 0) fr_exit(0);
+	if (write(self_pipe[1], buffer, 1) < 0) {
+		FR_FAULT_LOG("Failed to write to self-pipe: %s", fr_syserror(errno));
+		fr_exit(0);
+	}
 }
 
 static void main_loop_signal_process(int flag)
@@ -234,7 +237,7 @@ int main_loop_start(void)
 
 static int _loop_status(UNUSED fr_time_t now, fr_time_delta_t wake, UNUSED void *ctx)
 {
-	if (fr_time_delta_unwrap(wake) > (NSEC / 10)) DEBUG3("Main loop waking up in %pV seconds", fr_box_time_delta(wake));
+	if (fr_time_delta_unwrap(wake) > (NSEC / 10)) DEBUG4("Main loop waking up in %pV seconds", fr_box_time_delta(wake));
 
 	return 0;
 }
@@ -278,7 +281,7 @@ int main_loop_init(void)
 	}
 	DEBUG4("Created self-signal pipe.  Read end FD %i, write end FD %i", self_pipe[0], self_pipe[1]);
 
-	if (fr_event_fd_insert(NULL, event_list, self_pipe[0],
+	if (fr_event_fd_insert(NULL, NULL, event_list, self_pipe[0],
 			       main_loop_signal_recv,
 			       NULL,
 			       NULL,
@@ -289,4 +292,3 @@ int main_loop_init(void)
 
 	return 0;
 }
-

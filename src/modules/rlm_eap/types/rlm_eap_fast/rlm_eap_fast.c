@@ -48,6 +48,7 @@ typedef struct {
 
 	char const		*virtual_server;			//!< Virtual server to use for processing
 									//!< inner EAP method.
+	CONF_SECTION		*server_cs;
 	char const		*cipher_list;				//!< cipher list specific to EAP-FAST
 	bool			req_client_cert;			//!< Whether we require a client cert
 									//!< in the outer tunnel.
@@ -196,7 +197,7 @@ static eap_fast_tunnel_t *eap_fast_alloc(TALLOC_CTX *ctx, rlm_eap_fast_t const *
 	t->a_id = inst->a_id;
 	t->pac_opaque_key = (uint8_t const *)inst->pac_opaque_key;
 
-	t->virtual_server = inst->virtual_server;
+	t->server_cs = inst->server_cs;
 
 	return t;
 }
@@ -524,7 +525,7 @@ static unlang_action_t mod_handshake_process(UNUSED rlm_rcode_t *p_result, UNUSE
  */
 static unlang_action_t mod_session_init(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_eap_fast_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_eap_fast_t);
+	rlm_eap_fast_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_eap_fast_t);
 	rlm_eap_fast_thread_t	*thread = talloc_get_type_abort(mctx->thread, rlm_eap_fast_thread_t);
 	eap_session_t		*eap_session = eap_session_get(request->parent);
 	eap_tls_session_t 	*eap_tls_session;
@@ -602,7 +603,7 @@ static unlang_action_t mod_session_init(rlm_rcode_t *p_result, module_ctx_t cons
 
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_eap_fast_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_eap_fast_t);
+	rlm_eap_fast_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_fast_t);
 	rlm_eap_fast_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_eap_fast_thread_t);
 
 	t->ssl_ctx = fr_tls_ctx_alloc(inst->tls_conf, false);
@@ -626,12 +627,19 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_eap_fast_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_eap_fast_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	rlm_eap_fast_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_eap_fast_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
+	virtual_server_t const	*virtual_server = virtual_server_find(inst->virtual_server);
 
-	if (!virtual_server_find(inst->virtual_server)) {
-		cf_log_err_by_child(mctx->inst->conf, "virtual_server", "Unknown virtual server '%s'",
+	if (!virtual_server) {
+		cf_log_err_by_child(mctx->mi->conf, "virtual_server", "Unknown virtual server '%s'",
 				    inst->virtual_server);
+		return -1;
+	}
+
+	inst->server_cs = virtual_server_cs(virtual_server);
+	if (!inst->server_cs) {
+		cf_log_err_by_child(conf, "virtual_server", "Virtual server \"%s\" missing", inst->virtual_server);
 		return -1;
 	}
 

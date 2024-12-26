@@ -30,8 +30,10 @@ RCSID("$Id$")
 #include <freeradius-devel/util/base16.h>
 #include <freeradius-devel/util/misc.h>
 #include <freeradius-devel/util/perm.h>
+#include <freeradius-devel/util/syserror.h>
 
-#include <ctype.h>
+#include <freeradius-devel/unlang/xlat.h>
+
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -91,7 +93,7 @@ void (*reset_signal(int signo, void (*func)(int)))(int)
  * @param in string to escape.
  * @param arg Context arguments (unused, should be NULL).
  */
-size_t rad_filename_make_safe(UNUSED request_t *request, char *out, size_t outlen, char const *in, UNUSED void *arg)
+ssize_t rad_filename_make_safe(UNUSED request_t *request, char *out, size_t outlen, char const *in, UNUSED void *arg)
 {
 	char const *q = in;
 	char *p = out;
@@ -162,6 +164,31 @@ size_t rad_filename_make_safe(UNUSED request_t *request, char *out, size_t outle
 	return (p - out);
 }
 
+int rad_filename_box_make_safe(fr_value_box_t *vb, UNUSED void *uxtc)
+{
+	char			*escaped;
+	size_t			len;
+	fr_value_box_entry_t	entry;
+
+	if (vb->vb_length == 0) return 0;
+	if (vb->safe_for == (fr_value_box_safe_for_t)rad_filename_box_make_safe) return 0;
+
+	/*
+	 *	Allocate an output buffer, only ever the same or shorter than the input
+	 */
+	MEM(escaped = talloc_array(vb, char, vb->vb_length + 1));
+
+	len = rad_filename_make_safe(NULL, escaped, (vb->vb_length + 1), vb->vb_strvalue, NULL);
+
+	entry = vb->entry;
+	fr_value_box_clear_value(vb);
+	fr_value_box_bstrndup(vb, vb, NULL, escaped, len, false);
+	vb->entry = entry;
+	talloc_free(escaped);
+
+	return 0;
+}
+
 /** Escapes the raw string such that it should be safe to use as part of a file path
  *
  * This function is designed to produce a string that's still readable but portable
@@ -186,7 +213,7 @@ size_t rad_filename_make_safe(UNUSED request_t *request, char *out, size_t outle
  * @param in string to escape.
  * @param arg Context arguments (unused, should be NULL).
  */
-size_t rad_filename_escape(UNUSED request_t *request, char *out, size_t outlen, char const *in, UNUSED void *arg)
+ssize_t rad_filename_escape(UNUSED request_t *request, char *out, size_t outlen, char const *in, UNUSED void *arg)
 {
 	size_t freespace = outlen;
 
@@ -202,15 +229,15 @@ size_t rad_filename_escape(UNUSED request_t *request, char *out, size_t outlen, 
 
 			switch (utf8_len) {
 			case 2:
-				snprintf(out, freespace, "-%x-%x", in[0], in[1]);
+				snprintf(out, freespace, "-%x-%x", (uint8_t)in[0], (uint8_t)in[1]);
 				break;
 
 			case 3:
-				snprintf(out, freespace, "-%x-%x-%x", in[0], in[1], in[2]);
+				snprintf(out, freespace, "-%x-%x-%x", (uint8_t)in[0], (uint8_t)in[1], (uint8_t)in[2]);
 				break;
 
 			case 4:
-				snprintf(out, freespace, "-%x-%x-%x-%x", in[0], in[1], in[2], in[3]);
+				snprintf(out, freespace, "-%x-%x-%x-%x", (uint8_t)in[0], (uint8_t)in[1], (uint8_t)in[2], (uint8_t)in[3]);
 				break;
 			}
 
@@ -252,14 +279,48 @@ size_t rad_filename_escape(UNUSED request_t *request, char *out, size_t outlen, 
 		 *	Unsafe chars
 		 */
 		*out++ = '-';
-		in++;
 		fr_base16_encode(&FR_SBUFF_OUT(out, freespace), &FR_DBUFF_TMP((uint8_t const *)in, 1));
+		in++;
 		out += 2;
 		freespace -= 3;
 	}
 	*out = '\0';
 
 	return outlen - freespace;
+}
+
+int rad_filename_box_escape(fr_value_box_t *vb, UNUSED void *uxtc)
+{
+	char			*escaped;
+	size_t			len;
+	fr_value_box_entry_t	entry;
+
+	if (vb->vb_length == 0) return 0;
+	if (vb->safe_for == (fr_value_box_safe_for_t)rad_filename_box_escape) return 0;
+
+	/*
+	 *	Allocate an output buffer, if every character is escaped,
+	 *	it will be 3 times the input
+	 */
+	MEM(escaped = talloc_array(vb, char, vb->vb_length * 3 + 1));
+
+	len = rad_filename_escape(NULL, escaped, (vb->vb_length * 3 + 1), vb->vb_strvalue, NULL);
+
+	/*
+	 *	If the escaped length == input length, no changes were done.
+	 */
+	if (len == vb->vb_length) {
+		talloc_free(escaped);
+		return 0;
+	}
+
+	entry = vb->entry;
+	fr_value_box_clear_value(vb);
+	fr_value_box_bstrndup(vb, vb, NULL, escaped, len, false);
+	vb->entry = entry;
+	talloc_free(escaped);
+
+	return 0;
 }
 
 /** Converts data stored in a file name back to its original form

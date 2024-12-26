@@ -29,6 +29,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/syserror.h>
 #include <freeradius-devel/util/atexit.h>
 #include <freeradius-devel/util/value.h>
+#include <freeradius-devel/util/time.h>
 
 #include <fcntl.h>
 #ifdef HAVE_FEATURES_H
@@ -104,8 +105,8 @@ void fr_canonicalize_error(TALLOC_CTX *ctx, char **sp, char **text, ssize_t slen
 	 *	Catch bad callers.
 	 */
 	if (offset > inlen) {
-		*sp = NULL;
-		*text = NULL;
+		*sp = talloc_strdup(ctx, "");
+		*text = talloc_strdup(ctx, "");
 		return;
 	}
 
@@ -413,28 +414,11 @@ void fr_vlog(fr_log_t const *log, fr_log_type_t type, char const *file, int line
 
 	case L_TIMESTAMP_ON:
 	{
-		time_t timeval;
-		size_t len;
-
-		timeval = time(NULL);
-#ifdef HAVE_GMTIME_R
-		if (log->dates_utc) {
-			struct tm utc;
-			gmtime_r(&timeval, &utc);
-			ASCTIME_R(&utc, fmt_time, sizeof(fmt_time));
-		} else
-#endif
-		{
-			CTIME_R(&timeval, fmt_time, sizeof(fmt_time));
-		}
-
-		/*
-		 *	ctime adds '\n'
-		 */
-		len = strlen(fmt_time);
-		if ((len > 0) && (fmt_time[len - 1] == '\n')) fmt_time[len - 1] = '\0';
-	}
+		fr_unix_time_t now = fr_time_to_unix_time(fr_time());
+		fr_sbuff_t time_sbuff = FR_SBUFF_OUT(fmt_time, sizeof(fmt_time));
+		fr_unix_time_to_str(&time_sbuff, now, FR_TIME_RES_USEC, log->dates_utc);
 		break;
+	}
 	}
 
 	/*
@@ -822,9 +806,9 @@ void fr_log_hex(fr_log_t const *log, fr_log_type_t type, char const *file, int l
 
 		if (line_prefix_fmt) {
 			fr_log(log, type, file, line, "%s%04x: %s",
-			       line_prefix, (int)i, buffer);
+			       line_prefix, (unsigned int) i, buffer);
 		} else {
-			fr_log(log, type, file, line, "%04x: %s", (int)i, buffer);
+			fr_log(log, type, file, line, "%04x: %s", (unsigned int) i, buffer);
 		}
 	}
 
@@ -875,9 +859,9 @@ void fr_log_hex_marker(fr_log_t const *log, fr_log_type_t type, char const *file
 
 		if (line_prefix_fmt) {
 			fr_log(log, type, file, line, "%s%04x: %s",
-			       line_prefix, (int)i, buffer);
+			       line_prefix, (unsigned int) i, buffer);
 		} else {
-			fr_log(log, type, file, line, "%04x: %s", (int)i, buffer);
+			fr_log(log, type, file, line, "%04x: %s", (unsigned int) i, buffer);
 		}
 
 		/*
@@ -1105,7 +1089,13 @@ int fr_log_init_file(fr_log_t *log, char const *file)
 		return -1;
 	}
 
-	return fr_log_init_fp(log, fp);
+	if (fr_log_init_fp(log, fp) < 0) return -1;
+
+	/*
+	 *	The init over-rode any filename, so we reset it here.
+	 */
+	log->file = file;
+	return 0;
 }
 
 /** Write complete lines to syslog
@@ -1220,7 +1210,7 @@ int fr_log_close(fr_log_t *log)
 		break;
 	}
 
-	fr_strerror_printf("Failed closing invalid log dst %i", log->dst);
+	fr_strerror_printf("Failed closing invalid log dst %u", log->dst);
 	return -1;
 }
 
@@ -1283,7 +1273,7 @@ int fr_log_global_init(fr_event_list_t *el, bool daemonize)
 	/*
 	 *	Now do stderr...
 	 */
-	if (unlikely(fr_event_fd_insert(NULL, el, stdout_pipe[1], fr_log_fd_event, NULL, NULL, &stdout_ctx) < 0)) {
+	if (unlikely(fr_event_fd_insert(NULL, NULL, el, stdout_pipe[1], fr_log_fd_event, NULL, NULL, &stdout_ctx) < 0)) {
 		fr_strerror_const_push("Failed adding stdout handler to event loop");
 	error_2:
 		dup2(STDOUT_FILENO, stdout_fd);	/* Copy back the stdout FD */
@@ -1321,7 +1311,7 @@ int fr_log_global_init(fr_event_list_t *el, bool daemonize)
 	stdout_ctx.type = L_ERR;
 	stdout_ctx.lvl = L_DBG_LVL_OFF;	/* Log at all debug levels */
 
-	if (unlikely(fr_event_fd_insert(NULL, el, stderr_pipe[1], fr_log_fd_event, NULL, NULL, &stderr_ctx) < 0)) {
+	if (unlikely(fr_event_fd_insert(NULL, NULL, el, stderr_pipe[1], fr_log_fd_event, NULL, NULL, &stderr_ctx) < 0)) {
 		fr_strerror_const_push("Failed adding stdout handler to event loop");
 	error_6:
 		dup2(STDERR_FILENO, stderr_fd);	/* Copy back the stderr FD */

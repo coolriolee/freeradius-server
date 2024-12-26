@@ -359,6 +359,20 @@ static ssize_t mod_write(fr_listen_t *li, UNUSED void *packet_ctx, UNUSED fr_tim
 	 */
 	if (data_size <= 0) return data_size;
 
+#ifdef __COVERITY__
+	/*
+	 *      data_size and written have type size_t, so
+	 *      their sum can at least in theory exceed SSIZE_MAX.
+	 * 	We add this check to placate Coverity.
+	 *
+	 *      When Coverity examines this function it doesn't have
+	 * 	the caller context to see that it's honoring needed
+	 * 	preconditions (buffer_len <=SSIZE_MAX, and the loop
+	 * 	schema needed to use this function).
+	 */
+	if (data_size + written > SSIZE_MAX) return -1;
+#endif
+
 	return data_size + written;
 }
 
@@ -374,7 +388,7 @@ static int mod_connection_set(fr_listen_t *li, fr_io_address_t *connection)
 	return 0;
 }
 
-static void mod_network_get(UNUSED void *instance, int *ipproto, bool *dynamic_clients, fr_trie_t const **trie)
+static void mod_network_get(int *ipproto, bool *dynamic_clients, fr_trie_t const **trie, UNUSED void *instance)
 {
 	*ipproto = IPPROTO_TCP;
 	*dynamic_clients = false;
@@ -398,16 +412,16 @@ static int mod_open(fr_listen_t *li)
 	fr_assert(!thread->connection);
 
 	cfg = (fr_bio_fd_config_t) {
-		.type = FR_BIO_FD_ACCEPT,
+		.type = FR_BIO_FD_LISTEN,
 		.socket_type = SOCK_STREAM,
 		.path = inst->filename,
 		.uid = inst->uid,
 		.gid = inst->gid,
-		.perm = 0x700,
+		.perm = 0600,
 		.async = true,
 	};
 
-	thread->fd_bio = fr_bio_fd_alloc(thread, NULL, &cfg, 0);
+	thread->fd_bio = fr_bio_fd_alloc(thread, &cfg, 0);
 	if (!thread->fd_bio) {
 		PERROR("Failed allocating UNIX path %s", inst->filename);
 		return -1;
@@ -578,10 +592,10 @@ static char const *mod_name(fr_listen_t *li)
 }
 
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_control_unix_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_control_unix_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_control_unix_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_control_unix_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 
 	inst->cs = conf;
 
@@ -681,7 +695,7 @@ fr_app_io_t proto_control_unix = {
 		.config			= unix_listen_config,
 		.inst_size		= sizeof(proto_control_unix_t),
 		.thread_inst_size	= sizeof(proto_control_unix_thread_t),
-		.bootstrap		= mod_bootstrap,
+		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= 4096,
 

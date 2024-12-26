@@ -23,8 +23,6 @@
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
-
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/cap.h>
@@ -170,7 +168,7 @@ static xlat_action_t xlat_icmp(TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx,
 			       request_t *request, fr_value_box_list_t *in)
 {
-	rlm_icmp_t		*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_icmp_t);
+	rlm_icmp_t		*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_icmp_t);
 	rlm_icmp_thread_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_icmp_thread_t);
 	rlm_icmp_echo_t		*echo;
 	icmp_header_t		icmp;
@@ -346,7 +344,7 @@ static void mod_icmp_read(UNUSED fr_event_list_t *el, UNUSED int sockfd, UNUSED 
 	my_echo.counter = icmp->counter;
 	echo = fr_rb_find(t->tree, &my_echo);
 	if (!echo) {
-		DEBUG("Can't find packet counter=%d in tree", icmp->counter);
+		DEBUG("%s - Can't find packet counter=%d in tree", mctx->mi->name, icmp->counter);
 		return;
 	}
 
@@ -365,11 +363,27 @@ static void mod_icmp_error(fr_event_list_t *el, UNUSED int sockfd, UNUSED int fl
 	module_ctx_t const	*mctx = talloc_get_type_abort(uctx, module_ctx_t);
 	rlm_icmp_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_icmp_thread_t);
 
-	ERROR("Failed reading from ICMP socket - Closing it");
+	ERROR("%s - Failed reading from ICMP socket - Closing it", mctx->mi->name);
 
 	(void) fr_event_fd_delete(el, t->fd, FR_EVENT_FILTER_IO);
 	close(t->fd);
 	t->fd = -1;
+}
+
+/** Destroy thread data for the submodule.
+ *
+ */
+static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
+{
+	rlm_icmp_thread_t *t = talloc_get_type_abort(mctx->thread, rlm_icmp_thread_t);
+
+	if (t->fd < 0) return 0;
+
+	(void) fr_event_fd_delete(mctx->el, t->fd, FR_EVENT_FILTER_IO);
+	close(t->fd);
+	t->fd = -1;
+
+	return 0;
 }
 
 /** Instantiate thread data for the submodule.
@@ -378,7 +392,7 @@ static void mod_icmp_error(fr_event_list_t *el, UNUSED int sockfd, UNUSED int fl
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
 	module_thread_inst_ctx_t	*our_mctx;
-	rlm_icmp_t			*inst = talloc_get_type_abort(mctx->inst->data, rlm_icmp_t);
+	rlm_icmp_t			*inst = talloc_get_type_abort(mctx->mi->data, rlm_icmp_t);
 	rlm_icmp_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_icmp_thread_t);
 	fr_ipaddr_t			ipaddr, *src;
 
@@ -477,7 +491,7 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 	 *	We assume that the outbound socket is always writable.
 	 *	If not, too bad.  Packets will get lost.
 	 */
-	if (fr_event_fd_insert(t, mctx->el, fd,
+	if (fr_event_fd_insert(t, NULL, mctx->el, fd,
 			       mod_icmp_read,
 			       NULL,
 			       mod_icmp_error,
@@ -491,17 +505,28 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 	return 0;
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_icmp_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_icmp_t);
-	xlat_t		*xlat;
-
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_icmp, FR_TYPE_BOOL);
-	xlat_func_args_set(xlat, xlat_icmp_args);
+	rlm_icmp_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_icmp_t);
 
 	FR_TIME_DELTA_BOUND_CHECK("timeout", inst->timeout, >=, fr_time_delta_from_msec(100)); /* 1/10s minimum timeout */
 	FR_TIME_DELTA_BOUND_CHECK("timeout", inst->timeout, <=, fr_time_delta_from_sec(10));
 
+	return 0;
+}
+
+static int mod_bootstrap(module_inst_ctx_t const *mctx)
+{
+	xlat_t		*xlat;
+
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, xlat_icmp, FR_TYPE_BOOL);
+	xlat_func_args_set(xlat, xlat_icmp_args);
+
+	return 0;
+}
+
+static int mod_load(void)
+{
 #ifdef __linux__
 #  ifndef HAVE_CAPABILITY_H
 	if ((geteuid() != 0)) PWARN("Server not built with cap interface, opening raw sockets will likely fail");
@@ -520,22 +545,6 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 }
 
 
-/** Destroy thread data for the submodule.
- *
- */
-static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
-{
-	rlm_icmp_thread_t *t = talloc_get_type_abort(mctx->thread, rlm_icmp_thread_t);
-
-	if (t->fd < 0) return 0;
-
-	(void) fr_event_fd_delete(mctx->el, t->fd, FR_EVENT_FILTER_IO);
-	close(t->fd);
-	t->fd = -1;
-
-	return 0;
-}
-
 /*
  *	The module name should be the only globally exported symbol.
  *	That is, everything else should be 'static'.
@@ -550,10 +559,11 @@ module_rlm_t rlm_icmp = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "icmp",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_icmp_t),
 		.config		= module_config,
+		.onload		= mod_load,
 		.bootstrap	= mod_bootstrap,
+		.instantiate	= mod_instantiate,
 		.thread_inst_size = sizeof(rlm_icmp_thread_t),
 		.thread_inst_type = "rlm_icmp_thread_t",
 		.thread_instantiate = mod_thread_instantiate,

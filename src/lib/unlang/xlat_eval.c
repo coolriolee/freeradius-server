@@ -40,20 +40,43 @@ RCSID("$Id$")
 static int instance_count = 0;
 
 static fr_dict_t const *dict_freeradius;
-static fr_dict_t const *dict_radius;
 
 static fr_dict_autoload_t xlat_eval_dict[] = {
 	{ .out = &dict_freeradius, .proto = "freeradius" },
-	{ .out = &dict_radius, .proto = "radius" },
 	{ NULL }
 };
 
 fr_dict_attr_t const *attr_expr_bool_enum; /* xlat_expr.c */
 fr_dict_attr_t const *attr_cast_base; /* xlat_expr.c */
 
+static fr_dict_attr_t const *attr_cast_time_res_sec;
+static fr_dict_attr_t const *attr_cast_time_res_min;
+static fr_dict_attr_t const *attr_cast_time_res_hour;
+static fr_dict_attr_t const *attr_cast_time_res_day;
+static fr_dict_attr_t const *attr_cast_time_res_week;
+static fr_dict_attr_t const *attr_cast_time_res_month;
+static fr_dict_attr_t const *attr_cast_time_res_year;
+static fr_dict_attr_t const *attr_cast_time_res_csec;
+static fr_dict_attr_t const *attr_cast_time_res_msec;
+static fr_dict_attr_t const *attr_cast_time_res_usec;
+static fr_dict_attr_t const *attr_cast_time_res_nsec;
+
 static fr_dict_attr_autoload_t xlat_eval_dict_attr[] = {
 	{ .out = &attr_expr_bool_enum, .name = "Expr-Bool-Enum", .type = FR_TYPE_BOOL, .dict = &dict_freeradius },
 	{ .out = &attr_cast_base, .name = "Cast-Base", .type = FR_TYPE_UINT8, .dict = &dict_freeradius },
+
+	{ .out = &attr_cast_time_res_sec, .name = "Cast-Time-Res-Sec", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_min, .name = "Cast-Time-Res-Min", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_hour, .name = "Cast-Time-Res-Hour", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_day, .name = "Cast-Time-Res-Day", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_week, .name = "Cast-Time-Res-Week", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_month, .name = "Cast-Time-Res-Month", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_year, .name = "Cast-Time-Res-Year", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_csec, .name = "Cast-Time-Res-Centi-Sec", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_msec, .name = "Cast-Time-Res-Milli-Sec", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_usec, .name = "Cast-Time-Res-Micro-Sec", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+	{ .out = &attr_cast_time_res_nsec, .name = "Cast-Time-Res-Nano-Sec", .type = FR_TYPE_TIME_DELTA, .dict = &dict_freeradius },
+
 	{ NULL }
 };
 
@@ -64,6 +87,59 @@ fr_table_num_sorted_t const xlat_action_table[] = {
 	{ L("yield"),		XLAT_ACTION_YIELD	}
 };
 size_t xlat_action_table_len = NUM_ELEMENTS(xlat_action_table);
+
+/*
+ *	This should be updated if fr_time_precision_table[] adds more time resolutions.
+ */
+static fr_table_ptr_ordered_t const xlat_time_precision_table[] = {
+	{ L("microseconds"),	&attr_cast_time_res_usec },
+	{ L("us"),		&attr_cast_time_res_usec },
+
+	{ L("nanoseconds"),	&attr_cast_time_res_nsec },
+	{ L("ns"),		&attr_cast_time_res_nsec },
+
+	{ L("milliseconds"),	&attr_cast_time_res_msec },
+	{ L("ms"),		&attr_cast_time_res_msec },
+
+	{ L("centiseconds"),	&attr_cast_time_res_csec },
+	{ L("cs"),		&attr_cast_time_res_csec },
+
+	{ L("seconds"),		&attr_cast_time_res_sec },
+	{ L("s"),		&attr_cast_time_res_sec },
+
+	{ L("minutes"),		&attr_cast_time_res_min },
+	{ L("m"),		&attr_cast_time_res_min },
+
+	{ L("hours"),		&attr_cast_time_res_hour },
+	{ L("h"),		&attr_cast_time_res_hour },
+
+	{ L("days"),		&attr_cast_time_res_day },
+	{ L("d"),		&attr_cast_time_res_day },
+
+	{ L("weeks"),		&attr_cast_time_res_week },
+	{ L("w"),		&attr_cast_time_res_week },
+
+	/*
+	 *	These use special values FR_TIME_DUR_MONTH and FR_TIME_DUR_YEAR
+	 */
+	{ L("months"),		&attr_cast_time_res_month },
+	{ L("M"),		&attr_cast_time_res_month },
+
+	{ L("years"),		&attr_cast_time_res_year },
+	{ L("y"),		&attr_cast_time_res_year },
+
+};
+static size_t xlat_time_precision_table_len = NUM_ELEMENTS(xlat_time_precision_table);
+
+fr_dict_attr_t const *xlat_time_res_attr(char const *res)
+{
+	fr_dict_attr_t const **da_p;
+
+	da_p = fr_table_value_by_str(xlat_time_precision_table, res, NULL);
+	if (!da_p) return NULL;
+
+	return *da_p;
+}
 
 static ssize_t xlat_eval_sync(TALLOC_CTX *ctx, char **out, request_t *request, xlat_exp_head_t const * const head,
 			      xlat_escape_legacy_t escape, void  const *escape_ctx);
@@ -82,7 +158,7 @@ static fr_slen_t xlat_fmt_print(fr_sbuff_t *out, xlat_exp_t const *node)
 	case XLAT_BOX:
 	case XLAT_GROUP:
 		fr_assert(node->fmt != NULL);
-		return fr_sbuff_in_strcpy(out, node->fmt);
+		return fr_sbuff_in_sprintf(out, "%pV", fr_box_strvalue_buffer(node->fmt));
 
 	case XLAT_ONE_LETTER:
 		fr_assert(node->fmt != NULL);
@@ -93,7 +169,7 @@ static fr_slen_t xlat_fmt_print(fr_sbuff_t *out, xlat_exp_t const *node)
 		if (tmpl_is_attr(node->vpt) && (node->fmt[0] == '&')) {
 			return fr_sbuff_in_strcpy(out, node->fmt);
 		} else {
-			return fr_sbuff_in_sprintf(out, "%%{%s}", node->fmt);
+			return fr_sbuff_in_sprintf(out, "%%{%pV}", fr_box_strvalue_buffer(node->fmt));
 		}
 
 	case XLAT_VIRTUAL:
@@ -352,7 +428,6 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, fr_value_box_list_t *list,
 	/*
 	 *	xlat takes all input as a single vb.
 	 */
-	case XLAT_INPUT_MONO:
 	case XLAT_INPUT_ARGS:
 		vb = fr_value_box_list_head(list);
 		while (arg_p->type != FR_TYPE_NULL) {
@@ -402,7 +477,7 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, fr_value_box_list_t *list,
 				switch (arg_p->variadic) {
 				case XLAT_ARG_VARIADIC_EMPTY_SQUASH:
 					fr_value_box_list_talloc_free_head(list);
-					continue;
+					goto do_next;
 
 				case XLAT_ARG_VARIADIC_EMPTY_KEEP:
 					goto empty_ok;
@@ -940,12 +1015,21 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 		case XLAT_ACTION_DONE:				/* Process the result */
 			fr_dcursor_next(out);
-			REXDENT();
-			xlat_debug_log_result(request, *in, fr_dcursor_current(out));
-			if (!xlat_process_return(request, node->call.func,
-						 (fr_value_box_list_t *)out->dlist,
-						 fr_dcursor_current(out))) return XLAT_ACTION_FAIL;
-			RINDENT();
+
+			/*
+			 *	Don't print out results if there are no results.
+			 */
+			if (!fr_type_is_void(node->call.func->return_type)) {
+				REXDENT();
+				xlat_debug_log_result(request, *in, fr_dcursor_current(out));
+				if (!xlat_process_return(request, node->call.func,
+							 (fr_value_box_list_t *)out->dlist,
+							 fr_dcursor_current(out))) {
+					RINDENT();
+					return XLAT_ACTION_FAIL;
+				}
+				RINDENT();
+			}
 			break;
 		}
 	}

@@ -255,7 +255,7 @@ static xlat_arg_parser_t const redis_remap_xlat_args[] = {
 /** Force a redis cluster remap
  *
 @verbatim
-%{redis.remap:<redis server ip>:<redis server port>}
+%redis.remap(<redis server ip>:<redis server port>)
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -264,7 +264,7 @@ static xlat_action_t redis_remap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				      xlat_ctx_t const *xctx,
 				      request_t *request, fr_value_box_list_t *in)
 {
-	rlm_redis_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_redis_t);
+	rlm_redis_t const		*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_redis_t);
 
 	fr_socket_t			node_addr;
 	fr_pool_t			*pool;
@@ -326,7 +326,7 @@ static xlat_action_t redis_node_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				     xlat_ctx_t const *xctx,
 				     request_t *request, fr_value_box_list_t *in)
 {
-	rlm_redis_t const			*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_redis_t);
+	rlm_redis_t const			*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_redis_t);
 
 	fr_redis_cluster_key_slot_t const	*key_slot;
 	fr_redis_cluster_node_t const		*node;
@@ -380,7 +380,7 @@ static xlat_action_t redis_lua_func_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					 xlat_ctx_t const *xctx,
 					 request_t *request, fr_value_box_list_t *in)
 {
-	rlm_redis_t			*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_redis_t);
+	rlm_redis_t			*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_redis_t);
 	redis_lua_func_inst_t const	*xlat_inst = talloc_get_type_abort_const(xctx->inst, redis_lua_func_inst_t);
 	redis_lua_func_t		*func = xlat_inst->func;
 
@@ -590,7 +590,7 @@ static xlat_action_t redis_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				xlat_ctx_t const *xctx,
 				request_t *request, fr_value_box_list_t *in)
 {
-	rlm_redis_t const	*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_redis_t);
+	rlm_redis_t const	*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_redis_t);
 	xlat_action_t		action = XLAT_ACTION_DONE;
 	fr_redis_conn_t		*conn;
 
@@ -777,11 +777,11 @@ finish:
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_redis_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_redis_t);
+	rlm_redis_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_redis_t);
 	fr_socket_t *nodes;
 	int ret, i;
 
-	inst->cluster = fr_redis_cluster_alloc(inst, mctx->inst->conf, &inst->conf, true, NULL, NULL, NULL);
+	inst->cluster = fr_redis_cluster_alloc(inst, mctx->mi->conf, &inst->conf, true, NULL, NULL, NULL);
 	if (!inst->cluster) return -1;
 
 	/*
@@ -860,19 +860,19 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_redis_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_redis_t);
-	xlat_t		*xlat;
+	rlm_redis_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_redis_t);
+	xlat_t			*xlat;
 
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, redis_xlat, FR_TYPE_VOID);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, redis_xlat, FR_TYPE_VOID);
 	xlat_func_args_set(xlat, redis_args);
 
 	/*
 	 *	%redis.node(<key>[, idx])
 	 */
-	if (unlikely((xlat = xlat_func_register_module(inst, mctx, "node", redis_node_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	if (unlikely((xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "node", redis_node_xlat, FR_TYPE_STRING)) == NULL)) return -1;
 	xlat_func_args_set(xlat, redis_node_xlat_args);
 
-	if (unlikely((xlat = xlat_func_register_module(inst, mctx, "remap", redis_remap_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	if (unlikely((xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "remap", redis_remap_xlat, FR_TYPE_STRING)) == NULL)) return -1;
 	xlat_func_args_set(xlat, redis_remap_xlat_args);
 
 	/*
@@ -880,7 +880,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	 *	that'll call that function specifically.
 	 */
 	talloc_foreach(inst->lua.funcs, func) {
-		if (unlikely((xlat = xlat_func_register_module(inst, mctx, func->name, redis_lua_func_xlat, FR_TYPE_VOID)) == NULL)) return -1;
+		if (unlikely((xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, func->name, redis_lua_func_xlat, FR_TYPE_VOID)) == NULL)) return -1;
 		xlat_func_args_set(xlat, redis_lua_func_args);
 		xlat_func_instantiate_set(xlat, redis_lua_func_instantiate, redis_lua_func_inst_t, NULL, func);
 	}
@@ -900,7 +900,6 @@ module_rlm_t rlm_redis = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "redis",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_redis_t),
 		.config		= module_config,
 		.onload		= mod_load,

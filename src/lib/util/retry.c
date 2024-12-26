@@ -33,7 +33,7 @@ RCSID("$Id$")
  * @param now when the retransmission starts
  * @param config the counters to track.  They shouldn't change while the retransmission is happening
  */
-int fr_retry_init(fr_retry_t *r, fr_time_t now, fr_retry_config_t const *config)
+void fr_retry_init(fr_retry_t *r, fr_time_t now, fr_retry_config_t const *config)
 {
 	uint64_t		scale;
 	fr_time_delta_t		rt;
@@ -44,7 +44,33 @@ int fr_retry_init(fr_retry_t *r, fr_time_t now, fr_retry_config_t const *config)
 	r->config = config;
 	r->count = 1;
 	r->start = now;
+	r->end = fr_time_add(now, config->mrd);
 	r->updated = now;
+	r->state = FR_RETRY_CONTINUE;
+
+	/*
+	 *	Ensure that we always have an end time.
+	 *
+	 *	If there's no MRD. We artificially force the end to a day.  If we're still retrying after
+	 *	that, it's likely good reason to give up.  The rest of the server enforces much shorter
+	 *	lifetimes on requests.
+	 */
+	if (fr_time_cmp(r->start, r->end) == 0) {
+		if (!config->mrc) {
+			r->end = fr_time_add(now, fr_time_delta_from_sec(86400));
+		} else {
+			r->end = fr_time_add(now, fr_time_delta_mul(config->mrt, config->mrc));
+		}
+	}
+
+	/*
+	 *	Only 1 retry, the timeout is MRD, not IRT.
+	 */
+	if (config->mrc == 1) {
+		r->next = r->end;
+		r->rt = config->mrd; /* mostly set for debug messages */
+		return;
+	}
 
 	/*
 	 *	Initial:
@@ -62,7 +88,12 @@ int fr_retry_init(fr_retry_t *r, fr_time_t now, fr_retry_config_t const *config)
 	r->rt = rt;
 	r->next = fr_time_add(now, rt);
 
-	return 0;
+	/*
+	 *	Cap the "next" timer at the end.
+	 */
+	if (fr_time_cmp(r->next, r->end) > 0) {
+		r->next = r->end;
+	}
 }
 
 /** Initialize a retransmission counter
@@ -90,20 +121,29 @@ fr_retry_state_t fr_retry_next(fr_retry_t *r, fr_time_t now)
 	 *	We retried too many times.  Fail.
 	 */
 	if (r->config->mrc && (r->count > r->config->mrc)) {
+		/*
+		 *	A count of 1 is really a simple duration.
+		 */
+		if (r->config->mrc == 1) {
+			r->state = FR_RETRY_MRD;
+			return FR_RETRY_MRD;
+		}
+
+		r->state = FR_RETRY_MRC;
 		return FR_RETRY_MRC;
 	}
 
 redo:
 	/*
-	 *	Cap delay at MRD
+	 *	Cap delay at the end.
+	 *
+	 *	Note that this code can still return MRD, even if MRD
+	 *	wasn't set.  The initialization function above
+	 *	artificially caps MRD at one day.
 	 */
-	if (fr_time_delta_ispos(r->config->mrd)) {
-		fr_time_t end;
-
-		end = fr_time_add(r->start, r->config->mrd);
-		if (fr_time_gt(now, end)) {
-			return FR_RETRY_MRD;
-		}
+	if (fr_time_cmp(now, r->end) >= 0) {
+		r->state = FR_RETRY_MRD;
+		return FR_RETRY_MRD;
 	}
 
 	/*
@@ -161,6 +201,13 @@ redo:
 	 *	it, and go to the next one.
 	 */
 	if (fr_time_lt(fr_time_add(r->next, fr_time_delta_wrap((fr_time_delta_unwrap(rt) / 2))), now)) goto redo;
+
+	/*
+	 *	Cap the "next" timer at when we stop sending.
+	 */
+	if (fr_time_cmp(r->next, r->end) > 0) {
+		r->next = r->end;
+	}
 
 	return FR_RETRY_CONTINUE;
 }

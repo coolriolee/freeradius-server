@@ -73,7 +73,10 @@ static ssize_t internal_encode(fr_dbuff_t *dbuff,
 	 *	Silently skip name only attributes if we're writing
 	 *	to a database or cache.
 	 */
-	if (!our_encode_ctx->allow_name_only && vp->da->flags.name_only) return 0;
+	if (!our_encode_ctx->allow_name_only && vp->da->flags.name_only) {
+		fr_dcursor_next(cursor);
+		return 0;
+	}
 
 	FR_PROTO_STACK_PRINT(da_stack, depth);
 
@@ -136,7 +139,7 @@ static ssize_t internal_encode(fr_dbuff_t *dbuff,
 	value_dbuff = FR_DBUFF_BIND_CURRENT(&work_dbuff);
 	fr_dbuff_marker(&value_field, &value_dbuff);
 
-	switch (vp->vp_type) {
+	switch (da->type) {
 	case FR_TYPE_LEAF:
 		slen = fr_value_box_to_network(&value_dbuff, &vp->data);
 		if (slen < 0) return PAIR_ENCODE_FATAL_ERROR;
@@ -159,9 +162,6 @@ static ssize_t internal_encode(fr_dbuff_t *dbuff,
 	 */
 	case FR_TYPE_VSA:
 	case FR_TYPE_VENDOR:
-		slen = internal_encode(&value_dbuff, da_stack, depth + 1, cursor, encode_ctx);
-		if (slen < 0) return slen;
-		break;
 
 	/*
 	 *	Children of TLVs are encoded in the context

@@ -77,6 +77,10 @@ This configuration option should only be used when the SMTP server being contact
 is not known ahead of time (using a URL from an external source), and/or the CA used
 to sign the SMTP server certificate is unknown.
 
+If not set, then whatever libcurl has as its default will be used, which typically
+will be the operating system's set of trusted CAs.  This will be visible in the debug
+output when FreeRADIUS starts.
+
 
 
 private_key_file:: PEM formatted file containing the private key for the specified `certificate_file`
@@ -172,6 +176,16 @@ https://ec.haxx.se/cmdline/cmdline-urls
 
 timeout:: How long the module will wait before giving up on the response
 from the SMTP server.
+
+
+
+username_attribute:: Which attribute in the request should be used as
+the user's username when performing SMTP authentication.
+
+
+
+password_attribute:: Which attribute in the request should be used as
+the user's password when performing SMTP authentication.
 
 
 
@@ -309,6 +323,8 @@ smtp {
 	}
 	uri = "smtp://192.0.20.1/"
 	timeout = 5s
+#	username_attribute = &User-Name
+#	password_attribute = &User-Password
 #	username = "user"
 #	password = "secret"
 	template_directory = raddb/mods_config/smtp

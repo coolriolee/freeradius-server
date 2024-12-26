@@ -79,7 +79,7 @@ typedef struct {
 /*
  *	Debug the packet if requested.
  */
-static void bfd_packet_debug(request_t *request, fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
+static void bfd_packet_debug(request_t *request, fr_packet_t *packet, fr_pair_list_t *list, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];
@@ -231,7 +231,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_bfd_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_bfd_t);
 	fr_assert(PROCESS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "bfd";
@@ -272,15 +272,13 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
  */
 #define SEND_RECV(_x, _y) \
 	{ \
-		.name = "recv", \
-		.name2 = _x, \
-		.component = MOD_POST_AUTH, \
+		.section = SECTION_NAME("recv", _x), \
+		.actions = &mod_actions_postauth, \
 		.offset = PROCESS_CONF_OFFSET(recv_ ## _y), \
 	}, \
 	{ \
-		.name = "send", \
-		.name2 = _x, \
-		.component = MOD_POST_AUTH, \
+		.section = SECTION_NAME("send", _x), \
+		.actions = &mod_actions_postauth, \
 		.offset = PROCESS_CONF_OFFSET(send_ ## _y), \
 	}
 

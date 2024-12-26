@@ -29,11 +29,12 @@ The following is a list of protocols currently supported in the
 dictionaries.  It is here for informational purposes only.
 
 ```
-git grep -h '^PROTOCOL' | sort -nk 3
+git grep -E -h '^(BEGIN )?PROTOCOL' | sort -nk 3
 ```
 
 ## Current Protocols
 
+```
 PROTOCOL        RADIUS          1
 PROTOCOL        DHCPv4          2
 PROTOCOL        DHCPv6          3
@@ -51,3 +52,4 @@ PROTOCOL        EAP-SIM         101
 PROTOCOL        EAP-AKA         102
 PROTOCOL        EAP-FAST         103
 PROTOCOL        Control         255
+```

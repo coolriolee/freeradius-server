@@ -24,6 +24,7 @@
 
 #include <freeradius-devel/bio/bio_priv.h>
 #include <freeradius-devel/bio/null.h>
+#include <freeradius-devel/util/syserror.h>
 
 #ifndef NDEBUG
 /** Free this bio.
@@ -41,14 +42,6 @@ int fr_bio_destructor(fr_bio_t *bio)
 	return 0;
 }
 #endif
-
-/** Always returns EOF on fr_bio_read()
- *
- */
-ssize_t fr_bio_eof_read(UNUSED fr_bio_t *bio, UNUSED void *packet_ctx, UNUSED void *buffer, UNUSED size_t size)
-{
-	return fr_bio_error(EOF);
-}
 
 /** Internal bio function which just reads from the "next" bio.
  *
@@ -68,8 +61,8 @@ ssize_t fr_bio_next_read(fr_bio_t *bio, void *packet_ctx, void *buffer, size_t s
 
 	if (rcode == fr_bio_error(IO_WOULD_BLOCK)) return rcode;
 
-	bio->read = fr_bio_eof_read;
-	bio->write = fr_bio_null_write;
+	bio->read = fr_bio_fail_read;
+	bio->write = fr_bio_fail_write;
 	return rcode;
 }
 
@@ -91,8 +84,8 @@ ssize_t fr_bio_next_write(fr_bio_t *bio, void *packet_ctx, void const *buffer, s
 
 	if (rcode == fr_bio_error(IO_WOULD_BLOCK)) return rcode;
 
-	bio->read = fr_bio_eof_read;
-	bio->write = fr_bio_null_write;
+	bio->read = fr_bio_fail_read;
+	bio->write = fr_bio_fail_write;
 	return rcode;
 }
 
@@ -126,8 +119,8 @@ int fr_bio_free(fr_bio_t *bio)
 		next->entry.prev = NULL;
 		if (fr_bio_free(next) < 0) {
 			next->entry.prev = &bio->entry;
-			bio->read = fr_bio_eof_read;
-			bio->write = fr_bio_null_write;
+			bio->read = fr_bio_fail_read;
+			bio->write = fr_bio_fail_write;
 			return -1;
 		}
 
@@ -142,39 +135,46 @@ int fr_bio_free(fr_bio_t *bio)
 
 /** Shut down a set of BIOs
  *
- *  Must be called from the top-most bio.
- *
- *  Will shut down the bios from the bottom-up.
- *
- *  The shutdown function MUST be callable multiple times without breaking.
+ *  We shut down the BIOs from the top to the bottom.  This gives the TLS BIO an opportunity to
+ *  call the SSL_shutdown() routine, which should then write to the FD BIO.
  */
 int fr_bio_shutdown(fr_bio_t *bio)
 {
-	fr_bio_t *last;
+	fr_bio_t *this, *first;
+	fr_bio_common_t *my;
 
 	fr_assert(!fr_bio_prev(bio));
 
 	/*
-	 *	Find the last bio in the chain.
+	 *	Find the first bio in the chain.
 	 */
-	for (last = bio; fr_bio_next(last) != NULL; last = fr_bio_next(last)) {
+	for (this = bio; fr_bio_prev(this) != NULL; this = fr_bio_prev(this)) {
 		/* nothing */
+	}
+	first = this;
+
+	/*
+	 *	Walk back down the chain, calling the shutdown functions.
+	 */
+	for (/* nothing */; this != NULL; this = fr_bio_next(this)) {
+		my = (fr_bio_common_t *) this;
+
+		if (!my->priv_cb.shutdown) continue;
+
+		/*
+		 *	The EOF handler said it's NOT at EOF, so we stop processing here.
+		 */
+		my->priv_cb.shutdown(&my->bio);
+		my->priv_cb.shutdown = NULL;
 	}
 
 	/*
-	 *	Walk back up the chain, calling the shutdown functions.
+	 *	Call the application shutdown routine
 	 */
-	do {
-		int rcode;
-		fr_bio_common_t *my = (fr_bio_common_t *) last;
+	my = (fr_bio_common_t *) first;
 
-		/*
-		 *	Call user shutdown before the bio shutdown.
-		 */
-		if (my->cb.shutdown && ((rcode = my->cb.shutdown(last)) < 0)) return rcode;
-
-		last = fr_bio_prev(last);
-	} while (last);
+	if (my->cb.shutdown) my->cb.shutdown(first);
+	my->cb.shutdown = NULL;
 
 	return 0;
 }
@@ -191,4 +191,140 @@ int fr_bio_shutdown_intermediate(fr_bio_t *bio)
 	}
 
 	return fr_bio_shutdown(bio);
+}
+
+char const *fr_bio_strerror(ssize_t error)
+{
+	switch (error) {
+	case fr_bio_error(NONE):
+		return "";
+
+	case fr_bio_error(IO_WOULD_BLOCK):
+		return "IO operation would block";
+
+	case fr_bio_error(IO):
+		return fr_syserror(errno);
+
+	case fr_bio_error(GENERIC):
+		return fr_strerror();
+
+	case fr_bio_error(VERIFY):
+		return "Packet fails verification";
+
+	case fr_bio_error(BUFFER_FULL):
+		return "Output buffer is full";
+
+	case fr_bio_error(BUFFER_TOO_SMALL):
+		return "Output buffer is too small to cache the data";
+
+	default:
+		return "<unknown>";
+	}
+}
+
+void fr_bio_cb_set(fr_bio_t *bio, fr_bio_cb_funcs_t const *cb)
+{
+	fr_bio_common_t *my = (fr_bio_common_t *) bio;
+
+	if (!cb) {
+		memset(&my->cb, 0, sizeof(my->cb));
+	} else {
+		my->cb = *cb;
+	}
+}
+
+/** Internal BIO function to run EOF callbacks.
+ *
+ *  When a BIO hits EOF, it MUST call this function.  This function will take care of changing the read()
+ *  function to return nothing.  It will also take care of walking back up the hierarchy, and calling any
+ *  BIO EOF callbacks.
+ *
+ *  Once all of the BIOs have been marked as blocked, it will call the application EOF callback.
+ */
+void fr_bio_eof(fr_bio_t *bio)
+{
+	fr_bio_common_t *this = (fr_bio_common_t *) bio;
+
+	/*
+	 *	This BIO is at EOF.  So we can't call read() any more.
+	 */
+	this->bio.read = fr_bio_null_read;
+
+	while (true) {
+		fr_bio_common_t *prev = (fr_bio_common_t *) fr_bio_prev(&this->bio);
+
+		/*
+		 *	There are no more BIOs. Tell the application that the entire BIO chain is at EOF.
+		 */
+		if (!prev) {
+			if (this->cb.eof) {
+				this->cb.eof(&this->bio);
+				this->cb.eof = NULL;
+			}
+			break;
+		}
+
+		/*
+		 *	Go to the previous BIO.  If it doesn't have an EOF handler, then keep going back up
+		 *	the chain until we're at the top.
+		 */
+		this = prev;
+		if (!this->priv_cb.eof) continue;
+
+		/*
+		 *	The EOF handler said it's NOT at EOF, so we stop processing here.
+		 */
+		if (this->priv_cb.eof((fr_bio_t *) this) == 0) break;
+
+		/*
+		 *	Don't run the EOF callback multiple times, and continue the loop.
+		 */
+		this->priv_cb.eof = NULL;
+	}
+}
+
+/** Internal BIO function to tell all BIOs that it's blocked.
+ *
+ *  When a BIO blocks on write, it MUST call this function.  This function will take care of walking back up
+ *  the hierarchy, and calling any write_blocked callbacks.
+ *
+ *  Once all of the BIOs have been marked as blocked, it will call the application write_blocked callback.
+ */
+int fr_bio_write_blocked(fr_bio_t *bio)
+{
+	fr_bio_common_t *this = (fr_bio_common_t *) bio;
+	int is_blocked = 1;
+
+	while (true) {
+		fr_bio_common_t *prev = (fr_bio_common_t *) fr_bio_prev(&this->bio);
+		int rcode;
+
+		/*
+		 *	There are no more BIOs. Tell the application that the entire BIO chain is blocked.
+		 */
+		if (!prev) {
+			if (this->cb.write_blocked) {
+				rcode = this->cb.write_blocked(&this->bio);
+				if (rcode < 0) return rcode;
+				is_blocked &= (rcode == 1);
+			}
+			break;
+		}
+
+		/*
+		 *	Go to the previous BIO.  If it doesn't have a write_blocked handler, then keep going
+		 *	back up the chain until we're at the top.
+		 */
+		this = prev;
+		if (!this->priv_cb.write_blocked) continue;
+
+		/*
+		 *	The EOF handler said it's NOT at EOF, so we stop processing here.
+		 */
+		rcode = this->priv_cb.write_blocked((fr_bio_t *) this);
+		if (rcode < 0) return rcode;
+		is_blocked &= (rcode == 1);
+	}
+
+	return is_blocked;
 }

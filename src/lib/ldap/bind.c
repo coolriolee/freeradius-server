@@ -141,7 +141,7 @@ static void _ldap_bind_io_write(fr_event_list_t *el, int fd, UNUSED int flags, v
 			return;
 		}
 
-		ret = fr_event_fd_insert(bind_ctx, el, fd,
+		ret = fr_event_fd_insert(bind_ctx, NULL, el, fd,
 					 NULL,
 					 _ldap_bind_io_write,	/* We'll be called again when the conn is open */
 					 _ldap_bind_io_error,
@@ -155,7 +155,7 @@ static void _ldap_bind_io_write(fr_event_list_t *el, int fd, UNUSED int flags, v
 			if ((ret != LDAP_OPT_SUCCESS) || (fd < 0)) goto error;
 		}
 		c->fd = fd;
-		ret = fr_event_fd_insert(bind_ctx, el, fd,
+		ret = fr_event_fd_insert(bind_ctx, NULL, el, fd,
 					 _ldap_bind_io_read,
 					 NULL,
 					 _ldap_bind_io_error,
@@ -212,7 +212,7 @@ int fr_ldap_bind_async(fr_ldap_connection_t *c,
 	if ((ldap_get_option(c->handle, LDAP_OPT_DESC, &fd) == LDAP_SUCCESS) && (fd >= 0)) {
 		int ret;
 
-		ret = fr_event_fd_insert(bind_ctx, el, fd,
+		ret = fr_event_fd_insert(bind_ctx, NULL, el, fd,
 					 NULL,
 					 _ldap_bind_io_write,
 					 _ldap_bind_io_error,
@@ -283,7 +283,7 @@ static unlang_action_t ldap_async_auth_bind_results(rlm_rcode_t *p_result, UNUSE
 		/*
 		 *	Bind auth ctx is freed by trunk request free.
 		 */
-		fr_trunk_request_signal_complete(bind_auth_ctx->treq);
+		trunk_request_signal_complete(bind_auth_ctx->treq);
 	} else {
 		/*
 		 *	If there is no trunk request, the request failed, and we need to free the ctx
@@ -303,7 +303,7 @@ static void ldap_async_auth_bind_cancel(request_t *request, UNUSED fr_signal_t a
 
 	RWARN("Cancelling bind auth");
 	if (bind_auth_ctx->msgid > 0) fr_rb_remove(bind_auth_ctx->thread->binds, bind_auth_ctx);
-	fr_trunk_request_signal_cancel(bind_auth_ctx->treq);
+	trunk_request_signal_cancel(bind_auth_ctx->treq);
 }
 
 /** Initiate an async LDAP bind for authentication
@@ -319,16 +319,16 @@ static void ldap_async_auth_bind_cancel(request_t *request, UNUSED fr_signal_t a
 unlang_action_t fr_ldap_bind_auth_async(request_t *request, fr_ldap_thread_t *thread, char const *bind_dn, char const *password)
 {
 	fr_ldap_bind_auth_ctx_t	*bind_auth_ctx;
-	fr_trunk_request_t	*treq;
+	trunk_request_t	*treq;
 	fr_ldap_thread_trunk_t	*ttrunk = fr_thread_ldap_bind_trunk_get(thread);
-	fr_trunk_enqueue_t	ret;
+	trunk_enqueue_t	ret;
 
 	if (!ttrunk) {
 		ERROR("Failed to get trunk connection for LDAP bind");
 		return UNLANG_ACTION_FAIL;
 	}
 
-	treq = fr_trunk_request_alloc(ttrunk->trunk, request);
+	treq = trunk_request_alloc(ttrunk->trunk, request);
 	if (!treq) {
 		ERROR ("Failed to allocate trunk request for LDAP bind");
 		return UNLANG_ACTION_FAIL;
@@ -348,16 +348,16 @@ unlang_action_t fr_ldap_bind_auth_async(request_t *request, fr_ldap_thread_t *th
 		.password = password
 	};
 
-	ret = fr_trunk_request_enqueue(&bind_auth_ctx->treq, ttrunk->trunk, request, bind_auth_ctx, NULL);
+	ret = trunk_request_enqueue(&bind_auth_ctx->treq, ttrunk->trunk, request, bind_auth_ctx, NULL);
 
 	switch (ret) {
-	case FR_TRUNK_ENQUEUE_OK:
-	case FR_TRUNK_ENQUEUE_IN_BACKLOG:
+	case TRUNK_ENQUEUE_OK:
+	case TRUNK_ENQUEUE_IN_BACKLOG:
 		break;
 
 	default:
 		ERROR("Failed to enqueue bind request");
-		fr_trunk_request_free(&treq);
+		trunk_request_free(&treq);
 		return UNLANG_ACTION_FAIL;
 	}
 

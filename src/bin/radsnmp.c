@@ -162,11 +162,11 @@ static void rs_signal_stop(UNUSED int sig)
  * @param fd the request will be sent on.
  * @return new request.
  */
-static fr_radius_packet_t *radsnmp_alloc(radsnmp_conf_t *conf, int fd)
+static fr_packet_t *radsnmp_alloc(radsnmp_conf_t *conf, int fd)
 {
-	fr_radius_packet_t *packet;
+	fr_packet_t *packet;
 
-	packet = fr_radius_packet_alloc(conf, true);
+	packet = fr_packet_alloc(conf, true);
 
 	packet->code = conf->code;
 
@@ -654,7 +654,7 @@ do { \
 
 		fr_dcursor_t		cursor;
 		fr_pair_t		*vp;
-		fr_radius_packet_t	*packet;
+		fr_packet_t	*packet;
 		fr_pair_list_t		request_vps;
 
 		/*
@@ -773,7 +773,7 @@ do { \
 		 *	Send the packet
 		 */
 		{
-			fr_radius_packet_t	*reply = NULL;
+			fr_packet_t	*reply = NULL;
 			fr_pair_list_t		reply_vps;
 			ssize_t			rcode;
 
@@ -786,7 +786,7 @@ do { \
 			/*
 			 *	Print the attributes we're about to send
 			 */
-			fr_packet_log(&default_log, packet, &reply_vps, false);
+			fr_radius_packet_log(&default_log, packet, &reply_vps, false);
 
 			FD_ZERO(&set); /* clear the set */
 			FD_SET(fd, &set);
@@ -797,7 +797,7 @@ do { \
 			 *	next call.
 			 */
 			for (i = 0; i < conf->retries; i++) {
-				rcode = fr_radius_packet_send(packet, &request_vps, NULL, conf->secret);
+				rcode = fr_packet_send(packet, &request_vps, NULL, conf->secret);
 				if (rcode < 0) {
 					ERROR("Failed sending: %s", fr_syserror(errno));
 					return EXIT_FAILURE;
@@ -814,7 +814,7 @@ do { \
 					continue;	/* Timeout */
 
 				case 1:
-					reply = fr_radius_packet_recv(packet, packet->socket.fd, UDP_FLAGS_NONE,
+					reply = fr_packet_recv(packet, packet->socket.fd, UDP_FLAGS_NONE,
 								      RADIUS_MAX_ATTRIBUTES, false);
 					if (!reply) {
 						fr_perror("Failed receiving reply");
@@ -847,7 +847,7 @@ do { \
 			/*
 			 *	Print the attributes we received in response
 			 */
-			fr_packet_log(&default_log, reply, &reply_vps, true);
+			fr_radius_packet_log(&default_log, reply, &reply_vps, true);
 
 			switch (command) {
 			case RADSNMP_GET:

@@ -22,6 +22,7 @@ SOURCES	:= \
 	map_async.c \
 	map_proc.c \
 	module.c \
+	module_method.c \
 	module_rlm.c \
 	packet.c \
 	paircmp.c \
@@ -32,12 +33,14 @@ SOURCES	:= \
 	regex.c \
 	request.c \
 	request_data.c \
+	section.c \
 	snmp.c \
 	state.c \
 	stats.c \
 	tmpl_dcursor.c \
 	tmpl_eval.c \
 	tmpl_tokenize.c \
+	time_tracking.c \
 	trigger.c \
 	trunk.c \
 	users_file.c \
@@ -54,7 +57,9 @@ ifneq ($(OPENSSL_LIBS),)
 TGT_PREREQS	:= libfreeradius-tls$(L)
 endif
 
-TGT_PREREQS	+= libfreeradius-util$(L)
+# RADIUS linkage is only required because we don't have a protocol agnostic
+# way of building clients.  Once that's fixed we can remove the dependency.
+TGT_PREREQS	+= libfreeradius-util$(L) libfreeradius-radius$(L)
 
 ifneq ($(MAKECMDGOALS),scan)
 SRC_CFLAGS	+= -DBUILT_WITH_CPPFLAGS=\"$(CPPFLAGS)\" -DBUILT_WITH_CFLAGS=\"$(CFLAGS)\" -DBUILT_WITH_LDFLAGS=\"$(LDFLAGS)\" -DBUILT_WITH_LIBS=\"$(LIBS)\"

@@ -26,17 +26,12 @@
 #include <freeradius-devel/util/dcursor.h>
 #include <freeradius-devel/util/value.h>
 #include <freeradius-devel/util/pair.h>
-#include <freeradius-devel/server/request.h>
 
 /** @name Encoder errors
  * @{
  */
 
-/** Encoder skipped encoding an attribute
- */
-#define PAIR_ENCODE_SKIPPED	SSIZE_MIN + 1
-
-/** Skipped encoding attribute
+/** Fatal encoding error
  */
 #define PAIR_ENCODE_FATAL_ERROR	SSIZE_MIN
 
@@ -108,7 +103,6 @@ static inline bool fr_pair_encode_is_error(ssize_t slen)
  * @param[in] cursor		Cursor containing the list of attributes to process.
  * @param[in] encode_ctx	Any encoder specific data such as secrets or configurables.
  * @return
- *	- PAIR_ENCODE_SKIPPED - The current pair is not valid for encoding and should be skipped.
  *	- PAIR_ENCODE_FATAL_ERROR - Encoding failed in a fatal way. Encoding the packet should be
  *	  aborted in its entirety.
  *	- <0 - The encoder ran out of space and returned the number of bytes as a negative

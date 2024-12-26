@@ -31,8 +31,6 @@ RCSID("$Id$")
 
 #include <freeradius-devel/util/conf.h>
 
-#include <ctype.h>
-
 #ifdef HAVE_GETOPT_H
 #  include <getopt.h>
 #endif
@@ -97,6 +95,8 @@ static int process_file(char const *filename)
 		return EXIT_FAILURE;
 	}
 	config->root_cs = cf_section_alloc(config, NULL, "main", NULL);
+	cf_section_set_unlang(config->root_cs);
+
 	if ((cf_file_read(config->root_cs, filename) < 0) || (cf_section_pass2(config->root_cs) < 0)) {
 		fprintf(stderr, "unit_test_map: Failed parsing %s\n", filename);
 		return EXIT_FAILURE;
@@ -279,8 +279,6 @@ cleanup:
 	 *	scheduler.
 	 */
 	fr_atexit_thread_trigger_all();
-
-	request_global_free();
 
 	/*
 	 *	Free any autoload dictionaries

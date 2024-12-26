@@ -122,12 +122,10 @@ static fr_table_num_sorted_t const pbkdf2_crypt_names[] = {
 	{ L("HMACSHA2+256"),	FR_SSHA2_256 },
 	{ L("HMACSHA2+384"),	FR_SSHA2_384 },
 	{ L("HMACSHA2+512"),	FR_SSHA2_512 },
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	{ L("HMACSHA3+224"),	FR_SSHA3_224 },
 	{ L("HMACSHA3+256"),	FR_SSHA3_256 },
 	{ L("HMACSHA3+384"),	FR_SSHA3_384 },
 	{ L("HMACSHA3+512"),	FR_SSHA3_512 },
-#  endif
 };
 static size_t pbkdf2_crypt_names_len = NUM_ELEMENTS(pbkdf2_crypt_names);
 
@@ -149,11 +147,11 @@ static fr_dict_attr_t const **pap_alloweds;
  */
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_pap_t const 	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_pap_t);
+	rlm_pap_t const 	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_pap_t);
 	pap_call_env_t		*env_data = talloc_get_type_abort(mctx->env_data, pap_call_env_t);
 
 	if (fr_pair_find_by_da(&request->control_pairs, NULL, attr_auth_type) != NULL) {
-		RDEBUG3("Auth-Type is already set.  Not setting 'Auth-Type := %s'", mctx->inst->name);
+		RDEBUG3("Auth-Type is already set.  Not setting 'Auth-Type := %s'", mctx->mi->name);
 		RETURN_MODULE_NOOP;
 	}
 
@@ -164,7 +162,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 
 	if (!inst->auth_type) {
 		WARN("No 'authenticate %s {...}' section or 'Auth-Type = %s' set.  Cannot setup PAP authentication.",
-		     mctx->inst->name, mctx->inst->name);
+		     mctx->mi->name, mctx->mi->name);
 		RETURN_MODULE_NOOP;
 	}
 
@@ -431,7 +429,6 @@ PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha2_256, "SSHA2-256", EVP_sha
 PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha2_384, "SSHA2-384", EVP_sha384())
 PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha2_512, "SSHA2-512", EVP_sha512())
 
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 PAP_AUTH_EVP_MD(pap_auth_evp_md, pap_auth_sha3_224, "SHA3-224", EVP_sha3_224())
 PAP_AUTH_EVP_MD(pap_auth_evp_md, pap_auth_sha3_256, "SHA3-256", EVP_sha3_256())
 PAP_AUTH_EVP_MD(pap_auth_evp_md, pap_auth_sha3_384, "SHA3-384", EVP_sha3_384())
@@ -440,7 +437,6 @@ PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha3_224, "SSHA3-224", EVP_sha
 PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha3_256, "SSHA3-256", EVP_sha3_256())
 PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha3_384, "SSHA3-384", EVP_sha3_384())
 PAP_AUTH_EVP_MD(pap_auth_evp_md_salted, pap_auth_ssha3_512, "SSHA3-512", EVP_sha3_512())
-#  endif
 
 /** Validates Crypt::PBKDF2 LDAP format strings
  *
@@ -527,7 +523,6 @@ static inline CC_HINT(nonnull) unlang_action_t pap_auth_pbkdf2_parse(rlm_rcode_t
 		digest_len = SHA512_DIGEST_LENGTH;
 		break;
 
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	case FR_SSHA3_224:
 		evp_md = EVP_sha3_224();
 		digest_len = SHA224_DIGEST_LENGTH;
@@ -547,7 +542,6 @@ static inline CC_HINT(nonnull) unlang_action_t pap_auth_pbkdf2_parse(rlm_rcode_t
 		evp_md = EVP_sha3_512();
 		digest_len = SHA512_DIGEST_LENGTH;
 		break;
-#  endif
 
 	default:
 		REDEBUG("Unknown PBKDF2 hash method \"%.*s\"", (int)(q - p), p);
@@ -572,6 +566,16 @@ static inline CC_HINT(nonnull) unlang_action_t pap_auth_pbkdf2_parse(rlm_rcode_t
 	if (!iter_is_base64) {
 		char iterations_buff[sizeof("4294967295") + 1];
 		char *qq;
+
+		/*
+		 *	While passwords come from "trusted" sources, we don't trust them too much!
+		 */
+		if ((size_t) (q - p) >= sizeof(iterations_buff)) {
+			REMARKER((char const *) p, q - p,
+				 "Password.PBKDF2 iterations field is too large");
+
+			goto finish;
+		}
 
 		strlcpy(iterations_buff, (char const *)p, (q - p) + 1);
 
@@ -879,8 +883,6 @@ static const pap_auth_func_t auth_func_table[] = {
 	[FR_SSHA2_256]	= pap_auth_ssha2_256,
 	[FR_SSHA2_384]	= pap_auth_ssha2_384,
 	[FR_SSHA2_512]	= pap_auth_ssha2_512,
-
-#  if OPENSSL_VERSION_NUMBER >= 0x10101000L
 	[FR_SHA3]	= pap_auth_dummy,
 	[FR_SHA3_224]	= pap_auth_sha3_224,
 	[FR_SHA3_256]	= pap_auth_sha3_256,
@@ -890,7 +892,6 @@ static const pap_auth_func_t auth_func_table[] = {
 	[FR_SSHA3_256]	= pap_auth_ssha3_256,
 	[FR_SSHA3_384]	= pap_auth_ssha3_384,
 	[FR_SSHA3_512]	= pap_auth_ssha3_512,
-#  endif
 #endif	/* HAVE_OPENSSL_EVP_H */
 };
 
@@ -899,7 +900,7 @@ static const pap_auth_func_t auth_func_table[] = {
  */
 static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_pap_t const 	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_pap_t);
+	rlm_pap_t const 	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_pap_t);
 	fr_pair_t		*known_good;
 	rlm_rcode_t		rcode = RLM_MODULE_INVALID;
 	pap_auth_func_t		auth_func;
@@ -975,12 +976,12 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_pap_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_pap_t);
+	rlm_pap_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_pap_t);
 
-	inst->auth_type = fr_dict_enum_by_name(attr_auth_type, mctx->inst->name, -1);
+	inst->auth_type = fr_dict_enum_by_name(attr_auth_type, mctx->mi->name, -1);
 	if (!inst->auth_type) {
 		WARN("Failed to find 'authenticate %s {...}' section.  PAP will likely not work",
-		     mctx->inst->name);
+		     mctx->mi->name);
 	}
 
 	return 0;
@@ -1063,17 +1064,16 @@ module_rlm_t rlm_pap = {
 		.config		= module_config,
 		.instantiate	= mod_instantiate
 	},
-	.method_names = (module_method_name_t[]){
-		/*
-		 *	Hack to support old configurations
-		 */
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize,
-		  .method_env = &pap_method_env		},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			/*
+			 *	Hack to support old configurations
+			 */
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate, .method_env = &pap_method_env },
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY), .method = mod_authorize, .method_env = &pap_method_env },
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_authorize, .method_env = &pap_method_env },
 
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate,
-		  .method_env = &pap_method_env		},
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_authorize,
-		  .method_env = &pap_method_env		},
-		MODULE_NAME_TERMINATOR
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

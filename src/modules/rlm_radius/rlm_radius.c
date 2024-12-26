@@ -26,11 +26,13 @@ RCSID("$Id$")
 
 #include <freeradius-devel/io/application.h>
 #include <freeradius-devel/server/modpriv.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/util/dlist.h>
 
 #include "rlm_radius.h"
 
+static int mode_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 static int type_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 static int status_check_type_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
 static int status_check_update_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
@@ -94,34 +96,70 @@ static conf_parser_t disconnect_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
+static conf_parser_t const transport_config[] = {
+	{ FR_CONF_OFFSET_FLAGS("secret", CONF_FLAG_REQUIRED, rlm_radius_t, secret) },
+
+	CONF_PARSER_TERMINATOR
+};
+
+/*
+ *	We only parse the pool options if we're connected.
+ */
+static conf_parser_t const connected_config[] = {
+	{ FR_CONF_POINTER("status_check", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) status_check_config },
+
+	{ FR_CONF_OFFSET_SUBSECTION("pool", 0, rlm_radius_t, trunk_conf, trunk_config ) },
+
+	{ FR_CONF_POINTER("udp", 0, CONF_FLAG_SUBSECTION | CONF_FLAG_OPTIONAL, NULL), .subcs = (void const *) transport_config },
+
+	{ FR_CONF_POINTER("tcp", 0, CONF_FLAG_SUBSECTION | CONF_FLAG_OPTIONAL, NULL), .subcs = (void const *) transport_config },
+
+	CONF_PARSER_TERMINATOR
+};
+
+/*
+ *	We only parse the pool options if we're connected.
+ */
+static conf_parser_t const pool_config[] = {
+	{ FR_CONF_POINTER("status_check", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) status_check_config },
+
+	{ FR_CONF_OFFSET_SUBSECTION("pool", 0, rlm_radius_t, trunk_conf, trunk_config ) },
+
+	CONF_PARSER_TERMINATOR
+};
 
 /*
  *	A mapping of configuration file names to internal variables.
  */
 static conf_parser_t const module_config[] = {
-	{ FR_CONF_OFFSET_TYPE_FLAGS("transport", FR_TYPE_VOID, 0, rlm_radius_t, io_submodule),
-	  .func = module_rlm_submodule_parse },
+	{ FR_CONF_OFFSET_FLAGS("mode", CONF_FLAG_REQUIRED, rlm_radius_t, mode), .func = mode_parse, .dflt = "proxy" },
+
+	{ FR_CONF_OFFSET_REF(rlm_radius_t, fd_config, fr_bio_fd_client_config) },
 
 	{ FR_CONF_OFFSET_FLAGS("type", CONF_FLAG_NOT_EMPTY | CONF_FLAG_MULTI | CONF_FLAG_REQUIRED, rlm_radius_t, types),
 	  .func = type_parse },
 
-	{ FR_CONF_OFFSET("replicate", rlm_radius_t, replicate) },
+	{ FR_CONF_OFFSET_FLAGS("replicate", CONF_FLAG_DEPRECATED, rlm_radius_t, replicate) },
 
-	{ FR_CONF_OFFSET("synchronous", rlm_radius_t, synchronous) },
+	{ FR_CONF_OFFSET_FLAGS("synchronous", CONF_FLAG_DEPRECATED, rlm_radius_t, synchronous) },
 
-	{ FR_CONF_OFFSET("originate", rlm_radius_t, originate) },
+	{ FR_CONF_OFFSET_FLAGS("originate", CONF_FLAG_DEPRECATED, rlm_radius_t, originate) },
 
-	{ FR_CONF_POINTER("status_check", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) status_check_config },
+	{ FR_CONF_OFFSET("max_packet_size", rlm_radius_t, max_packet_size), .dflt = "4096" },
+	{ FR_CONF_OFFSET("max_send_coalesce", rlm_radius_t, max_send_coalesce), .dflt = "1024" },
 
 	{ FR_CONF_OFFSET("max_attributes", rlm_radius_t, max_attributes), .dflt = STRINGIFY(RADIUS_MAX_ATTRIBUTES) },
+
+	{ FR_CONF_OFFSET("require_message_authenticator", rlm_radius_t, require_message_authenticator),
+	  .func = cf_table_parse_int,
+	  .uctx = &(cf_table_parse_ctx_t){ .table = fr_radius_require_ma_table, .len = &fr_radius_require_ma_table_len },
+	  .dflt = "no" },
 
 	{ FR_CONF_OFFSET("response_window", rlm_radius_t, response_window), .dflt = STRINGIFY(20) },
 
 	{ FR_CONF_OFFSET("zombie_period", rlm_radius_t, zombie_period), .dflt = STRINGIFY(40) },
 
 	{ FR_CONF_OFFSET("revive_interval", rlm_radius_t, revive_interval) },
-
-	{ FR_CONF_OFFSET_SUBSECTION("pool", 0, rlm_radius_t, trunk_conf, fr_trunk_config ) },
 
 	CONF_PARSER_TERMINATOR
 };
@@ -148,14 +186,104 @@ static fr_dict_attr_t const *attr_chap_password;
 static fr_dict_attr_t const *attr_packet_type;
 static fr_dict_attr_t const *attr_proxy_state;
 
+static fr_dict_attr_t const *attr_error_cause;
+static fr_dict_attr_t const *attr_event_timestamp;
+static fr_dict_attr_t const *attr_extended_attribute_1;
+static fr_dict_attr_t const *attr_message_authenticator;
+static fr_dict_attr_t const *attr_eap_message;
+static fr_dict_attr_t const *attr_nas_identifier;
+static fr_dict_attr_t const *attr_original_packet_code;
+static fr_dict_attr_t const *attr_response_length;
+static fr_dict_attr_t const *attr_user_password;
+
 extern fr_dict_attr_autoload_t rlm_radius_dict_attr[];
 fr_dict_attr_autoload_t rlm_radius_dict_attr[] = {
 	{ .out = &attr_chap_challenge, .name = "CHAP-Challenge", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
 	{ .out = &attr_chap_password, .name = "CHAP-Password", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
 	{ .out = &attr_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
 	{ .out = &attr_proxy_state, .name = "Proxy-State", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
+
+	{ .out = &attr_error_cause, .name = "Error-Cause", .type = FR_TYPE_UINT32, .dict = &dict_radius },
+	{ .out = &attr_event_timestamp, .name = "Event-Timestamp", .type = FR_TYPE_DATE, .dict = &dict_radius},
+	{ .out = &attr_extended_attribute_1, .name = "Extended-Attribute-1", .type = FR_TYPE_TLV, .dict = &dict_radius},
+	{ .out = &attr_message_authenticator, .name = "Message-Authenticator", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
+	{ .out = &attr_eap_message, .name = "EAP-Message", .type = FR_TYPE_OCTETS, .dict = &dict_radius},
+	{ .out = &attr_nas_identifier, .name = "NAS-Identifier", .type = FR_TYPE_STRING, .dict = &dict_radius},
+	{ .out = &attr_original_packet_code, .name = "Extended-Attribute-1.Original-Packet-Code", .type = FR_TYPE_UINT32, .dict = &dict_radius},
+	{ .out = &attr_response_length, .name = "Extended-Attribute-1.Response-Length", .type = FR_TYPE_UINT32, .dict = &dict_radius },
+	{ .out = &attr_user_password, .name = "User-Password", .type = FR_TYPE_STRING, .dict = &dict_radius},
+
 	{ NULL }
 };
+
+#include "bio.c"
+
+static fr_table_num_sorted_t mode_names[] = {
+	{ L("client"),		RLM_RADIUS_MODE_CLIENT   	},
+	{ L("dynamic-proxy"),	RLM_RADIUS_MODE_XLAT_PROXY  	},
+	{ L("proxy"),		RLM_RADIUS_MODE_PROXY    	},
+	{ L("replicate"),	RLM_RADIUS_MODE_REPLICATE   	},
+	{ L("unconnected-replicate"),	RLM_RADIUS_MODE_UNCONNECTED_REPLICATE  	},
+};
+static size_t mode_names_len = NUM_ELEMENTS(mode_names);
+
+
+/** Set the mode of operation
+ *
+ * @param[in] ctx	to allocate data in (instance of rlm_radius).
+ * @param[out] out	Where to write the parsed data.
+ * @param[in] parent	Base structure address.
+ * @param[in] ci	#CONF_PAIR specifying the name of the type module.
+ * @param[in] rule	unused.
+ * @return
+ *	- 0 on success.
+ *	- -1 on failure.
+ */
+static int mode_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent,
+		      CONF_ITEM *ci, UNUSED conf_parser_t const *rule)
+{
+	char const		*name = cf_pair_value(cf_item_to_pair(ci));
+	rlm_radius_mode_t	mode;
+	rlm_radius_t		*inst = talloc_get_type_abort(parent, rlm_radius_t);
+	CONF_SECTION		*cs = cf_item_to_section(cf_parent(ci));
+
+	mode = fr_table_value_by_str(mode_names, name, RLM_RADIUS_MODE_INVALID);
+
+	/*
+	 *	Commented out until we upgrade the old configurations.
+	 */
+	if (mode == RLM_RADIUS_MODE_INVALID) {
+		cf_log_err(ci, "Invalid mode name \"%s\"", name);
+		return -1;
+	}
+
+	*(rlm_radius_mode_t *) out = mode;
+
+	/*
+	 *	Normally we want connected sockets, in which case we push additional configuration for
+	 *	connected sockets.
+	 */
+	switch (mode) {
+	default:
+		inst->fd_config.type = FR_BIO_FD_CONNECTED;
+
+		if (cf_section_rules_push(cs, connected_config) < 0) return -1;
+		break;
+
+	case RLM_RADIUS_MODE_XLAT_PROXY:
+		inst->fd_config.type = FR_BIO_FD_UNCONNECTED; /* reset later when the home server is allocated */
+
+		if (cf_section_rules_push(cs, pool_config) < 0) return -1;
+		break;
+
+	case RLM_RADIUS_MODE_UNCONNECTED_REPLICATE:
+		inst->fd_config.type = FR_BIO_FD_UNCONNECTED;
+		break;
+	}
+
+	return 0;
+}
+
 
 /** Set which types of packets we can parse
  *
@@ -212,7 +340,7 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, UNUSED void *parent,
 	 */
 	cf_section_rule_push(cs, &type_interval_config[code]);
 
-	memcpy(out, &code, sizeof(code));
+	*(uint32_t *) out = code;
 
 	return 0;
 }
@@ -330,25 +458,6 @@ static int status_check_update_parse(TALLOC_CTX *ctx, void *out, UNUSED void *pa
 }
 
 
-static void mod_radius_signal(module_ctx_t const *mctx, request_t *request, fr_signal_t action)
-{
-	rlm_radius_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_radius_t);
-	rlm_radius_io_t	const	*io = (rlm_radius_io_t const *)inst->io_submodule->module;		/* Public symbol exported by the module */
-
-	/*
-	 *	We received a duplicate packet, but we're not doing
-	 *	synchronous proxying.  Ignore the dup, and rely on the
-	 *	IO submodule to time it's own retransmissions.
-	 */
-	if ((action == FR_SIGNAL_DUP) && !inst->synchronous) return;
-
-	if (!io->signal) return;
-
-	io->signal(MODULE_CTX(inst->io_submodule->dl_inst,
-			      module_thread(inst->io_submodule)->data, mctx->env_data,
-			      mctx->rctx), request, action);
-}
-
 /** Do any RADIUS-layer fixups for proxying.
  *
  */
@@ -359,7 +468,7 @@ static void radius_fixups(rlm_radius_t const *inst, request_t *request)
 	/*
 	 *	Check for proxy loops.
 	 */
-	if (RDEBUG_ENABLED) {
+	if ((inst->mode == RLM_RADIUS_MODE_PROXY) && RDEBUG_ENABLED) {
 		fr_dcursor_t cursor;
 
 		for (vp = fr_pair_dcursor_by_da_init(&cursor, &request->request_pairs, attr_proxy_state);
@@ -367,12 +476,18 @@ static void radius_fixups(rlm_radius_t const *inst, request_t *request)
 		     vp = fr_dcursor_next(&cursor)) {
 			if (vp->vp_length != 4) continue;
 
-			if (memcmp(&inst->proxy_state, vp->vp_octets, 4) == 0) {
+			if (memcmp(&inst->common_ctx.proxy_state, vp->vp_octets, 4) == 0) {
 				RWARN("Possible proxy loop - please check server configuration.");
 				break;
 			}
 		}
 	}
+
+	/*
+	 *	@todo - check for proxy loops for client && replicate, too.
+	 *
+	 *	This only catches "self loops", but it may be worth doing.
+	 */
 
 	if (request->packet->code != FR_RADIUS_CODE_ACCESS_REQUEST) return;
 
@@ -389,12 +504,12 @@ static void radius_fixups(rlm_radius_t const *inst, request_t *request)
  */
 static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_radius_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_radius_t);
-	rlm_rcode_t		rcode;
-	unlang_action_t		ua;
+	rlm_radius_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_radius_t);
+	bio_thread_t		*thread = talloc_get_type_abort(mctx->thread, bio_thread_t);
 	fr_client_t		*client;
-
-	void			*rctx = NULL;
+	int			rcode;
+	bio_request_t		*u = NULL;
+	fr_retry_config_t const	*retry_config = NULL;
 
 	if (!request->packet->code) {
 		REDEBUG("You MUST specify a packet code");
@@ -412,13 +527,23 @@ static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, modul
 
 	if ((request->packet->code >= FR_RADIUS_CODE_MAX) ||
 	    !fr_time_delta_ispos(inst->retry[request->packet->code].irt)) { /* can't be zero */
-		REDEBUG("Invalid packet code %d", request->packet->code);
+		REDEBUG("Invalid packet code %u", request->packet->code);
+		RETURN_MODULE_FAIL;
+	}
+
+	/*
+	 *	Unconnected sockets use %radius.replicate(ip, port, secret),
+	 *	or %radius.sendto(ip, port, secret)
+	 */
+	if ((inst->mode == RLM_RADIUS_MODE_UNCONNECTED_REPLICATE) ||
+	    (inst->mode == RLM_RADIUS_MODE_XLAT_PROXY)) {
+		REDEBUG("When using 'mode = unconnected-*', this module cannot be used in-place.  Instead, it must be called via a function call");
 		RETURN_MODULE_FAIL;
 	}
 
 	if (!inst->allowed[request->packet->code]) {
 		REDEBUG("Packet code %s is disallowed by the configuration",
-		       fr_radius_packet_names[request->packet->code]);
+		       fr_radius_packet_name[request->packet->code]);
 		RETURN_MODULE_FAIL;
 	}
 
@@ -442,31 +567,109 @@ static unlang_action_t CC_HINT(nonnull) mod_process(rlm_rcode_t *p_result, modul
 	 *	return another code which indicates what happened to
 	 *	the request...
 	 */
-	ua = inst->io->enqueue(&rcode, &rctx, inst->io_submodule->dl_inst->data,
-			       module_thread(inst->io_submodule)->data, request);
-	if (ua != UNLANG_ACTION_YIELD) {
-		fr_assert(rctx == NULL);
-		RETURN_MODULE_RCODE(rcode);
-	}
+	rcode = mod_enqueue(&u, &retry_config, inst, thread->ctx.trunk, request);
+	if (rcode == 0) RETURN_MODULE_NOOP;
+	if (rcode < 0) RETURN_MODULE_FAIL;
 
-	return unlang_module_yield(request, inst->io->resume, mod_radius_signal, 0, rctx);
+	return unlang_module_yield_to_retry(request, mod_resume, mod_retry, mod_signal, 0, u, retry_config);
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
 	size_t i, num_types;
-	rlm_radius_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_radius_t);
-	CONF_SECTION *conf = mctx->inst->conf;
+	rlm_radius_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_radius_t);
+	CONF_SECTION *conf = mctx->mi->conf;
 
-	inst->io = (rlm_radius_io_t const *)inst->io_submodule->module;	/* Public symbol exported by the module */
-	inst->name = mctx->inst->name;
+	inst->name = mctx->mi->name;
+	inst->received_message_authenticator = talloc_zero(NULL, bool);		/* Allocated outside of inst to default protection */
 
 	/*
-	 *	These limits are specific to RADIUS, and cannot be over-ridden
+	 *	Allow explicit setting of mode.
 	 */
-	FR_INTEGER_BOUND_CHECK("trunk.per_connection_max", inst->trunk_conf.max_req_per_conn, >=, 2);
-	FR_INTEGER_BOUND_CHECK("trunk.per_connection_max", inst->trunk_conf.max_req_per_conn, <=, 255);
-	FR_INTEGER_BOUND_CHECK("trunk.per_connection_target", inst->trunk_conf.target_req_per_conn, <=, inst->trunk_conf.max_req_per_conn / 2);
+	if (inst->mode != RLM_RADIUS_MODE_INVALID) goto check_others;
+
+	/*
+	 *	If not set, try to insinuate it from context.
+	 */
+	if (inst->replicate) {
+		if (inst->originate) {
+			cf_log_err(conf, "Cannot set 'replicate=true' and 'originate=true' at the same time.");
+			return -1;
+		}
+
+		if (inst->synchronous) {
+			cf_log_warn(conf, "Ignoring 'synchronous=true' due to 'replicate=true'");
+		}
+
+		inst->mode = RLM_RADIUS_MODE_REPLICATE;
+		goto check_others;
+	}
+
+	/*
+	 *	Argubly we should be allowed to do synchronous proxying _and_ originating client packets.
+	 *
+	 *	However, the previous code didn't really do that consistently.
+	 */
+	if (inst->synchronous && inst->originate) {
+		cf_log_err(conf, "Cannot set 'synchronous=true' and 'originate=true'");
+		return -1;
+	}
+
+	if (inst->synchronous) {
+		inst->mode = RLM_RADIUS_MODE_PROXY;
+	} else {
+		inst->mode = RLM_RADIUS_MODE_CLIENT;
+	}
+
+check_others:
+	/*
+	 *	Replication is write-only, and append by default.
+	 */
+	if (inst->mode == RLM_RADIUS_MODE_REPLICATE) {
+		if (inst->fd_config.filename && (inst->fd_config.flags != O_WRONLY)) {
+			cf_log_info(conf, "Setting 'flags = write-only' for writing to a file");
+		}
+		inst->fd_config.flags = O_WRONLY | O_APPEND;
+
+	} else if (inst->fd_config.filename) {
+		cf_log_err(conf, "When using an output 'filename', you MUST set 'mode = replicate'");
+		return -1;
+
+	} else {
+		/*
+		 *	All other IO is read+write.
+		 */
+		inst->fd_config.flags = O_RDWR;
+	}
+
+	if (fr_bio_fd_check_config(&inst->fd_config) < 0) {
+		cf_log_perr(conf, "Invalid configuration");
+		return -1;
+	}
+
+	/*
+	 *	Clamp max_packet_size first before checking recv_buff and send_buff
+	 */
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, >=, 64);
+	FR_INTEGER_BOUND_CHECK("max_packet_size", inst->max_packet_size, <=, 65535);
+
+	if (inst->mode != RLM_RADIUS_MODE_UNCONNECTED_REPLICATE) {
+		/*
+		 *	These limits are specific to RADIUS, and cannot be over-ridden
+		 */
+		FR_INTEGER_BOUND_CHECK("trunk.per_connection_max", inst->trunk_conf.max_req_per_conn, >=, 2);
+		FR_INTEGER_BOUND_CHECK("trunk.per_connection_max", inst->trunk_conf.max_req_per_conn, <=, 255);
+		FR_INTEGER_BOUND_CHECK("trunk.per_connection_target", inst->trunk_conf.target_req_per_conn, <=, inst->trunk_conf.max_req_per_conn / 2);
+	}
+
+	if ((inst->mode == RLM_RADIUS_MODE_UNCONNECTED_REPLICATE) ||
+	    (inst->mode == RLM_RADIUS_MODE_XLAT_PROXY)) {
+		if (inst->fd_config.src_port != 0) {
+			cf_log_err(conf, "Cannot set 'src_port' when using this 'mode'");
+			return -1;
+		}
+	}
 
 	FR_TIME_DELTA_BOUND_CHECK("response_window", inst->zombie_period, >=, fr_time_delta_from_sec(1));
 	FR_TIME_DELTA_BOUND_CHECK("response_window", inst->zombie_period, <=, fr_time_delta_from_sec(120));
@@ -481,6 +684,17 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 
 	num_types = talloc_array_length(inst->types);
 	fr_assert(num_types > 0);
+
+	inst->timeout_retry = (fr_retry_config_t) {
+		.mrc = 1,
+		.mrd = inst->response_window,
+	};
+
+	inst->common_ctx = (fr_radius_ctx_t) {
+		.secret = inst->secret,
+		.secret_length = inst->secret ? talloc_array_length(inst->secret) - 1 : 0,
+		.proxy_state = fr_rand(),
+	};
 
 	/*
 	 *	Allow for O(1) lookup later...
@@ -501,12 +715,19 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	 *	If we're replicating, we don't care if the other end
 	 *	is alive.
 	 */
-	if (inst->replicate && inst->status_check) {
-		cf_log_warn(conf, "Ignoring 'status_check = %s' due to 'replicate = true'",
-			    fr_radius_packet_names[inst->status_check]);
-		inst->status_check = 0;
-	}
+	if (inst->status_check) {
+		if (inst->mode == RLM_RADIUS_MODE_REPLICATE) {
+			cf_log_warn(conf, "Ignoring 'status_check = %s' due to 'mode = replicate'",
+				    fr_radius_packet_name[inst->status_check]);
+			inst->status_check = false;
 
+		} else if ((inst->mode == RLM_RADIUS_MODE_UNCONNECTED_REPLICATE) ||
+			   (inst->mode == RLM_RADIUS_MODE_XLAT_PROXY)) {
+				   cf_log_warn(conf, "Ignoring 'status_check = %s' due to 'mode' setting",
+				    fr_radius_packet_name[inst->status_check]);
+			inst->status_check = false;
+		}
+	}
 
 	/*
 	 *	If we have status checks, then do some sanity checks.
@@ -520,7 +741,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 
 		} else if (!inst->allowed[inst->status_check]) {
 			cf_log_err(conf, "Using 'status_check = %s' requires also 'type = %s'",
-				   fr_radius_packet_names[inst->status_check], fr_radius_packet_names[inst->status_check]);
+				   fr_radius_packet_name[inst->status_check], fr_radius_packet_name[inst->status_check]);
 			return -1;
 		}
 
@@ -529,13 +750,29 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		 *	section, to be sure that (e.g.) Access-Request
 		 *	contains User-Name, etc.
 		 */
+
+		if (inst->fd_config.filename) {
+			cf_log_info(conf, "Disabling status checks for output file %s", inst->fd_config.filename);
+			inst->status_check = 0;
+		}
 	}
 
 	/*
-	 *	Don't sanity check the async timers if we're doing
-	 *	synchronous proxying.
+	 *	Files and unix sockets can just have us call write().
 	 */
-	if (inst->synchronous) goto setup_io_submodule;
+	if (inst->fd_config.filename || inst->fd_config.path) {
+		inst->max_send_coalesce = 1;
+	}
+
+	inst->trunk_conf.req_pool_headers = 4;	/* One for the request, one for the buffer, one for the tracking binding, one for Proxy-State VP */
+	inst->trunk_conf.req_pool_size = 1024 + sizeof(fr_pair_t) + 20;
+
+	/*
+	 *	Only check the async timers when we're acting as a client.
+	 */
+	if (inst->mode != RLM_RADIUS_MODE_CLIENT) {
+		return 0;
+	}
 
 	/*
 	 *	Set limits on retransmission timers
@@ -618,12 +855,38 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		FR_TIME_DELTA_BOUND_CHECK("Disconnect-Request.max_rtx_duration", inst->retry[FR_RADIUS_CODE_DISCONNECT_REQUEST].mrd, <=, fr_time_delta_from_sec(30));
 	}
 
-setup_io_submodule:
-	/*
-	 *	Get random Proxy-State identifier for this module.
-	 */
-	inst->proxy_state = fr_rand();
+	return 0;
+}
 
+static int mod_bootstrap(module_inst_ctx_t const *mctx)
+{
+	xlat_t 		*xlat;
+	rlm_radius_t const *inst = talloc_get_type_abort(mctx->mi->data, rlm_radius_t);
+
+	switch (inst->mode) {
+	case RLM_RADIUS_MODE_UNCONNECTED_REPLICATE:
+		xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "sendto.ipaddr", xlat_radius_replicate, FR_TYPE_VOID);
+		xlat_func_args_set(xlat, xlat_radius_send_args);
+		break;
+
+	case RLM_RADIUS_MODE_XLAT_PROXY:
+		xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "sendto.ipaddr", xlat_radius_client, FR_TYPE_UINT32);
+		xlat_func_args_set(xlat, xlat_radius_send_args);
+		break;
+
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+
+static int mod_detach(module_detach_ctx_t const *mctx)
+{
+	rlm_radius_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_radius_t);
+
+	talloc_free(inst->received_message_authenticator);
 	return 0;
 }
 
@@ -655,7 +918,6 @@ module_rlm_t rlm_radius = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "radius",
-		.flags		= MODULE_TYPE_THREAD_SAFE | MODULE_TYPE_RESUMABLE,
 		.inst_size	= sizeof(rlm_radius_t),
 		.config		= module_config,
 
@@ -663,9 +925,17 @@ module_rlm_t rlm_radius = {
 		.unload		= mod_unload,
 
 		.bootstrap	= mod_bootstrap,
+		.instantiate	= mod_instantiate,
+		.detach		= mod_detach,
+
+		.thread_inst_size	= sizeof(bio_thread_t),
+		.thread_inst_type	= "bio_thread_t",
+		.thread_instantiate 	= mod_thread_instantiate,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,	.method = mod_process },
-		MODULE_NAME_TERMINATOR
-	},
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_process },
+			MODULE_BINDING_TERMINATOR
+		},
+	}
 };

@@ -99,7 +99,7 @@ int fr_dhcpv4_raw_socket_open(struct sockaddr_ll *link_layer, int ifindex)
  *	- -1 on failure.
  */
 int fr_dhcpv4_raw_packet_send(int sockfd, struct sockaddr_ll *link_layer,
-			      fr_radius_packet_t *packet, fr_pair_list_t *list)
+			      fr_packet_t *packet, fr_pair_list_t *list)
 {
 	uint8_t			dhcp_packet[1518] = { 0 };
 	ethernet_header_t	*eth_hdr = (ethernet_header_t *)dhcp_packet;
@@ -166,11 +166,11 @@ int fr_dhcpv4_raw_packet_send(int sockfd, struct sockaddr_ll *link_layer,
  *
  *	FIXME: split this into two, recv_raw_packet, and verify(packet, original)
  */
-fr_radius_packet_t *fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *link_layer,
-					     fr_radius_packet_t *request, fr_pair_list_t *list)
+fr_packet_t *fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *link_layer,
+					     fr_packet_t *request, fr_pair_list_t *list)
 {
 	fr_pair_t		*vp;
-	fr_radius_packet_t		*packet;
+	fr_packet_t		*packet;
 	dhcp_packet_t		*dhcp_data;
 	uint8_t const		*code;
 	uint32_t		magic, xid;
@@ -187,7 +187,7 @@ fr_radius_packet_t *fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *li
 	socklen_t		sock_len;
 	uint8_t			data_offset;
 
-	packet = fr_radius_packet_alloc(NULL, false);
+	packet = fr_packet_alloc(NULL, false);
 	if (!packet) {
 		fr_strerror_const("Failed allocating packet");
 		return NULL;
@@ -196,7 +196,7 @@ fr_radius_packet_t *fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *li
 	raw_packet = talloc_zero_array(packet, uint8_t, MAX_PACKET_SIZE);
 	if (!raw_packet) {
 		fr_strerror_const("Out of memory");
-		fr_radius_packet_free(&packet);
+		fr_packet_free(&packet);
 		return NULL;
 	}
 
@@ -305,33 +305,17 @@ fr_radius_packet_t *fr_dhcpv4_raw_packet_recv(int sockfd, struct sockaddr_ll *li
 					   packet->data_len, attr_dhcp_message_type);
 	if (!code) {
 		fr_strerror_const("No message-type option was found in the packet");
-		fr_radius_packet_free(&packet);
+		fr_packet_free(&packet);
 		return NULL;
 	}
 
 	if ((code[1] < 1) || (code[2] == 0) || (code[2] > 8)) {
 		fr_strerror_const("Unknown value for message-type option");
-		fr_radius_packet_free(&packet);
+		fr_packet_free(&packet);
 		return NULL;
 	}
 
 	packet->code = code[2];
-
-	/*
-	 *	Create a unique vector from the MAC address and the
-	 *	DHCP opcode.  This is a hack for the RADIUS
-	 *	infrastructure in the rest of the server.
-	 *
-	 *	Note: packet->data[2] == 6, which is smaller than
-	 *	sizeof(packet->vector)
-	 *
-	 *	FIXME:  Look for client-identifier in packet,
-	 *      and use that, too?
-	 */
-	memset(packet->vector, 0, sizeof(packet->vector));
-	/* coverity[tainted_data] */
-	memcpy(packet->vector, packet->data + 28, packet->data[2]);
-	packet->vector[packet->data[2]] = packet->code & 0xff;
 
 	packet->socket.inet.src_port = udp_src_port;
 	packet->socket.inet.dst_port = udp_dst_port;

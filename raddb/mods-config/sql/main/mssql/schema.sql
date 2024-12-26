@@ -1,6 +1,6 @@
 -- $Id$d$
 --
--- schela.sql   rlm_sql - FreeRADIUS SQL Module
+-- schema.sql   rlm_sql - FreeRADIUS SQL Module
 --
 -- Database schema for MSSQL rlm_sql module
 --
@@ -47,8 +47,6 @@ CREATE TABLE [radacct] (
 	[FramedIPv6Prefix] [varchar] (45) NOT NULL,
 	[FramedInterfaceId] [varchar] (44) NOT NULL,
 	[DelegatedIPv6Prefix] [varchar] (45) NOT NULL,
-	[AcctStartDelay] [int] NULL,
-	[AcctStopDelay] [int] NULL,
 	[Class] [varchar] (64) NULL
 ) ON [PRIMARY]
 GO
@@ -81,8 +79,6 @@ ALTER TABLE [radacct] WITH NOCHECK ADD
 	CONSTRAINT [DF_radacct_FramedIPv6Prefix] DEFAULT ('') FOR [FramedIPv6Prefix],
 	CONSTRAINT [DF_radacct_FramedInterfaceId] DEFAULT ('') FOR [FramedInterfaceId],
 	CONSTRAINT [DF_radacct_DelegatedIPv6Prefix] DEFAULT ('') FOR [DelegatedIPv6Prefix],
-	CONSTRAINT [DF_radacct_AcctStartDelay] DEFAULT (null) FOR [AcctStartDelay],
-	CONSTRAINT [DF_radacct_AcctStopDelay] DEFAULT (null) FOR [AcctStopDelay],
 	CONSTRAINT [DF_radacct_Class] DEFAULT (null) FOR [Class],
 	CONSTRAINT [PK_radacct] PRIMARY KEY NONCLUSTERED
 	(
@@ -132,7 +128,12 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radcheck'
+--
+-- Note: [op] is varchar to allow for "=" as a value -
+-- depending on which driver is used to access the database, if
+-- the field is defined as char, then the trailing space may be
+-- returned, which fails to parse correctly.
 --
 
 CREATE TABLE [radcheck] (
@@ -140,7 +141,7 @@ CREATE TABLE [radcheck] (
 	[UserName] [varchar] (64) NOT NULL ,
 	[Attribute] [varchar] (32) NOT NULL ,
 	[Value] [varchar] (253) NOT NULL ,
-	[op] [char] (2) NULL
+	[op] [varchar] (2) NULL
 ) ON [PRIMARY]
 GO
 
@@ -160,7 +161,7 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radgroupcheck'
 --
 
 CREATE TABLE [radgroupcheck] (
@@ -168,7 +169,7 @@ CREATE TABLE [radgroupcheck] (
 	[GroupName] [varchar] (64) NOT NULL ,
 	[Attribute] [varchar] (32) NOT NULL ,
 	[Value] [varchar] (253) NOT NULL ,
-	[op] [char] (2) NULL
+	[op] [varchar] (2) NULL
 ) ON [PRIMARY]
 GO
 
@@ -188,7 +189,7 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radgroupreply'
 --
 
 CREATE TABLE [radgroupreply] (
@@ -196,7 +197,7 @@ CREATE TABLE [radgroupreply] (
 	[GroupName] [varchar] (64) NOT NULL ,
 	[Attribute] [varchar] (32) NOT NULL ,
 	[Value] [varchar] (253) NOT NULL ,
-	[op] [char] (2) NULL ,
+	[op] [varchar] (2) NULL ,
 	[prio] [int] NOT NULL
 ) ON [PRIMARY]
 GO
@@ -218,7 +219,7 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radreply'
 --
 
 CREATE TABLE [radreply] (
@@ -226,7 +227,7 @@ CREATE TABLE [radreply] (
 	[UserName] [varchar] (64) NOT NULL ,
 	[Attribute] [varchar] (32) NOT NULL ,
 	[Value] [varchar] (253) NOT NULL ,
-	[op] [char] (2) NULL
+	[op] [varchar] (2) NULL
 ) ON [PRIMARY]
 GO
 
@@ -246,7 +247,7 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radusergroup'
 --
 
 CREATE TABLE [radusergroup] (
@@ -271,7 +272,7 @@ GO
 
 
 --
--- Table structure for table 'radacct'
+-- Table structure for table 'radpostauth'
 --
 
 CREATE TABLE [radpostauth] (

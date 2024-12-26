@@ -57,20 +57,28 @@ fr_dict_attr_t const *attr_dns_ar;
 extern fr_dict_attr_autoload_t dns_dict_attr[];
 fr_dict_attr_autoload_t dns_dict_attr[] = {
 //	{ .out = &attr_dns_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT16, .dict = &dict_dns },
-	{ .out = &attr_dns_packet, .name = "packet", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
-	{ .out = &attr_dns_question, .name = "question", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
-	{ .out = &attr_dns_rr, .name = "rr", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
-	{ .out = &attr_dns_ns, .name = "ns", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
-	{ .out = &attr_dns_ar, .name = "ar", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
+	{ .out = &attr_dns_packet, .name = "Header", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
+	{ .out = &attr_dns_question, .name = "Question", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
+	{ .out = &attr_dns_rr, .name = "Resource-Record", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
+	{ .out = &attr_dns_ns, .name = "Name-Server", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
+	{ .out = &attr_dns_ar, .name = "Additional-Record", .type = FR_TYPE_STRUCT, .dict = &dict_dns },
 	{ NULL }
 };
 
  char const *fr_dns_packet_names[FR_DNS_CODE_MAX] = {
-	[FR_DNS_QUERY] = "query",
-	[FR_DNS_IQUERY] = "iquery",
-	[FR_DNS_STATUS] = "status",
-	[FR_DNS_UPDATE] = "update",
-	[FR_DNS_STATEFUL_OP] = "stateful-operations",
+	[FR_DNS_QUERY] = "Query",
+	[FR_DNS_INVERSE_QUERY] = "Inverse-Query",
+	[FR_DNS_STATUS] = "Status",
+	[FR_DNS_UPDATE] = "Update",
+	[FR_DNS_STATEFUL_OPERATION] = "Stateful-Operation",
+};
+
+FR_DICT_ATTR_FLAG_FUNC(fr_dns_attr_flags_t, dns_label)
+FR_DICT_ATTR_FLAG_FUNC(fr_dns_attr_flags_t, dns_label_uncompressed)
+
+static fr_dict_flag_parser_t const dns_flags[] = {
+	{ L("dns_label"),		{ .func = dict_flag_dns_label } },
+	{ L("dns_label_uncompressed"),	{ .func = dict_flag_dns_label_uncompressed } }
 };
 
 #define DECODE_FAIL(_reason) if (reason) *reason = FR_DNS_DECODE_FAIL_ ## _reason
@@ -432,35 +440,23 @@ void fr_dns_global_free(void)
 	fr_dict_autofree(dns_dict);
 }
 
-static fr_table_num_ordered_t const subtype_table[] = {
-	{ L("dns_label"),			FLAG_ENCODE_DNS_LABEL },
-	{ L("uncompressed"),			FLAG_ENCODE_DNS_LABEL_UNCOMPRESSED },
-};
-
-
-static bool attr_valid(UNUSED fr_dict_t *dict, UNUSED fr_dict_attr_t const *parent,
-		       UNUSED char const *name, UNUSED int attr, fr_type_t type, fr_dict_attr_flags_t *flags)
+static bool attr_valid(fr_dict_attr_t *da)
 {
 	/*
 	 *	"arrays" of string/octets are encoded as a 16-bit
 	 *	length, followed by the actual data.
 	 */
-	if (flags->array && ((type == FR_TYPE_STRING) || (type == FR_TYPE_OCTETS))) {
-		flags->is_known_width = true;
+	if (da->flags.array && ((da->type == FR_TYPE_STRING) || (da->type == FR_TYPE_OCTETS))) {
+		da->flags.is_known_width = true;
 	}
 
-	/*
-	 *	"extra" signifies that subtype is being used by the
-	 *	dictionaries itself.
-	 */
-	if (flags->extra || !flags->subtype) return true;
-
-	if (type != FR_TYPE_STRING) {
-		fr_strerror_const("The 'dns_label' flag can only be used with attributes of type 'string'");
-		return false;
+	if (fr_dns_flag_dns_label_any(da)) {
+		if (da->type != FR_TYPE_STRING) {
+			fr_strerror_const("The 'dns_label' flag can only be used with attributes of type 'string'");
+			return false;
+		}
+		da->flags.is_known_width = true;	/* Lie so we don't trip up the main validation checks */
 	}
-
-	flags->is_known_width = true;
 
 	return true;
 }
@@ -470,9 +466,14 @@ fr_dict_protocol_t libfreeradius_dns_dict_protocol = {
 	.name = "dns",
 	.default_type_size = 2,
 	.default_type_length = 2,
-	.subtype_table = subtype_table,
-	.subtype_table_len = NUM_ELEMENTS(subtype_table),
-	.attr_valid = attr_valid,
+	.attr = {
+		.flags = {
+			.table = dns_flags,
+			.table_len = NUM_ELEMENTS(dns_flags),
+			.len = sizeof(fr_dns_attr_flags_t)
+		},
+		.valid = attr_valid
+	},
 
 	.init = fr_dns_global_init,
 	.free = fr_dns_global_free,

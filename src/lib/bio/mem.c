@@ -36,6 +36,7 @@ typedef struct fr_bio_mem_s {
 	FR_BIO_COMMON;
 
 	fr_bio_verify_t	verify;		//!< verify data to see if we have a packet.
+	void		*verify_ctx;	//!< verify context
 
 	fr_bio_buf_t	read_buffer;	//!< buffering for reads
 	fr_bio_buf_t	write_buffer;	//!< buffering for writes
@@ -43,7 +44,7 @@ typedef struct fr_bio_mem_s {
 
 static ssize_t fr_bio_mem_write_buffer(fr_bio_t *bio, void *packet_ctx, void const *buffer, size_t size);
 
-static int     fr_bio_mem_verify_packet(fr_bio_t *bio, void *packet_ctx, size_t *size) CC_HINT(nonnull(1,3));
+static int     fr_bio_mem_call_verify(fr_bio_t *bio, void *packet_ctx, size_t *size) CC_HINT(nonnull(1,3));
 
 /** At EOF, read data from the buffer until it is empty.
  *
@@ -58,14 +59,35 @@ static ssize_t fr_bio_mem_read_eof(fr_bio_t *bio, UNUSED void *packet_ctx, void 
 	 *	No more data: return EOF from now on.
 	 */
 	if (fr_bio_buf_used(&my->read_buffer) == 0) {
-		my->bio.read = fr_bio_eof_read;
-		return fr_bio_error(EOF);
+
+		/*
+		 *	Don't call our EOF function.  But do tell the other BIOs that we're at EOF.
+		 */
+		my->priv_cb.eof = NULL;
+		fr_bio_eof(&my->bio);
+		return 0;
 	}
 
 	/*
 	 *	Return whatever data we have available.  One the buffer is empty, the next read will get EOF.
 	 */
 	return fr_bio_buf_read(&my->read_buffer, buffer, size);
+}
+
+static int fr_bio_mem_eof(fr_bio_t *bio)
+{
+	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
+
+	/*
+	 *	Nothing more for us to read, tell fr_bio_eof() that it can continue with poking other BIOs.
+	 */
+	if (fr_bio_buf_used(&my->read_buffer) == 0) {
+		return 1;
+	}
+
+	my->bio.read = fr_bio_mem_read_eof;
+
+	return 0;
 }
 
 /** Read from a memory BIO
@@ -142,7 +164,7 @@ static ssize_t fr_bio_mem_read(fr_bio_t *bio, void *packet_ctx, void *buffer, si
 /** Return data only if we have a complete packet.
  *
  */
-static ssize_t fr_bio_mem_read_packet(fr_bio_t *bio, void *packet_ctx, void *buffer, size_t size)
+static ssize_t fr_bio_mem_read_verify(fr_bio_t *bio, void *packet_ctx, void *buffer, size_t size)
 {
 	ssize_t rcode;
 	size_t used, room, want;
@@ -158,7 +180,7 @@ static ssize_t fr_bio_mem_read_packet(fr_bio_t *bio, void *packet_ctx, void *buf
 		/*
 		 *	See if there are valid packets in the buffer.
 		 */
-		rcode = fr_bio_mem_verify_packet(bio, packet_ctx, &want);
+		rcode = fr_bio_mem_call_verify(bio, packet_ctx, &want);
 		if (rcode < 0) {
 			rcode = fr_bio_error(VERIFY);
 			goto fail;
@@ -170,7 +192,7 @@ static ssize_t fr_bio_mem_read_packet(fr_bio_t *bio, void *packet_ctx, void *buf
 		if (rcode == 1) {
 			/*
 			 *	This isn't a fatal error.  The caller should check how much room is needed by calling
-			 *	fr_bio_mem_verify_packet(), and retry.
+			 *	fr_bio_mem_call_verify(), and retry.
 			 *
 			 *	But in general, the caller should make sure that the output buffer has enough
 			 *	room for at least one packet.  The verify() function should also ensure that
@@ -233,7 +255,7 @@ static ssize_t fr_bio_mem_read_packet(fr_bio_t *bio, void *packet_ctx, void *buf
 		/*
 		 *	See if there are valid packets in the buffer.
 		 */
-		rcode = fr_bio_mem_verify_packet(bio, packet_ctx, &want);
+		rcode = fr_bio_mem_call_verify(bio, packet_ctx, &want);
 		if (rcode < 0) {
 			rcode = fr_bio_error(VERIFY);
 			goto fail;
@@ -257,20 +279,20 @@ static ssize_t fr_bio_mem_read_packet(fr_bio_t *bio, void *packet_ctx, void *buf
 	if (rcode == 0) return 0;
 
 	/*
-	 *	The next bio returned an error.  Whatever it is, it's fatal.  We can read from the memory
-	 *	buffer until it's empty, but we can no longer write to the memory buffer.  Any data written to
-	 *	the buffer is lost.
+	 *	The next bio returned an error either when our buffer was empty, or else it had only a partial
+	 *	packet in it.  We can no longer read full packets from this BIO, and we can't read from the
+	 *	next one, either.  So shut down the BIO completely.
 	 */
 fail:
-	bio->read = fr_bio_mem_read_eof;
-	bio->write = fr_bio_null_write;
+	bio->read = fr_bio_fail_read;
+	bio->write = fr_bio_fail_write;
 	return rcode;
 }
 
 /** Return data only if we have a complete packet.
  *
  */
-static ssize_t fr_bio_mem_read_packet_datagram(fr_bio_t *bio, void *packet_ctx, void *buffer, size_t size)
+static ssize_t fr_bio_mem_read_verify_datagram(fr_bio_t *bio, void *packet_ctx, void *buffer, size_t size)
 {
 	ssize_t rcode;
 	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
@@ -290,9 +312,9 @@ static ssize_t fr_bio_mem_read_packet_datagram(fr_bio_t *bio, void *packet_ctx, 
 		 *	It's a datagram socket, there can only be one packet in the buffer.
 		 *
 		 *	@todo - if we're allowed more than one packet in the buffer, we should just call
-		 *	fr_bio_mem_read_packet(), or this function should call fr_bio_mem_verify_packet().
+		 *	fr_bio_mem_read_verify(), or this function should call fr_bio_mem_call_verify().
 		 */
-		switch (my->verify((fr_bio_t *) my, packet_ctx, buffer, &want)) {
+		switch (my->verify((fr_bio_t *) my, my->verify_ctx, packet_ctx, buffer, &want)) {
 			/*
 			 *	The data in the buffer is exactly a packet.  Return that.
 			 *
@@ -347,6 +369,7 @@ fail:
  */
 static ssize_t fr_bio_mem_write_next(fr_bio_t *bio, void *packet_ctx, void const *buffer, size_t size)
 {
+	int error;
 	ssize_t rcode;
 	size_t room, leftover;
 	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
@@ -379,14 +402,22 @@ static ssize_t fr_bio_mem_write_next(fr_bio_t *bio, void *packet_ctx, void const
 	}
 
 	/*
-	 *	We were flushing the buffer, return however much data we managed to write.
+	 *	We were flushing the BIO, return however much data we managed to write.
 	 *
-	 *	Note that flushes can never block.
+	 *	Note that flushes should never block.
 	 */
 	if (!buffer) {
 		fr_assert(rcode != fr_bio_error(IO_WOULD_BLOCK));
 		return rcode;
 	}
+
+	/*
+	 *	Tell previous BIOs in the chain that they are blocked.
+	 */
+	error = fr_bio_write_blocked(bio);
+	if (error < 0) return error;
+
+	fr_assert(error != 0); /* what to do? */
 
 	/*
 	 *	We had WOULD BLOCK, or wrote partial bytes.  Save the data to the memory buffer, and ensure
@@ -416,8 +447,11 @@ static ssize_t fr_bio_mem_write_next(fr_bio_t *bio, void *packet_ctx, void const
 	/*
 	 *	Some of the data base been written to the next bio, and some to our cache.  The caller has to
 	 *	ensure that the first subsequent write will send over the rest of the data.
+	 *
+	 *	However, we tell the caller that we wrote the entire packet.  Because we are now responsible
+	 *	for writing the remaining bytes.
 	 */
-	return rcode + leftover;
+	return size;
 }
 
 /** Flush the memory buffer.
@@ -457,19 +491,15 @@ static ssize_t fr_bio_mem_write_flush(fr_bio_mem_t *my, size_t size)
 	rcode = next->write(next, NULL, my->write_buffer.write, used);
 
 	/*
-	 *	The next bio returned an error.  Anything other than WOULD BLOCK is fatal.  We can read from
-	 *	the memory buffer until it's empty, but we can no longer write to the memory buffer.
+	 *	We didn't write anything, the bio is blocked.
 	 */
-	if ((rcode < 0) && (rcode != fr_bio_error(IO_WOULD_BLOCK))) {
-		my->bio.read = fr_bio_mem_read_eof;
-		my->bio.write = fr_bio_null_write;
-		return rcode;
-	}
+	if ((rcode == 0) || (rcode == fr_bio_error(IO_WOULD_BLOCK))) return fr_bio_error(IO_WOULD_BLOCK);
 
 	/*
-	 *	We didn't write anything, return that.
+	 *	All other errors are fatal.  We can read from the memory buffer until it's empty, but we can
+	 *	no longer write to the memory buffer.
 	 */
-	if ((rcode == 0) || (rcode == fr_bio_error(IO_WOULD_BLOCK))) return rcode;
+	if (rcode < 0) return rcode;
 
 	/*
 	 *	Tell the buffer that we've read a certain amount of data from it.
@@ -477,9 +507,9 @@ static ssize_t fr_bio_mem_write_flush(fr_bio_mem_t *my, size_t size)
 	(void) fr_bio_buf_read(&my->write_buffer, NULL, (size_t) rcode);
 
 	/*
-	 *	We haven't emptied the buffer, return the partial write.
+	 *	We haven't emptied the buffer, any further IO is blocked.
 	 */
-	if ((size_t) rcode < used) return rcode;
+	if ((size_t) rcode < used) return fr_bio_error(IO_WOULD_BLOCK);
 
 	/*
 	 *	We've flushed all of the buffer.  Revert back to "pass through" writing.
@@ -510,16 +540,43 @@ static ssize_t fr_bio_mem_write_buffer(fr_bio_t *bio, UNUSED void *packet_ctx, v
 	room = fr_bio_buf_write_room(&my->write_buffer);
 
 	/*
-	 *	The buffer is full.  We're now blocked.
+	 *	The buffer is full, we can't write anything.
 	 */
 	if (!room) return fr_bio_error(IO_WOULD_BLOCK);
 
-	if (room < size) size = room;
+	/*
+	 *	If we're asked to write more bytes than are available in the buffer, then tell the caller that
+	 *	writes are now blocked, and we can't write any more data.
+	 *
+	 *	Return an WOULD_BLOCK error instead of breaking our promise by writing part of the data,
+	 *	instead of accepting a full application write.
+	 */
+	if (room < size) {
+		int rcode;
+
+		rcode = fr_bio_write_blocked(bio);
+		if (rcode < 0) return rcode;
+
+		return fr_bio_error(IO_WOULD_BLOCK);
+	}
 
 	/*
 	 *	As we have clamped the write, we know that this call must succeed.
 	 */
-	return fr_bio_buf_write(&my->write_buffer, buffer, size);
+	(void) fr_bio_buf_write(&my->write_buffer, buffer, size);
+
+	/*
+	 *	If we've filled the buffer, tell the caller that writes are now blocked, and we can't write
+	 *	any more data.  However, we still return the amount of data we wrote.
+	 */
+	if (room == size) {
+		int rcode;
+
+		rcode = fr_bio_write_blocked(bio);
+		if (rcode < 0) return rcode;
+	}
+
+	return size;
 }
 
 /** Peek at the data in the read buffer
@@ -559,11 +616,11 @@ void fr_bio_mem_read_discard(fr_bio_t *bio, size_t size)
  *  @param	packet_ctx the packet ctx
  *  @param[out]	size	how big the verified packet is
  *  @return
- *	- <0 on error, the caller should close the bio.
+ *	- <0 for FR_BIO_VERIFY_ERROR_CLOSE, the caller should close the bio.
  *	- 0 for "we have a partial packet", the size to read is in *size
  *	- 1 for "we have at least one good packet", the size of it is in *size
  */
-static int fr_bio_mem_verify_packet(fr_bio_t *bio, void *packet_ctx, size_t *size)
+static int fr_bio_mem_call_verify(fr_bio_t *bio, void *packet_ctx, size_t *size)
 {
 	uint8_t *packet, *end;
 	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
@@ -581,7 +638,7 @@ static int fr_bio_mem_verify_packet(fr_bio_t *bio, void *packet_ctx, size_t *siz
 
 		want = end - packet;
 
-		switch (my->verify((fr_bio_t *) my, packet_ctx, packet, &want)) {
+		switch (my->verify((fr_bio_t *) my, my->verify_ctx, packet_ctx, packet, &want)) {
 			/*
 			 *	The data in the buffer is exactly a packet.  Return that.
 			 *
@@ -621,22 +678,27 @@ static int fr_bio_mem_verify_packet(fr_bio_t *bio, void *packet_ctx, size_t *siz
 	return -1;
 }
 
+/*
+ *	The application can read from the BIO until EOF, but cannot write to it.
+ */
+static void fr_bio_mem_shutdown(fr_bio_t *bio)
+{
+	bio->read = fr_bio_mem_read_eof;
+	bio->write = fr_bio_null_write;
+}
+
 /** Allocate a memory buffer bio for either reading or writing.
  */
 static bool fr_bio_mem_buf_alloc(fr_bio_mem_t *my, fr_bio_buf_t *buf, size_t size)
 {
-	uint8_t *data;
-
 	if (size < 1024) size = 1024;
 	if (size > (1 << 20)) size = 1 << 20;
 
-	data = talloc_array(my, uint8_t, size);
-	if (!data) {
+	if (fr_bio_buf_alloc(my, buf, size) < 0) {
 		talloc_free(my);
 		return false;
 	}
 
-	fr_bio_buf_init(buf, data, size);
 	return true;
 }
 
@@ -657,7 +719,7 @@ static bool fr_bio_mem_buf_alloc(fr_bio_mem_t *my, fr_bio_buf_t *buf, size_t siz
  *
  *  @param ctx		the talloc ctx
  *  @param read_size	size of the read buffer.  Must be 1024..1^20
- *  @param write_size	size of the write buffer.  Must be 1024..1^20
+ *  @param write_size	size of the write buffer.  Can be zero. If non-zero, must be 1024..1^20
  *  @param next		the next bio which will perform the underlying reads and writes.
  *	- NULL on error, memory allocation failed
  *	- !NULL the bio
@@ -666,19 +728,34 @@ fr_bio_t *fr_bio_mem_alloc(TALLOC_CTX *ctx, size_t read_size, size_t write_size,
 {
 	fr_bio_mem_t *my;
 
-	my = talloc_zero(ctx, fr_bio_mem_t);
-	if (!my) return NULL;
-
 	/*
 	 *	The caller has to state that the API is caching data both ways.
 	 */
-	if (!read_size || !write_size) return NULL;
+	if (!read_size) {
+		fr_strerror_const("Read size must be non-zero");
+		return NULL;
+	}
 
-	if (!fr_bio_mem_buf_alloc(my, &my->read_buffer, read_size)) return NULL;
-	if (!fr_bio_mem_buf_alloc(my, &my->write_buffer, write_size)) return NULL;
+	my = talloc_zero(ctx, fr_bio_mem_t);
+	if (!my) return NULL;
 
+	if (!fr_bio_mem_buf_alloc(my, &my->read_buffer, read_size)) {
+	oom:
+		fr_strerror_const("Out of memory");
+		return NULL;
+	}
 	my->bio.read = fr_bio_mem_read;
-	my->bio.write = fr_bio_mem_write_next;
+
+	if (write_size) {
+		if (!fr_bio_mem_buf_alloc(my, &my->write_buffer, write_size)) goto oom;
+
+		my->bio.write = fr_bio_mem_write_next;
+	} else {
+		my->bio.write = fr_bio_next_write;
+	}
+	my->priv_cb.eof = fr_bio_mem_eof;
+	my->priv_cb.write_resume = fr_bio_mem_write_resume;
+	my->priv_cb.shutdown = fr_bio_mem_shutdown;
 
 	fr_bio_chain(&my->bio, next);
 
@@ -686,34 +763,6 @@ fr_bio_t *fr_bio_mem_alloc(TALLOC_CTX *ctx, size_t read_size, size_t write_size,
 	return (fr_bio_t *) my;
 }
 
-/** Only return verified packets.
- *
- *  Like fr_bio_mem_alloc(), but only returns packets.
- *
- *  Writes pass straight through to the next bio.
- */
-fr_bio_t *fr_bio_mem_packet_alloc(TALLOC_CTX *ctx, size_t read_size, fr_bio_verify_t verify, bool datagram, fr_bio_t *next)
-{
-	fr_bio_mem_t *my;
-
-	if (!datagram) {
-		my = (fr_bio_mem_t *) fr_bio_mem_sink_alloc(ctx, read_size);
-	} else {
-		my = talloc_zero(ctx, fr_bio_mem_t);
-		if (!my) return NULL;
-
-		talloc_set_destructor((fr_bio_t *) my, fr_bio_destructor);
-	}
-	if (!my) return NULL;
-
-	my->verify = verify;
-	my->bio.read = datagram ? fr_bio_mem_read_packet_datagram : fr_bio_mem_read_packet;
-	my->bio.write = fr_bio_next_write;
-
-	fr_bio_chain(&my->bio, next);
-
-	return (fr_bio_t *) my;
-}
 
 /** Allocate a memory buffer which sources data from the callers application into the bio system.
  *
@@ -724,18 +773,26 @@ fr_bio_t *fr_bio_mem_source_alloc(TALLOC_CTX *ctx, size_t write_size, fr_bio_t *
 {
 	fr_bio_mem_t *my;
 
-	my = talloc_zero(ctx, fr_bio_mem_t);
-	if (!my) return NULL;
-
 	/*
 	 *	The caller has to state that the API is caching data.
 	 */
 	if (!write_size) return NULL;
 
-	if (!fr_bio_mem_buf_alloc(my, &my->write_buffer, write_size)) return NULL;
+	my = talloc_zero(ctx, fr_bio_mem_t);
+	if (!my) return NULL;
+
+	if (!fr_bio_mem_buf_alloc(my, &my->write_buffer, write_size)) {
+		talloc_free(my);
+		return NULL;
+	}
 
 	my->bio.read = fr_bio_null_read; /* reading FROM this bio is not possible */
 	my->bio.write = fr_bio_mem_write_next;
+
+	/*
+	 *	@todo - have write pause / write resume callbacks?
+	 */
+	my->priv_cb.shutdown = fr_bio_mem_shutdown;
 
 	fr_bio_chain(&my->bio, next);
 
@@ -783,24 +840,105 @@ static ssize_t fr_bio_mem_write_read_buffer(fr_bio_t *bio, UNUSED void *packet_c
 
 /** Allocate a memory buffer which sinks data from a bio system into the callers application.
  *
- *  The caller reads data from this bio, but never writes to it.  Upstream bios will source the data.
+ *  The caller reads data from this bio, but never writes to it.  Upstream BIOs will source the data.
  */
 fr_bio_t *fr_bio_mem_sink_alloc(TALLOC_CTX *ctx, size_t read_size)
 {
 	fr_bio_mem_t *my;
-
-	my = talloc_zero(ctx, fr_bio_mem_t);
-	if (!my) return NULL;
 
 	/*
 	 *	The caller has to state that the API is caching data.
 	 */
 	if (!read_size) return NULL;
 
-	if (!fr_bio_mem_buf_alloc(my, &my->read_buffer, read_size)) return NULL;
+	my = talloc_zero(ctx, fr_bio_mem_t);
+	if (!my) return NULL;
+
+	if (!fr_bio_mem_buf_alloc(my, &my->read_buffer, read_size)) {
+		talloc_free(my);
+		return NULL;
+	}
+
 	my->bio.read = fr_bio_mem_read_buffer;
 	my->bio.write = fr_bio_mem_write_read_buffer; /* the upstream will write to our read buffer */
 
 	talloc_set_destructor((fr_bio_t *) my, fr_bio_destructor);
 	return (fr_bio_t *) my;
+}
+
+/** Set the verification function for memory bios.
+ *
+ *  It is possible to add a verification function.  It is not currently possible to remove one.
+ *
+ *  @param bio		the binary IO handler
+ *  @param verify	the verification function
+ *  @param datagram	whether or not this bio is a datagram one.
+ *  @return
+ *	- <0 on error
+ *	- 0 on success
+ */
+int fr_bio_mem_set_verify(fr_bio_t *bio, fr_bio_verify_t verify, void *verify_ctx, bool datagram)
+{
+	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
+
+	if (my->bio.read != fr_bio_mem_read) {
+		fr_strerror_const("Cannot add verify to a memory sink bio");
+		return fr_bio_error(GENERIC);
+	}
+
+	my->verify = verify;
+	my->verify_ctx = verify_ctx;
+
+	/*
+	 *	If we are writing datagrams, then we cannot buffer individual datagrams.  We must write
+	 *	either all of the datagram out, or none of it.
+	 */
+	if (datagram) {
+		my->bio.read = fr_bio_mem_read_verify_datagram;
+		my->bio.write = fr_bio_next_write;
+
+		/*
+		 *	Might as well free the memory for the write buffer.  It won't be used.
+		 */
+		if (my->write_buffer.start) {
+			talloc_free(my->write_buffer.start);
+			my->write_buffer = (fr_bio_buf_t) {};
+		}
+	} else {
+		my->bio.read = fr_bio_mem_read_verify;
+		/* don't touch the write function or the write buffer. */
+	}
+
+	return 0;
+}
+
+/*
+ *	There's no fr_bio_mem_write_blocked()
+ */
+
+/** See if we can resume writes to the memory bio.
+ *
+ *  Note that there is no equivalent fr_bio_mem_write_blocked(), as that function wouldn't do anything.
+ *  Perhaps it could swap the write function to fr_bio_mem_write_buffer(), but the fr_bio_mem_write_next()
+ *  function should automatically do that when the write to the next bio only writes part of the data,
+ *  or if it returns fr_bio_error(IO_WOULD_BLOCK)
+ */
+int fr_bio_mem_write_resume(fr_bio_t *bio)
+{
+	fr_bio_mem_t *my = talloc_get_type_abort(bio, fr_bio_mem_t);
+	ssize_t rcode;
+
+	if (bio->write != fr_bio_mem_write_buffer) return 1;
+
+	/*
+	 *	Flush the buffer, and then reset the write routine if we were successful.
+	 */
+	rcode = fr_bio_mem_write_flush(my, SIZE_MAX);
+	if (rcode <= 0) return rcode;
+
+	if (fr_bio_buf_used(&my->write_buffer) > 0) return 0;
+
+	if (!my->cb.write_resume) return 1;
+
+	return my->cb.write_resume(bio);
 }

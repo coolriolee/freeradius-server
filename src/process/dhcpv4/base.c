@@ -26,6 +26,7 @@
 
 #include <freeradius-devel/io/application.h>
 #include <freeradius-devel/server/protocol.h>
+#include <freeradius-devel/server/module_method.h>
 #include <freeradius-devel/util/dict.h>
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/dhcpv4/dhcpv4.h>
@@ -53,7 +54,7 @@ fr_dict_attr_autoload_t process_dhcpv4_dict_attr[] = {
 /*
  *	Debug the packet if requested.
  */
-static void dhcpv4_packet_debug(request_t *request, fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
+static void dhcpv4_packet_debug(request_t *request, fr_packet_t *packet, fr_pair_list_t *list, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];
@@ -251,7 +252,7 @@ static fr_process_state_t const process_state[] = {
 		.default_reply = FR_DHCP_DO_NOT_RESPOND,
 		.send = send_generic,
 		.resume = resume_send_generic,
-		.section_offset = PROCESS_CONF_OFFSET(ack),
+		.section_offset = PROCESS_CONF_OFFSET(nak),
 	},
 
 	[FR_DHCP_INFORM] = {
@@ -394,7 +395,7 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 	PROCESS_TRACE;
 
-	(void)talloc_get_type_abort_const(mctx->inst->data, process_dhcpv4_t);
+	(void)talloc_get_type_abort_const(mctx->mi->data, process_dhcpv4_t);
 	fr_assert(PROCESS_PACKET_CODE_VALID(request->packet->code));
 
 	request->component = "dhcpv4";
@@ -419,117 +420,92 @@ static unlang_action_t mod_process(rlm_rcode_t *p_result, module_ctx_t const *mc
 
 static const virtual_server_compile_t compile_list[] = {
 	{
-		.name = "recv",
-		.name2 = "Discover",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Discover"),
+		.actions = &mod_actions_postauth,
 
-		.methods = (const virtual_server_method_t[]) {
-			{
-				.name = "ippool",
-				.name2 = "allocate",
-			},
-			COMPILE_TERMINATOR
+		.methods = (const section_name_t *[]) {
+			&module_method_ippool_allocate,
+			NULL
 		},
 		.offset = PROCESS_CONF_OFFSET(discover),
 	},
 	{
-		.name = "send",
-		.name2 = "Offer",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Offer"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(offer),
 	},
 	{
-		.name = "recv",
-		.name2 = "Request",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Request"),
+		.actions = &mod_actions_postauth,
 
-		.methods = (const virtual_server_method_t[]) {
-			{
-				.name = "ippool",
-				.name2 = "extend",
-			},
-			COMPILE_TERMINATOR
+		.methods = (const section_name_t *[]) {
+			&module_method_ippool_extend,
+			NULL
 		},
 		.offset = PROCESS_CONF_OFFSET(request),
 	},
 
 	{
-		.name = "send",
-		.name2 = "Ack",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Ack"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(ack),
 	},
 	{
-		.name = "send",
-		.name2 = "NAK",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "NAK"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(nak),
 	},
 	{
-		.name = "recv",
-		.name2 = "Decline",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Decline"),
+		.actions = &mod_actions_postauth,
 
-		.methods = (const virtual_server_method_t[]) {
-			{
-				.name = "ippool",
-				.name2 = "mark",
-			},
-			COMPILE_TERMINATOR
+		.methods = (const section_name_t *[]) {
+			&module_method_ippool_mark,
+			NULL
 		},
 		.offset = PROCESS_CONF_OFFSET(decline),
 	},
 
 	{
-		.name = "recv",
-		.name2 = "Release",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Release"),
+		.actions = &mod_actions_postauth,
 
-		.methods = (const virtual_server_method_t[]) {
-			{
-				.name = "ippool",
-				.name2 = "release",
-			},
-			COMPILE_TERMINATOR
+		.methods = (const section_name_t *[]) {
+			&module_method_ippool_release,
+			NULL
 		},
 		.offset = PROCESS_CONF_OFFSET(release),
 	},
 	{
-		.name = "recv",
-		.name2 = "Inform",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Inform"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(inform),
 	},
 
 	{
-		.name = "recv",
-		.name2 = "Lease-Query",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("recv", "Lease-Query"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(lease_query),
 	},
 	{
-		.name = "send",
-		.name2 = "Lease-Unassigned",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Lease-Unassigned"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(lease_unassigned),
 	},
 	{
-		.name = "send",
-		.name2 = "Lease-Unknown",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Lease-Unknown"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(lease_unknown),
 	},
 	{
-		.name = "send",
-		.name2 = "Lease-Active",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Lease-Active"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(lease_active),
 	},
 
 	{
-		.name = "send",
-		.name2 = "Do-Not-Respond",
-		.component = MOD_POST_AUTH,
+		.section = SECTION_NAME("send", "Do-Not-Respond"),
+		.actions = &mod_actions_postauth,
 		.offset = PROCESS_CONF_OFFSET(do_not_respond),
 	},
 

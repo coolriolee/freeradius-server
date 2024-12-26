@@ -34,24 +34,32 @@ extern "C" {
 
 typedef struct fr_htrie_s fr_htrie_t;
 
-typedef void *(*fr_htrie_find_t)(fr_htrie_t *ht, void const *data);
+typedef void *(*fr_htrie_find_t)(void *ht, void const *data);
 
-typedef bool (*fr_htrie_insert_t)(fr_htrie_t *ht, void const *data);
+typedef bool (*fr_htrie_insert_t)(void *ht, void const *data);
 
-typedef int (*fr_htrie_replace_t)(void **old, fr_htrie_t *ht, void const *data);
+typedef int (*fr_htrie_replace_t)(void **old, void *ht, void const *data);
 
-typedef void *(*fr_htrie_remove_t)(fr_htrie_t *ht, void const *data);
+typedef void *(*fr_htrie_remove_t)(void *ht, void const *data);
 
-typedef bool (*fr_htrie_delete_t)(fr_htrie_t *ht, void const *data);
+typedef bool (*fr_htrie_delete_t)(void *ht, void const *data);
 
-typedef uint32_t (*fr_htrie_num_elements_t)(fr_htrie_t *ht);
+typedef uint32_t (*fr_htrie_num_elements_t)(void *ht);
 
 typedef enum {
 	FR_HTRIE_INVALID = 0,
 	FR_HTRIE_HASH,		//!< Data is stored in a hash.
 	FR_HTRIE_RB,		//!< Data is stored in a rb tree.
 	FR_HTRIE_TRIE,		//!< Data is stored in a prefix trie.
+	FR_HTRIE_AUTO,		//!< Automatically choose the best type.
+				///< Must be not be passed to fr_htrie_alloc().
+				///< If the user selects this, you must
+				///< call fr_htrie_hint() to determine the
+				///< best type.
 } fr_htrie_type_t;
+
+extern fr_table_num_sorted_t const fr_htrie_type_table[];
+extern size_t fr_htrie_type_table_len;
 
 /** Which functions are used for the different operations
  *
@@ -165,6 +173,18 @@ static inline fr_htrie_type_t fr_htrie_hint(fr_type_t type)
 	}
 
 	return FR_HTRIE_INVALID;
+}
+
+/** Return a static string containing the type name
+ *
+ * @param[in] type to return name for.
+ * @return name of the type
+ *
+ * @hidecallergraph
+ */
+static inline char const *fr_htrie_type_to_str(fr_htrie_type_t type)
+{
+	return fr_table_str_by_value(fr_htrie_type_table, type, "<INVALID>");
 }
 
 #ifdef __cplusplus

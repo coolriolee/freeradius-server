@@ -106,10 +106,10 @@ static ssize_t mod_read(fr_listen_t *li, UNUSED void **packet_ctx, fr_time_t *re
 	proto_radius_tcp_thread_t	*thread = talloc_get_type_abort(li->thread_instance, proto_radius_tcp_thread_t);
 	ssize_t				data_size;
 	size_t				packet_len, in_buffer;
-	decode_fail_t			reason;
+	fr_radius_decode_fail_t		reason;
 
 	/*
-	 *	We may hvae read multiple packets in the previous read.  In which case the buffer may already
+	 *	We may have read multiple packets in the previous read.  In which case the buffer may already
 	 *	have packets remaining.  In that case, we can return packets directly from the buffer, and
 	 *	skip the read().
 	 */
@@ -229,7 +229,7 @@ have_packet:
 	 *	Print out what we received.
 	 */
 	DEBUG2("proto_radius_tcp - Received %s ID %d length %d %s",
-	       fr_radius_packet_names[buffer[0]], buffer[1],
+	       fr_radius_packet_name[buffer[0]], buffer[1],
 	       (int) packet_len, thread->name);
 
 	return packet_len;
@@ -281,6 +281,16 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t req
 	 */
 	if (data_size <= 0) return data_size;
 
+#if 0
+	/*
+	 *	If we're not tracking duplicates, then track->packet is NULL.
+	 *
+	 *	There's no reason to fix this now, as all of this will
+	 *	be rewritten when the bio stuff works.  Since this
+	 *	code doesn't do anything anyways, it's best to just
+	 *	comment it out.
+	 */
+
 	/*
 	 *	Root through the reply to determine any
 	 *	connection-level negotiation data, but only the first
@@ -289,6 +299,7 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t req
 	if ((written == 0) && (track->packet[0] == FR_RADIUS_CODE_STATUS_SERVER)) {
 //		status_check_reply(inst, buffer, buffer_len);
 	}
+#endif
 
 	/*
 	 *	Add in previously written data to the response.
@@ -306,7 +317,7 @@ static int mod_connection_set(fr_listen_t *li, fr_io_address_t *connection)
 }
 
 
-static void mod_network_get(void *instance, int *ipproto, bool *dynamic_clients, fr_trie_t const **trie)
+static void mod_network_get(int *ipproto, bool *dynamic_clients, fr_trie_t const **trie, void *instance)
 {
 	proto_radius_tcp_t *inst = talloc_get_type_abort(instance, proto_radius_tcp_t);
 
@@ -419,11 +430,10 @@ static char const *mod_name(fr_listen_t *li)
 	return thread->name;
 }
 
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_radius_tcp_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_radius_tcp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_radius_tcp_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_radius_tcp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	size_t			i, num;
 	CONF_ITEM		*ci;
 	CONF_SECTION		*server_cs;
@@ -611,7 +621,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
-	ci = cf_parent(inst->cs); /* listen { ... } */
+	ci = cf_section_to_item(mctx->mi->parent->conf); /* listen { ... } */
 	fr_assert(ci != NULL);
 	ci = cf_parent(ci);
 	fr_assert(ci != NULL);
@@ -656,7 +666,7 @@ fr_app_io_t proto_radius_tcp = {
 		.config			= tcp_listen_config,
 		.inst_size		= sizeof(proto_radius_tcp_t),
 		.thread_inst_size	= sizeof(proto_radius_tcp_thread_t),
-		.bootstrap		= mod_bootstrap,
+		.instantiate		= mod_instantiate,
 	},
 	.default_message_size	= 4096,
 

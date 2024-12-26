@@ -56,7 +56,7 @@ static xlat_arg_parser_t const escape_xlat_arg[] = {
  *
  * Example:
 @verbatim
-"%{escape:<img>foo.jpg</img>}" == "=60img=62foo.jpg=60/img=62"
+%escape('<img>foo.jpg</img>') == "=60img=62foo.jpg=60/img=62"
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -65,7 +65,7 @@ static xlat_action_t escape_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 xlat_ctx_t const *xctx,
 				 request_t *request, fr_value_box_list_t *in)
 {
-	rlm_escape_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_escape_t);
+	rlm_escape_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_escape_t);
 	fr_value_box_t		*arg = fr_value_box_list_head(in);
 	char const		*p = arg->vb_strvalue;
 	size_t			len;
@@ -130,7 +130,7 @@ static xlat_arg_parser_t const unescape_xlat_arg[] = {
  *
  * Example:
 @verbatim
-"%{unescape:=60img=62foo.jpg=60/img=62}" == "<img>foo.jpg</img>"
+%unescape('=60img=62foo.jpg=60/img=62') == "<img>foo.jpg</img>"
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -195,12 +195,12 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
 	xlat_t		*xlat;
 
-	xlat = xlat_func_register_module(NULL, mctx, "escape", escape_xlat, FR_TYPE_STRING);
-	xlat_func_mono_set(xlat, escape_xlat_arg);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "escape", escape_xlat, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, escape_xlat_arg);
 	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
-	xlat = xlat_func_register_module(NULL, mctx, "unescape", unescape_xlat, FR_TYPE_STRING);
-	xlat_func_mono_set(xlat, unescape_xlat_arg);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "unescape", unescape_xlat, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, unescape_xlat_arg);
 	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	return 0;

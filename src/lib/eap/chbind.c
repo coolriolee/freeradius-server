@@ -27,6 +27,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/radius/defs.h>
 #include <freeradius-devel/radius/radius.h>
+#include <freeradius-devel/server/auth.h>
 
 #include <freeradius-devel/io/pair.h>
 #include "chbind.h"
@@ -104,8 +105,6 @@ static bool chbind_build_response(request_t *request, CHBIND_REQ *chbind)
 
 		slen = fr_radius_encode_pair(&FR_DBUFF_TMP(ptr, end), &cursor, NULL);
 		if (slen < 0) {
-			if (slen == PAIR_ENCODE_SKIPPED) goto next;
-
 			RPERROR("Failed encoding chbind response");
 
 			talloc_free(ptr);

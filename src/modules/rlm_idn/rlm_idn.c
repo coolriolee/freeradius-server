@@ -95,7 +95,7 @@ static xlat_arg_parser_t const xlat_idna_arg[] = {
 /** Convert domain name to ASCII punycode
  *
 @verbatim
-%{idn:<domain>}
+%idn(<domain>)
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -104,7 +104,7 @@ static xlat_action_t xlat_idna(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx,
 			       request_t *request, fr_value_box_list_t *in)
 {
-	rlm_idn_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_idn_t);
+	rlm_idn_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_idn_t);
 	char		*idna = NULL;
 	int		res;
 	size_t		len;
@@ -150,11 +150,10 @@ static xlat_action_t xlat_idna(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_idn_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_idn_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_idna, FR_TYPE_STRING);
-	xlat_func_mono_set(xlat, xlat_idna_arg);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, xlat_idna, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, xlat_idna_arg);
 	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	return 0;
@@ -165,7 +164,6 @@ module_rlm_t rlm_idn = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "idn",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_idn_t),
 		.config		= mod_config,
 		.bootstrap	= mod_bootstrap

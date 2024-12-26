@@ -28,6 +28,7 @@
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/io/schedule.h>
 
+#include "lib/server/cf_util.h"
 #include "proto_cron.h"
 
 extern fr_app_io_t proto_cron_crontab;
@@ -76,6 +77,8 @@ struct proto_cron_tab_s {
 	cron_tab_t			tab[5];
 
 	fr_client_t			*client;		//!< static client
+
+	fr_dict_t const			*dict;			//!< our namespace.
 };
 
 
@@ -269,10 +272,10 @@ static fr_table_ptr_sorted_t time_names[] = {
 };
 static size_t time_names_len = NUM_ELEMENTS(time_names);
 
-/** Wrapper around dl_instance which checks the syntax of a cron job
+/** Checks the syntax of a cron job
  *
  * @param[in] ctx	to allocate data in (instance of proto_cron).
- * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
+ * @param[out] out	Where to write a module_instance_t containing the module handle and instance.
  * @param[in] parent	Base structure address.
  * @param[in] ci	#CONF_PAIR specifying the name of the type module.
  * @param[in] rule	unused.
@@ -436,7 +439,7 @@ static int mod_decode(void const *instance, request_t *request, UNUSED uint8_t *
 	 *	generic->protocol attribute conversions as
 	 *	the request runs through the server.
 	 */
-	request->dict = inst->parent->dict;
+	request->dict = inst->dict;
 
 	/*
 	 *	Hacks for now until we have a lower-level decode routine.
@@ -444,16 +447,10 @@ static int mod_decode(void const *instance, request_t *request, UNUSED uint8_t *
 	if (inst->code) request->packet->code = inst->code;
 	request->packet->id = fr_rand() & 0xff;
 	request->reply->id = request->packet->id;
-	memset(request->packet->vector, 0, sizeof(request->packet->vector));
 
 	request->packet->data = talloc_zero_array(request->packet, uint8_t, 1);
 	request->packet->data_len = 1;
 
-	/*
-	 *	Note that we don't set a limit on max_attributes here.
-	 *	That MUST be set and checked in the underlying
-	 *	transport, via a call to fr_radius_ok().
-	 */
 	(void) fr_pair_list_copy(request->request_ctx, &request->request_pairs, &inst->pair_list);
 
 	/*
@@ -682,28 +679,6 @@ static char const *mod_name(fr_listen_t *li)
 	return thread->name;
 }
 
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_cron_crontab_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_cron_crontab_t);
-	CONF_SECTION		*conf = mctx->inst->data;
-	dl_module_inst_t const	*dl_inst;
-
-	/*
-	 *	Find the dl_module_inst_t holding our instance data
-	 *	so we can find out what the parent of our instance
-	 *	was.
-	 */
-	dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(dl_inst);
-
-	inst->parent = talloc_get_type_abort(dl_inst->parent->data, proto_cron_t);
-
-	inst->cs = conf;
-
-	return 0;
-}
-
 static fr_client_t *mod_client_find(fr_listen_t *li, UNUSED fr_ipaddr_t const *ipaddr, UNUSED int ipproto)
 {
 	proto_cron_crontab_t const       *inst = talloc_get_type_abort_const(li->app_io_instance, proto_cron_crontab_t);
@@ -711,15 +686,22 @@ static fr_client_t *mod_client_find(fr_listen_t *li, UNUSED fr_ipaddr_t const *i
 	return inst->client;
 }
 
-
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_cron_crontab_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_cron_crontab_t);
-	CONF_SECTION		*conf = mctx->inst->data;
+	proto_cron_crontab_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_cron_crontab_t);
+	CONF_SECTION		*conf = mctx->mi->data;
 	fr_client_t		*client;
 	fr_pair_t		*vp;
 	FILE			*fp;
 	bool			done = false;
+
+	inst->parent = talloc_get_type_abort(mctx->mi->parent->data, proto_cron_t);
+	inst->cs = mctx->mi->conf;
+	inst->dict = virtual_server_dict_by_child_ci(cf_section_to_item(conf));
+	if (!inst->dict) {
+		cf_log_err(conf, "Please define 'namespace' in this virtual server");
+		return -1;
+	}
 
 	fr_pair_list_init(&inst->pair_list);
 	inst->client = client = talloc_zero(inst, fr_client_t);
@@ -740,7 +722,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 		return -1;
 	}
 
-	if (fr_pair_list_afrom_file(inst, inst->parent->dict, &inst->pair_list, fp, &done) < 0) {
+	if (fr_pair_list_afrom_file(inst, inst->dict, &inst->pair_list, fp, &done) < 0) {
 		cf_log_perr(conf, "Failed reading %s", inst->filename);
 		fclose(fp);
 		return -1;
@@ -761,7 +743,6 @@ fr_app_io_t proto_cron_crontab = {
 		.config			= crontab_listen_config,
 		.inst_size		= sizeof(proto_cron_crontab_t),
 		.thread_inst_size	= sizeof(proto_cron_crontab_thread_t),
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= 4096,

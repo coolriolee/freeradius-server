@@ -288,7 +288,7 @@ ATTRIBUTE	Fast-Reauth-Username			304	octets
 ATTRIBUTE	Pseudonym-Username			305	octets
 ATTRIBUTE	WiMAX-Auth-Only				306	integer
 ATTRIBUTE	TrafficSelector-Class			307	integer
-ATTRIBUTE	DHCP-Options				309	group ref=..DHCPv4
+ATTRIBUTE	DHCP-Options				309	group ref=@DHCPv4
 ATTRIBUTE	Handoff-Indicator			310	integer
 ATTRIBUTE	User-Privilege				313	integer
 ATTRIBUTE	IPv6-Alloc-Method			314	integer
@@ -1277,7 +1277,7 @@ VALUE	Subscriber-Accounting		GTPP			2
 VALUE	Subscriber-Acct-Interim		Normal			0
 VALUE	Subscriber-Acct-Interim		Suppress		1
 
-VALUE	Subscriber-Acct-Mode		flow-based-auxilliary	0
+VALUE	Subscriber-Acct-Mode		flow-based-auxiliary	0
 VALUE	Subscriber-Acct-Mode		flow-based-all		1
 VALUE	Subscriber-Acct-Mode		flow-based-none		2
 VALUE	Subscriber-Acct-Mode		session-based		3

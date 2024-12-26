@@ -182,12 +182,7 @@ int fr_tls_verify_cert_cb(int ok, X509_STORE_CTX *x509_ctx)
 		STACK_OF(X509)	*our_chain;
 		int		i;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10101000L
 		our_chain = X509_STORE_CTX_get0_chain(x509_ctx);
-#else
-		our_chain = X509_STORE_CTX_get_chain(x509_ctx);
-#endif
-
 		RDEBUG3("Certificate chain - %i cert(s) untrusted", untrusted);
 		for (i = sk_X509_num(our_chain); i > 0 ; i--) {
 			X509 *this_cert = sk_X509_value(our_chain, i - 1);
@@ -279,7 +274,7 @@ done:
 	 *	have been added by this point.
 	 */
 	if (my_ok && (depth == 0)) {
-		if (conf->virtual_server && tls_session->verify_client_cert) {
+		if (conf->verify_certificate && tls_session->verify_client_cert) {
 			RDEBUG2("Requesting certificate validation");
 
 			/*
@@ -358,11 +353,7 @@ int fr_tls_verify_cert_chain(request_t *request, SSL *ssl)
 	/*
 	 *	If there's no client certificate, we just return OK.
 	 */
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	cert = SSL_get0_peer_certificate(ssl);			/* Does not increase ref count */
-#else
-	cert = SSL_get_peer_certificate(ssl);			/* Increases ref count */
-#endif
 	if (!cert) return 1;
 
 	ssl_ctx = SSL_get_SSL_CTX(ssl);
@@ -400,9 +391,6 @@ int fr_tls_verify_cert_chain(request_t *request, SSL *ssl)
 		}
 	}
 
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-	X509_free(cert);
-#endif
 	X509_STORE_CTX_free(store_ctx);
 
 	return ret;
@@ -436,7 +424,7 @@ static unlang_action_t tls_verify_client_cert_result(UNUSED rlm_rcode_t *p_resul
 /** Push a `verify certificate { ... }` call into the current request, using a subrequest
  *
  * @param[in] request		The current request.
- * @Param[in] tls_session	The current TLS session.
+ * @param[in] tls_session	The current TLS session.
  * @return
  *      - UNLANG_ACTION_CALCULATE_RESULT on noop.
  *	- UNLANG_ACTION_PUSHED_CHILD on success.
@@ -463,6 +451,14 @@ static unlang_action_t tls_verify_client_cert_push(request_t *request, fr_tls_se
 	 */
 	MEM(pair_prepend_request(&vp, attr_tls_packet_type) >= 0);
 	vp->vp_uint32 = enum_tls_packet_type_verify_certificate->vb_uint32;
+
+	/*
+	 *	Copy certificate pairs to the child session state
+	 */
+	vp = NULL;
+	while ((vp = fr_pair_find_by_da(&request->parent->session_state_pairs, vp, attr_tls_certificate))) {
+		fr_pair_append(&request->session_state_pairs, fr_pair_copy(request->session_state_ctx, vp));
+	}
 
 	MEM(pair_append_request(&vp, attr_tls_session_resumed) >= 0);
 	vp->vp_bool = tls_session->validate.resumed;
@@ -527,7 +523,7 @@ void fr_tls_verify_cert_request(fr_tls_session_t *tls_session, bool session_resu
 /** Push a `verify certificate { ... }` section
  *
  * @param[in] request		The current request.
- * @Param[in] tls_session	The current TLS session.
+ * @param[in] tls_session	The current TLS session.
  * @return
  *	- UNLANG_ACTION_CALCULATE_RESULT	- No pending actions
  *	- UNLANG_ACTION_PUSHED_CHILD		- Pending operations to evaluate.

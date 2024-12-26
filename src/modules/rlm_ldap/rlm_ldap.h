@@ -32,28 +32,28 @@ typedef struct {
 							//!< identify the autz or acct session the commands were
 							//!< issued for.
 #endif
+	struct {
+		/*
+		 *	User object attributes and filters
+		 */
+		char const	*obj_sort_by;			//!< List of attributes to sort by.
+		LDAPControl	*obj_sort_ctrl;			//!< Server side sort control.
 
-	/*
-	 *	User object attributes and filters
-	 */
-	char const	*userobj_sort_by;		//!< List of attributes to sort by.
-	LDAPControl	*userobj_sort_ctrl;		//!< Server side sort control.
+		int		obj_scope;			//!< Search scope.
 
-	int		userobj_scope;			//!< Search scope.
+		char const	*obj_access_attr;		//!< Attribute to check to see if the user should be locked out.
+		bool		access_positive;		//!< If true the presence of the attribute will allow access,
+								//!< else it will deny access.
 
-	char const	*userobj_access_attr;		//!< Attribute to check to see if the user should be locked out.
-	bool		access_positive;		//!< If true the presence of the attribute will allow access,
-							//!< else it will deny access.
-
-	char const	*access_value_negate;           //!< If the value of the access_attr matches this, the result
-							///< will be negated.
-	char const	*access_value_suspend;          //!< Value that indicates suspension.  Is not affected by
-							///< access_positive and will always allow access, but will apply
-							///< a different profile.
-
-	char const	*valuepair_attr;		//!< Generic dynamic mapping attribute, contains a RADIUS
-							//!< attribute and value.
-
+		char const	*access_value_negate;           //!< If the value of the access_attr matches this, the result
+								///< will be negated.
+		char const	*access_value_suspend;          //!< Value that indicates suspension.  Is not affected by
+								///< access_positive and will always allow access, but will apply
+								///< a different profile.
+		bool		expect_password;		//!< Allow the user to forcefully decide if a password should be
+								///< expected.  Controls whether warnings are issued.
+		bool		expect_password_is_set;		//!< Whether an expect password value was provided.
+	} user;
 
 	/*
 	 *	Group object attributes and filters
@@ -96,6 +96,9 @@ typedef struct {
 		bool		skip_on_suspend;		//!< Don't process groups if the user is suspended.
 	} group;
 
+	char const	*valuepair_attr;		//!< Generic dynamic mapping attribute, contains a RADIUS
+							//!< attribute and value.
+
 	/*
 	 *	Profiles
 	 */
@@ -122,8 +125,10 @@ typedef struct {
 #endif
 
 	fr_ldap_config_t handle_config;			//!< Connection configuration instance.
-	fr_trunk_conf_t	trunk_conf;			//!< Trunk configuration
-	fr_trunk_conf_t	bind_trunk_conf;		//!< Trunk configuration for trunk used for bind auths
+	trunk_conf_t	trunk_conf;			//!< Trunk configuration
+	trunk_conf_t	bind_trunk_conf;		//!< Trunk configuration for trunk used for bind auths
+
+	module_instance_t const *mi;			//!< Module instance data for thread lookups.
 } rlm_ldap_t;
 
 /** Call environment used in LDAP authorization
@@ -167,9 +172,10 @@ typedef enum {
 	LDAP_AUTZ_EDIR_BIND,
 	LDAP_AUTZ_POST_EDIR,
 #endif
+	LDAP_AUTZ_MAP,
+	LDAP_AUTZ_DEFAULT_PROFILE,
 	LDAP_AUTZ_POST_DEFAULT_PROFILE,
 	LDAP_AUTZ_USER_PROFILE,
-	LDAP_AUTZ_MAP
 } ldap_autz_status_t;
 
 /** User's access state
@@ -185,7 +191,7 @@ typedef enum {
  *
  */
 typedef struct {
-	dl_module_inst_t const	*dlinst;
+	module_instance_t const	*dlinst;
 	rlm_ldap_t const	*inst;
 	fr_ldap_map_exp_t	expanded;
 	fr_ldap_query_t		*query;
@@ -224,7 +230,7 @@ typedef struct {
 	fr_ldap_query_t			*query;
 	ldap_group_xlat_status_t	status;
 	bool				found;
-} ldap_memberof_xlat_ctx_t;
+} ldap_group_xlat_ctx_t;
 
 extern HIDDEN fr_dict_attr_t const *attr_password;
 extern HIDDEN fr_dict_attr_t const *attr_cleartext_password;
@@ -257,7 +263,7 @@ unlang_action_t rlm_ldap_find_user_async(TALLOC_CTX *ctx, rlm_ldap_t const *inst
 
 ldap_access_state_t rlm_ldap_check_access(rlm_ldap_t const *inst, request_t *request, LDAPMessage *entry);
 
-void rlm_ldap_check_reply(request_t *request, char const *inst_name, bool expect_password, fr_ldap_thread_trunk_t const *ttrunk);
+void rlm_ldap_check_reply(request_t *request, rlm_ldap_t const *inst, char const *inst_name, bool expect_password, fr_ldap_thread_trunk_t const *ttrunk);
 
 /*
  *	groups.c - Group membership functions.
@@ -268,10 +274,10 @@ unlang_action_t rlm_ldap_cacheable_userobj(rlm_rcode_t *p_result, request_t *req
 unlang_action_t rlm_ldap_cacheable_groupobj(rlm_rcode_t *p_result, request_t *request, ldap_autz_ctx_t *autz_ctx);
 
 unlang_action_t rlm_ldap_check_groupobj_dynamic(rlm_rcode_t *p_result, request_t *request,
-						ldap_memberof_xlat_ctx_t *xlat_ctx);
+						ldap_group_xlat_ctx_t *xlat_ctx);
 
 unlang_action_t rlm_ldap_check_userobj_dynamic(rlm_rcode_t *p_result, request_t *request,
-					       ldap_memberof_xlat_ctx_t *xlat_ctx);
+					       ldap_group_xlat_ctx_t *xlat_ctx);
 
 unlang_action_t rlm_ldap_check_cached(rlm_rcode_t *p_result,
 				      rlm_ldap_t const *inst, request_t *request, fr_value_box_t const *check);

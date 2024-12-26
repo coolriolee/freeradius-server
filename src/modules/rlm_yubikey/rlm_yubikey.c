@@ -136,7 +136,7 @@ static xlat_arg_parser_t const modhex_to_hex_xlat_arg[] = {
  *
  * Example:
 @verbatim
-"%{modhextohex:vvrbuctetdhc}" == "ffc1e0d3d260"
+%modhextohex('vvrbuctetdhc') == "ffc1e0d3d260"
 @endverbatim
  *
  * @ingroup xlat_functions
@@ -179,7 +179,7 @@ static int mod_load(void)
 	}
 
 	if (unlikely(!(xlat = xlat_func_register(NULL, "modhextohex", modhex_to_hex_xlat, FR_TYPE_STRING)))) return -1;
-	xlat_func_mono_set(xlat, modhex_to_hex_xlat_arg);
+	xlat_func_args_set(xlat, modhex_to_hex_xlat_arg);
 	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	return 0;
@@ -194,10 +194,10 @@ static void mod_unload(void)
 #ifndef HAVE_YUBIKEY
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_yubikey_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_yubikey_t);
+	rlm_yubikey_t const *inst = talloc_get_type_abort(mctx->mi->data, rlm_yubikey_t);
 
 	if (inst->decrypt) {
-		cf_log_err(mctx->inst->conf, "Requires libyubikey for OTP decryption");
+		cf_log_err(mctx->mi->conf, "Requires libyubikey for OTP decryption");
 		return -1;
 	}
 	return 0;
@@ -216,15 +216,15 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_yubikey_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_yubikey_t);
-	CONF_SECTION    *conf = mctx->inst->conf;
+	rlm_yubikey_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_yubikey_t);
+	CONF_SECTION    *conf = mctx->mi->conf;
 
-	inst->name = mctx->inst->name;
+	inst->name = mctx->mi->name;
 
 	inst->auth_type = fr_dict_enum_by_name(attr_auth_type, inst->name, -1);
 	if (!inst->auth_type) {
 		WARN("Failed to find 'authenticate %s {...}' section.  Yubikey authentication will likely not work",
-		     mctx->inst->name);
+		     mctx->mi->name);
 	}
 
 	if (inst->validate) {
@@ -252,7 +252,7 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 #ifdef HAVE_YKCLIENT
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_yubikey_ykclient_detach(talloc_get_type_abort(mctx->inst->data, rlm_yubikey_t));
+	rlm_yubikey_ykclient_detach(talloc_get_type_abort(mctx->mi->data, rlm_yubikey_t));
 	return 0;
 }
 #endif
@@ -277,7 +277,7 @@ static int CC_HINT(nonnull) otp_string_valid(rlm_yubikey_t const *inst, char con
  */
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_yubikey_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_yubikey_t);
+	rlm_yubikey_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_yubikey_t);
 	char const		*passcode;
 	size_t			len;
 	fr_pair_t		*vp, *password;
@@ -367,7 +367,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 
 	if (!inst->auth_type) {
 		WARN("No 'authenticate %s {...}' section or 'Auth-Type = %s' set.  Cannot setup Yubikey authentication",
-		     mctx->inst->name, mctx->inst->name);
+		     mctx->mi->name, mctx->mi->name);
 		RETURN_MODULE_NOOP;
 	}
 
@@ -382,7 +382,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
  */
 static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_yubikey_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_yubikey_t);
+	rlm_yubikey_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_yubikey_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	char const		*passcode = NULL;
 	fr_pair_t const	*vp;
@@ -456,7 +456,6 @@ module_rlm_t rlm_yubikey = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "yubikey",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_yubikey_t),
 		.onload		= mod_load,
 		.unload		= mod_unload,
@@ -469,9 +468,11 @@ module_rlm_t rlm_yubikey = {
 		.detach		= mod_detach,
 #endif
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "recv",		.name2 = "access-request",	.method = mod_authorize },
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate },
+			{ .section = SECTION_NAME("recv", "Access-Request"), .method = mod_authorize },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

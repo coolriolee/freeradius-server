@@ -25,7 +25,6 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <freeradius-devel/server/protocol.h>
-#include <freeradius-devel/radius/radius.h>
 #include <freeradius-devel/io/application.h>
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/io/schedule.h>
@@ -74,6 +73,8 @@ struct proto_load_step_s {
 	fr_load_config_t		load;			//!< load configuration
 	bool				repeat;			//!, do we repeat the load generation
 	char const     			*csv;			//!< where to write CSV stats
+
+	fr_dict_t const			*dict;			//!< Our namespace.
 };
 
 
@@ -263,7 +264,7 @@ static int mod_decode(void const *instance, request_t *request, UNUSED uint8_t *
 	 *	generic->protocol attribute conversions as
 	 *	the request runs through the server.
 	 */
-	request->dict = inst->parent->dict;
+	request->dict = inst->dict;
 
 	/*
 	 *	Hacks for now until we have a lower-level decode routine.
@@ -271,16 +272,10 @@ static int mod_decode(void const *instance, request_t *request, UNUSED uint8_t *
 	if (inst->code) request->packet->code = inst->code;
 	request->packet->id = fr_rand() & 0xff;
 	request->reply->id = request->packet->id;
-	memset(request->packet->vector, 0, sizeof(request->packet->vector));
 
 	request->packet->data = talloc_zero_array(request->packet, uint8_t, 1);
 	request->packet->data_len = 1;
 
-	/*
-	 *	Note that we don't set a limit on max_attributes here.
-	 *	That MUST be set and checked in the underlying
-	 *	transport, via a call to fr_radius_ok().
-	 */
 	(void) fr_pair_list_copy(request->request_ctx, &request->request_pairs, &inst->pair_list);
 
 	/*
@@ -342,23 +337,57 @@ static char const *mod_name(fr_listen_t *li)
 	return thread->name;
 }
 
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_load_step_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_load_step_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-	dl_module_inst_t const	*dl_inst;
+	proto_load_step_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_load_step_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
+	fr_client_t		*client;
+	fr_pair_t		*vp;
+	module_instance_t const	*mi = mctx->mi;
 
-	/*
-	 *	Find the dl_module_inst_t holding our instance data
-	 *	so we can find out what the parent of our instance
-	 *	was.
-	 */
-	dl_inst = dl_module_instance_by_data(inst);
-	fr_assert(dl_inst);
+	inst->dict = virtual_server_dict_by_child_ci(cf_section_to_item(conf));
+	if (!inst->dict) {
+		cf_log_err(conf, "Please define 'namespace' in this virtual server");
+		return -1;
+	}
 
-	inst->parent = talloc_get_type_abort(dl_inst->parent->data, proto_load_t);
+	fr_pair_list_init(&inst->pair_list);
+	inst->client = client = talloc_zero(inst, fr_client_t);
+	if (!inst->client) return 0;
+
+	client->ipaddr.af = AF_INET;
+	client->src_ipaddr = client->ipaddr;
+
+	client->longname = client->shortname = inst->filename;
+	client->secret = talloc_strdup(client, "testing123");
+	client->nas_type = talloc_strdup(client, "load");
+	client->use_connected = false;
+
+	if (inst->filename) {
+		FILE *fp;
+		bool done = false;
+
+		fp = fopen(inst->filename, "r");
+		if (!fp) {
+			cf_log_err(conf, "Failed opening %s - %s",
+				   inst->filename, fr_syserror(errno));
+			return -1;
+		}
+
+		if (fr_pair_list_afrom_file(inst, inst->dict, &inst->pair_list, fp, &done) < 0) {
+			cf_log_perr(conf, "Failed reading %s", inst->filename);
+			fclose(fp);
+			return -1;
+		}
+
+		fclose(fp);
+	}
+
+	inst->parent = talloc_get_type_abort(mi->parent->data, proto_load_t);
 	inst->cs = conf;
+
+	vp = fr_pair_find_by_da(&inst->pair_list, NULL, inst->parent->attr_packet_type);
+	if (vp) inst->code = vp->vp_uint32;
 
 	FR_INTEGER_BOUND_CHECK("start_pps", inst->load.start_pps, >=, 10);
 	FR_INTEGER_BOUND_CHECK("start_pps", inst->load.start_pps, <, 400000);
@@ -389,52 +418,6 @@ static fr_client_t *mod_client_find(fr_listen_t *li, UNUSED fr_ipaddr_t const *i
 	return inst->client;
 }
 
-
-static int mod_instantiate(module_inst_ctx_t const *mctx)
-{
-	proto_load_step_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_load_step_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
-	fr_client_t		*client;
-	fr_pair_t		*vp;
-
-	fr_pair_list_init(&inst->pair_list);
-	inst->client = client = talloc_zero(inst, fr_client_t);
-	if (!inst->client) return 0;
-
-	client->ipaddr.af = AF_INET;
-	client->src_ipaddr = client->ipaddr;
-
-	client->longname = client->shortname = inst->filename;
-	client->secret = talloc_strdup(client, "testing123");
-	client->nas_type = talloc_strdup(client, "load");
-	client->use_connected = false;
-
-	if (inst->filename) {
-		FILE *fp;
-		bool done = false;
-
-		fp = fopen(inst->filename, "r");
-		if (!fp) {
-			cf_log_err(conf, "Failed opening %s - %s",
-				   inst->filename, fr_syserror(errno));
-			return -1;
-		}
-
-		if (fr_pair_list_afrom_file(inst, inst->parent->dict, &inst->pair_list, fp, &done) < 0) {
-			cf_log_perr(conf, "Failed reading %s", inst->filename);
-			fclose(fp);
-			return -1;
-		}
-
-		fclose(fp);
-	}
-
-	vp = fr_pair_find_by_da(&inst->pair_list, NULL, inst->parent->attr_packet_type);
-	if (vp) inst->code = vp->vp_uint32;
-
-	return 0;
-}
-
 fr_app_io_t proto_load_step = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
@@ -442,7 +425,6 @@ fr_app_io_t proto_load_step = {
 		.config			= load_listen_config,
 		.inst_size		= sizeof(proto_load_step_t),
 		.thread_inst_size	= sizeof(proto_load_step_thread_t),
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= 4096,

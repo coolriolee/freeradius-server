@@ -182,6 +182,9 @@ ldap {
 	#  section name to set default destination requests/lists
 	#  for `<fr attr>s` with no list qualifiers.
 	#
+	#  These attribute maps are applied _before_ any profiles, meaning that
+	#  the values here can be referenced in profiles using expansions.
+	#
 	#  NOTE: LDAP attribute names should be single quoted unless you want
 	#  the name to be derived from an xlat expansion, or an attribute ref.
 	#
@@ -228,7 +231,7 @@ ldap {
 	#  ----
 	#  ldap
 	#  if ((ok || updated) && &User-Password) {
-	#  	&control.Auth-Type := ldap
+	#  	&control.Auth-Type := ::ldap
 	#  }
 	#  ----
 	#  ====
@@ -298,6 +301,13 @@ ldap {
 		#
 		#  password_attribute:: Which attribute in the request should be used as
 		#  the password when performing user binds.
+		#
+		#  Note that Active Directory will allow unauthenticated user binds by default!
+		#
+		#  You can fix this by choosing the "ADSI Edit" command from the Server Manager's Tools menu.
+		#  Then, open the Configuration subtree, and then open the properties of the `CN=Directory
+		#  Service, CN=Windows NT, CN=Services, CN=Configuration` object.  Modify the
+		#  `msDS-Other-Settings` attribute, and add a new entry for `DenyUnauthenticatedBind=1`.
 		#
 #		password_attribute = &User-Password
 
@@ -370,6 +380,14 @@ ldap {
 		#  to indicate that the user should be suspended.
 		#
 #		access_value_suspend = 'suspended'
+
+		#
+		#  expect_password:: When set to no, disable warnings for missing password
+		#  attributes in user objects returned from LDAP.  This is useful for
+		#  ISP environments where some subscribers have passwords set, and others
+		#  do not (e.g. mixed IPoE and PPPoE).
+		#
+#		expect_password = no
 	}
 
 	#
@@ -896,7 +914,7 @@ ldap {
 #
 #  The rlm_ldap provides the below xlat's functions.
 #
-#  ### %ldap.uri.escape(...}
+#  ### %ldap.uri.escape(...)
 #
 #  Escape a string for use in an LDAP filter or DN.  The value will then be marked as safe for use
 #  in LDAP URIs and DNs, and will not be escaped or modified.
@@ -917,7 +935,7 @@ ldap {
 #  "The LDAP url is ldap:///ou=profiles,dc=example,dc=com??sub?\28objectClass=radiusprofile\29"
 #  ```
 #
-#  ### %ldap.uri.safe(...}
+#  ### %ldap.uri.safe(...)
 #
 #  Mark a string as safe for use in an LDAP filter or DN.  Values marked as safe for use in LDAP
 #  URIs will not be escaped or modified, and will be allowed in places where dynamic values are
@@ -951,4 +969,25 @@ ldap {
 #  ```
 #  "The LDAP url is ldap:///ou=profiles,dc=example,dc=com??sub?(objectClass=radiusprofile)"
 #  ```
+#
+#  ### %ldap.group(...)
+#
+#  Check whether the current user is a member of a the given group.  If the attribute
+#  `control.LDAP-UserDN` exists, that will be used as the "user" object.  If it does
+#  not then the user is first looked up using the filter form the `user { }` section
+#  of the module configuration.
+#
+#  Groups can be specified either as a name or a DN, with a lookup used if necessary
+#  to convert to the required format.
+#
+#  .Return: _bool_
+#
+#  .Example
+#
+#  [source,unlang]
+#  ---
+#  if (%ldap.group('cn=group1,ou=Groups,dc=example,dc=org')) {
+#    ...
+#  }
+#  ---
 #

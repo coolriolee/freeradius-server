@@ -24,7 +24,7 @@
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
@@ -36,7 +36,6 @@ RCSID("$Id$")
 #include "log.h"
 
 typedef struct {
-	char const	*name;
 	uint32_t	timeout;
 
 	char const	*filename;		//!< Unbound configuration file
@@ -220,7 +219,7 @@ static void xlat_unbound_callback(void *mydata, int rcode, void *packet, int pac
 				 */
 				fr_value_box_t	*priority_vb;
 				if (rdlength < 3) {
-					REDEBUG("%s - Invalid data returned", ur->t->inst->name);
+					REDEBUG("Invalid data returned");
 					goto error;
 				}
 				MEM(priority_vb = fr_value_box_alloc_null(ur->out_ctx));
@@ -297,7 +296,7 @@ static xlat_action_t xlat_unbound_resume(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *o
 	if (ur->timedout) return XLAT_ACTION_FAIL;
 
 #define RCODEERROR(_code, _message) case _code: \
-	REDEBUG(_message, ur->t->inst->name); \
+	REDEBUG(_message, xctx->mctx->mi->name); \
 	goto error
 
 	/*	Check for unbound errors */
@@ -306,7 +305,7 @@ static xlat_action_t xlat_unbound_resume(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *o
 		break;
 
 	default:
-		REDEBUG("%s - Unknown DNS error", ur->t->inst->name);
+		REDEBUG("Unknown DNS error");
 	error:
 		talloc_free(ur);
 		return XLAT_ACTION_FAIL;
@@ -348,7 +347,7 @@ static xlat_action_t xlat_unbound(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				  xlat_ctx_t const *xctx,
 				  request_t *request, fr_value_box_list_t *in)
 {
-	rlm_unbound_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_unbound_t);
+	rlm_unbound_t const		*inst = talloc_get_type_abort_const(xctx->mctx->mi->data, rlm_unbound_t);
 	rlm_unbound_thread_t		*t = talloc_get_type_abort(xctx->mctx->thread, rlm_unbound_thread_t);
 	fr_value_box_t			*host_vb = fr_value_box_list_head(in);
 	fr_value_box_t			*query_vb = fr_value_box_list_next(in, host_vb);
@@ -421,7 +420,7 @@ static xlat_action_t xlat_unbound(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_unbound_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_unbound_t);
+	rlm_unbound_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_unbound_t);
 	rlm_unbound_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_unbound_thread_t);
 	int			res;
 
@@ -486,17 +485,15 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_unbound_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_unbound_t);
-	xlat_t		*xlat;
-
-	inst->name = mctx->inst->name;
+	rlm_unbound_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_unbound_t);
+	xlat_t			*xlat;
 
 	if (inst->timeout > 10000) {
-		cf_log_err(mctx->inst->conf, "timeout must be 0 to 10000");
+		cf_log_err(mctx->mi->conf, "timeout must be 0 to 10000");
 		return -1;
 	}
 
-	if(!(xlat = xlat_func_register_module(NULL, mctx, mctx->inst->name, xlat_unbound, FR_TYPE_VOID))) return -1;
+	if(!(xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, xlat_unbound, FR_TYPE_VOID))) return -1;
 	xlat_func_args_set(xlat, xlat_unbound_args);
 
 	return 0;
@@ -507,7 +504,6 @@ module_rlm_t rlm_unbound = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "unbound",
-		.flags			= MODULE_TYPE_THREAD_SAFE,
 		.inst_size		= sizeof(rlm_unbound_t),
 		.config			= module_config,
 		.bootstrap		= mod_bootstrap,

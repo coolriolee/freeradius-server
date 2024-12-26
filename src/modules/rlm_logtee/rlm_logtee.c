@@ -115,7 +115,7 @@ typedef struct {
 typedef struct {
 	rlm_logtee_t const	*inst;			//!< Instance of logtee.
 	fr_event_list_t		*el;			//!< This thread's event list.
-	fr_connection_t		*conn;			//!< Connection to our log destination.
+	connection_t		*conn;			//!< Connection to our log destination.
 
 	fr_fring_t		*fring;			//!< Circular buffer used to batch up messages.
 
@@ -219,7 +219,7 @@ static void _logtee_conn_error(UNUSED fr_event_list_t *el, int sock, UNUSED int 
 	/*
 	 *	Something bad happened... Fix it...
 	 */
-	fr_connection_signal_reconnect(t->conn, FR_CONNECTION_FAILED);
+	connection_signal_reconnect(t->conn, CONNECTION_FAILED);
 }
 
 /** Drain any data we received
@@ -244,7 +244,7 @@ static void _logtee_conn_read(UNUSED fr_event_list_t *el, int sock, UNUSED int f
 		case ETIMEDOUT:
 		case EIO:
 		case ENXIO:
-			fr_connection_signal_reconnect(t->conn, FR_CONNECTION_FAILED);
+			connection_signal_reconnect(t->conn, CONNECTION_FAILED);
 			return;
 
 		/*
@@ -289,7 +289,7 @@ static void _logtee_conn_writable(UNUSED fr_event_list_t *el, int sock, UNUSED i
 			case ENXIO:
 			case EPIPE:
 			case ENETDOWN:
-				fr_connection_signal_reconnect(t->conn, FR_CONNECTION_FAILED);
+				connection_signal_reconnect(t->conn, CONNECTION_FAILED);
 				return;
 
 			/*
@@ -319,7 +319,7 @@ static void logtee_fd_idle(rlm_logtee_thread_t *t)
 	int fd = *((int *)t->conn->h);
 
 	DEBUG3("Marking socket (%i) as idle", fd);
-	if (fr_event_fd_insert(t->conn, t->el, fd,
+	if (fr_event_fd_insert(t->conn, NULL, t->el, fd,
 			       _logtee_conn_read,
 			       NULL,
 			       _logtee_conn_error,
@@ -339,7 +339,7 @@ static void logtee_fd_active(rlm_logtee_thread_t *t)
 	int fd = *((int *)t->conn->h);
 
 	DEBUG3("Marking socket (%i) as active - Draining requests", fd);
-	if (fr_event_fd_insert(t->conn, t->el, fd,
+	if (fr_event_fd_insert(t->conn, NULL, t->el, fd,
 			       _logtee_conn_read,
 			       _logtee_conn_writable,
 			       _logtee_conn_error,
@@ -363,7 +363,7 @@ static void _logtee_conn_close(UNUSED fr_event_list_t *el, void *h, UNUSED void 
 /** Process notification that fd is open
  *
  */
-static fr_connection_state_t _logtee_conn_open(UNUSED fr_event_list_t *el, UNUSED void *h, void *uctx)
+static connection_state_t _logtee_conn_open(UNUSED fr_event_list_t *el, UNUSED void *h, void *uctx)
 {
 	rlm_logtee_thread_t	*t = talloc_get_type_abort(uctx, rlm_logtee_thread_t);
 
@@ -378,7 +378,7 @@ static fr_connection_state_t _logtee_conn_open(UNUSED fr_event_list_t *el, UNUSE
 		logtee_fd_idle(t);
 	}
 
-	return FR_CONNECTION_STATE_CONNECTED;
+	return CONNECTION_STATE_CONNECTED;
 }
 
 /** Initialise a new outbound connection
@@ -387,7 +387,8 @@ static fr_connection_state_t _logtee_conn_open(UNUSED fr_event_list_t *el, UNUSE
  * @param[in] conn	being initialised.
  * @param[in] uctx	A #rlm_logtee_thread_t.
  */
-static fr_connection_state_t _logtee_conn_init(void **h_out, fr_connection_t *conn, void *uctx)
+CC_NO_UBSAN(function) /* UBSAN: false positive - public vs private connection_t trips --fsanitize=function*/
+static connection_state_t _logtee_conn_init(void **h_out, connection_t *conn, void *uctx)
 {
 	rlm_logtee_thread_t	*t = talloc_get_type_abort(uctx, rlm_logtee_thread_t);
 	rlm_logtee_t const	*inst = t->inst;
@@ -398,21 +399,21 @@ static fr_connection_state_t _logtee_conn_init(void **h_out, fr_connection_t *co
 	case LOGTEE_DST_UNIX:
 		DEBUG2("Opening UNIX socket at \"%s\"", inst->unix_sock.path);
 		fd = fr_socket_client_unix(inst->unix_sock.path, true);
-		if (fd < 0) return FR_CONNECTION_STATE_FAILED;
+		if (fd < 0) return CONNECTION_STATE_FAILED;
 		break;
 
 	case LOGTEE_DST_TCP:
 		DEBUG2("Opening TCP connection to %pV:%u",
 		       fr_box_ipaddr(inst->tcp.dst_ipaddr), inst->tcp.port);
 		fd = fr_socket_client_tcp(NULL, NULL, &inst->tcp.dst_ipaddr, inst->tcp.port, true);
-		if (fd < 0) return FR_CONNECTION_STATE_FAILED;
+		if (fd < 0) return CONNECTION_STATE_FAILED;
 		break;
 
 	case LOGTEE_DST_UDP:
 		DEBUG2("Opening UDP connection to %pV:%u",
 		       fr_box_ipaddr(inst->udp.dst_ipaddr), inst->udp.port);
 		fd = fr_socket_client_udp(NULL, NULL, NULL, &inst->udp.dst_ipaddr, inst->udp.port, true);
-		if (fd < 0) return FR_CONNECTION_STATE_FAILED;
+		if (fd < 0) return CONNECTION_STATE_FAILED;
 		break;
 
 	/*
@@ -421,7 +422,7 @@ static fr_connection_state_t _logtee_conn_init(void **h_out, fr_connection_t *co
 	case LOGTEE_DST_INVALID:
 	case LOGTEE_DST_FILE:
 		fr_assert(0);
-		return FR_CONNECTION_STATE_FAILED;
+		return CONNECTION_STATE_FAILED;
 	}
 
 	/*
@@ -431,9 +432,9 @@ static fr_connection_state_t _logtee_conn_init(void **h_out, fr_connection_t *co
 	*fd_s = fd;
 	*h_out = fd_s;
 
-	fr_connection_signal_on_fd(conn, fd);
+	connection_signal_on_fd(conn, fd);
 
-	return FR_CONNECTION_STATE_CONNECTING;
+	return CONNECTION_STATE_CONNECTING;
 }
 
 /** Logging callback to write log messages to a destination
@@ -554,7 +555,7 @@ static unlang_action_t mod_insert_logtee(rlm_rcode_t *p_result, module_ctx_t con
  */
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_logtee_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_logtee_t);
+	rlm_logtee_t		*inst = talloc_get_type_abort(mctx->mi->data, rlm_logtee_t);
 	rlm_logtee_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_logtee_thread_t);
 
 	MEM(t->fring = fr_fring_alloc(t, inst->buffer_depth, false));
@@ -573,20 +574,20 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 	/*
 	 *	This opens the outbound connection
 	 */
-	t->conn = fr_connection_alloc(t, t->el,
-				      &(fr_connection_funcs_t){
+	t->conn = connection_alloc(t, t->el,
+				      &(connection_funcs_t){
 					.init = _logtee_conn_init,
 				   	.open = _logtee_conn_open,
 				   	.close = _logtee_conn_close
 				      },
-				      &(fr_connection_conf_t){
+				      &(connection_conf_t){
 					.connection_timeout = inst->connection_timeout,
 				   	.reconnection_delay = inst->reconnection_delay
 				      },
 				      inst->name, t);
 	if (t->conn == NULL) return -1;
 
-	fr_connection_signal_init(t->conn);
+	connection_signal_init(t->conn);
 
 	return 0;
 }
@@ -596,8 +597,8 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_logtee_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_logtee_t);
-	CONF_SECTION    *conf = mctx->inst->conf;
+	rlm_logtee_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_logtee_t);
+	CONF_SECTION    *conf = mctx->mi->conf;
 	char		prefix[100];
 
 	/*
@@ -665,8 +666,10 @@ module_rlm_t rlm_logtee = {
 		.instantiate		= mod_instantiate,
 		.thread_instantiate	= mod_thread_instantiate,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_insert_logtee },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_insert_logtee },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

@@ -40,6 +40,7 @@ dialect:: The dialect of SQL you want to use.
 Allowed dialects are:
 
     * cassandra
+    * firebird
     * mysql
     * mssql
     * oracle
@@ -66,7 +67,6 @@ we can fix them,
 |===
 | Driver            | Dialect
 | db2               | mssql
-| firebird          | mssql
 | freetds           | mssql
 | null              | any
 | unixodbc          | mssql
@@ -144,6 +144,19 @@ Default is `yes`.
 
 
 
+read_profiles:: Read the user profile attributes from the database.
+
+Following `check` and `reply` item handling and, depending on the `read_groups` option
+and `Fall-Through` value, groups processing, the SQL module will treat values of the
+`User-Profile` attributes in the control list as additional groups that the user belongs
+to and repeat the group `check` and `reply` processing.
+
+If set to `yes`, we process the user profiles unless `Fall-Through = no` in the reply list.
+If set to `no`, we do not process the user profiles unless `Fall-Through = yes` in the reply list.
+
+Default is `yes`.
+
+
 logfile:: Write SQL queries to a logfile.
 
 This is potentially useful for tracing issues with authorization queries.
@@ -155,7 +168,7 @@ Per-section logging can be disabled by setting "logfile = ''"
 
 
 
-query_timeout:: Set the maximum query duration for `mysql` and `cassandra`.
+query_timeout:: Set the maximum query duration for `cassandra` and `unixodbc`
 
 
 
@@ -334,7 +347,7 @@ please create them and contribute them back to the project.
 sql {
 	dialect = "sqlite"
 	driver = "${dialect}"
-	$-INCLUDE ${modconfdir}/sql/driver/${dialect}
+	$-INCLUDE ${modconfdir}/sql/driver/${driver}
 #	server = "localhost"
 #	port = 3306
 #	login = "radius"
@@ -352,6 +365,7 @@ sql {
 	groupreply_table = "radgroupreply"
 	usergroup_table = "radusergroup"
 #	read_groups = yes
+#	read_profile = yes
 #	logfile = ${logdir}/sqllog.sql
 #	query_timeout = 5
 	pool {

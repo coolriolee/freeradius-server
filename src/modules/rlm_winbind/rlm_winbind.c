@@ -24,11 +24,11 @@
  * @copyright 2016 The FreeRADIUS server project
  * @copyright 2016 Matthew Newton (matthew@newtoncomputing.co.uk)
  */
-
 RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <freeradius-devel/unlang/call_env.h>
 #include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/util/debug.h>
 
@@ -42,8 +42,14 @@ static const conf_parser_t group_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
+static conf_parser_t reuse_winbind_config[] = {
+	FR_SLAB_CONFIG_CONF_PARSER
+	CONF_PARSER_TERMINATOR
+};
+
 static const conf_parser_t module_config[] = {
 	{ FR_CONF_POINTER("group", 0, CONF_FLAG_SUBSECTION, NULL), .subcs = (void const *) group_config },
+	{ FR_CONF_OFFSET_SUBSECTION("reuse", 0, rlm_winbind_t, reuse, reuse_winbind_config) },
 	CONF_PARSER_TERMINATOR
 };
 
@@ -86,9 +92,10 @@ typedef struct {
  *	- 1 failure or user is not in group
  */
 static bool winbind_check_group(rlm_winbind_t const *inst, request_t *request, char const *name,
-				winbind_group_xlat_call_env_t *env)
+				winbind_group_xlat_call_env_t *env, rlm_winbind_thread_t *t)
 {
 	bool			rcode = false;
+	winbind_ctx_t		*wbctx;
 	struct wbcContext	*wb_ctx;
 	wbcErr			err;
 	uint32_t		num_groups, i;
@@ -125,13 +132,14 @@ static bool winbind_check_group(rlm_winbind_t const *inst, request_t *request, c
 	}
 
 	/*
-	 *	Get a libwbclient connection from the pool
+	 *	Get a libwbclient context
 	 */
-	wb_ctx = fr_pool_connection_get(inst->wb_pool, request);
-	if (wb_ctx == NULL) {
-		RERROR("Unable to get winbind connection from the pool");
+	wbctx = winbind_slab_reserve(t->slab);
+	if (!wbctx) {
+		RERROR("Unable to get winbind context");
 		goto error;
 	}
+	wb_ctx = wbctx->ctx;
 
 	RDEBUG2("Trying to find user \"%s\" in group \"%s\"", username, name);
 
@@ -221,7 +229,7 @@ static bool winbind_check_group(rlm_winbind_t const *inst, request_t *request, c
 
 finish:
 	wbcFreeMemory(wb_groups);
-	fr_pool_connection_release(inst->wb_pool, request, wb_ctx);
+	winbind_slab_release(wbctx);
 
 error:
 	talloc_free(username_buff);
@@ -243,8 +251,9 @@ static xlat_action_t winbind_group_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				     xlat_ctx_t const *xctx,
 				     request_t *request, fr_value_box_list_t *in)
 {
-	rlm_winbind_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_winbind_t);
+	rlm_winbind_t const	*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_winbind_t);
 	winbind_group_xlat_call_env_t	*env = talloc_get_type_abort(xctx->env_data, winbind_group_xlat_call_env_t);
+	rlm_winbind_thread_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_winbind_thread_t);
 	fr_value_box_t		*arg = fr_value_box_list_head(in);
 	char const		*p = arg->vb_strvalue;
 	fr_value_box_t		*vb;
@@ -252,52 +261,35 @@ static xlat_action_t winbind_group_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	fr_skip_whitespace(p);
 
 	MEM(vb = fr_value_box_alloc(ctx, FR_TYPE_BOOL, attr_expr_bool_enum));
-	vb->vb_bool = winbind_check_group(inst, request, p, env);
+	vb->vb_bool = winbind_check_group(inst, request, p, env, t);
 	fr_dcursor_append(out, vb);
 
 	return XLAT_ACTION_DONE;
 }
 
 
-/** Free connection pool winbind context
- *
- * @param[in] wb_ctx libwbclient context
- * @return 0
+/*
+ *	Free winbind context
  */
-static int _mod_conn_free(struct wbcContext **wb_ctx)
+static int _mod_ctx_free(winbind_ctx_t *wbctx)
 {
-	wbcCtxFree(*wb_ctx);
-
+	wbcCtxFree(wbctx->ctx);
 	return 0;
 }
 
-
-/** Create connection pool winbind context
- *
- * @param[in] ctx	talloc context
- * @param[in] instance	Module instance (unused)
- * @param[in] timeout	Connection timeout
- *
- * @return pointer to libwbclient context
+/*
+ *	Create winbind context
  */
-static void *mod_conn_create(TALLOC_CTX *ctx, UNUSED void *instance, UNUSED fr_time_delta_t timeout)
+static int winbind_ctx_alloc(winbind_ctx_t *wbctx, UNUSED void *uctx)
 {
-	struct wbcContext **wb_ctx;
-
-	wb_ctx = talloc_zero(ctx, struct wbcContext *);
-	*wb_ctx = wbcCtxCreate();
-
-	if (*wb_ctx == NULL) {
-		PERROR("failed to create winbind context");
-		talloc_free(wb_ctx);
-		return NULL;
+	wbctx->ctx = wbcCtxCreate();
+	if (!wbctx->ctx) {
+		fr_strerror_printf("Unable to create winbind context");
+		return -1;
 	}
-
-	talloc_set_destructor(wb_ctx, _mod_conn_free);
-
-	return *wb_ctx;
+	talloc_set_destructor(wbctx, _mod_ctx_free);
+	return 0;
 }
-
 
 static xlat_arg_parser_t const winbind_group_xlat_arg[] = {
 	{ .required = true, .type = FR_TYPE_STRING, .concat = true },
@@ -315,37 +307,13 @@ static xlat_arg_parser_t const winbind_group_xlat_arg[] = {
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_winbind_t			*inst = talloc_get_type_abort(mctx->inst->data, rlm_winbind_t);
-	CONF_SECTION			*conf = mctx->inst->conf;
+	rlm_winbind_t			*inst = talloc_get_type_abort(mctx->mi->data, rlm_winbind_t);
 
-	inst->wb_pool = module_rlm_connection_pool_init(conf, inst, mod_conn_create, NULL, NULL, NULL, NULL);
-	if (!inst->wb_pool) {
-		cf_log_err(conf, "Unable to initialise winbind connection pool");
-		return -1;
-	}
-
-	inst->auth_type = fr_dict_enum_by_name(attr_auth_type, mctx->inst->name, -1);
+	inst->auth_type = fr_dict_enum_by_name(attr_auth_type, mctx->mi->name, -1);
 	if (!inst->auth_type) {
 		WARN("Failed to find 'authenticate %s {...}' section.  Winbind authentication will likely not work",
-		     mctx->inst->name);
+		     mctx->mi->name);
 	}
-
-	return 0;
-}
-
-
-/** Tidy up module instance
- *
- * Frees up the libwbclient connection pool.
- *
- * @param[in] mctx	data for this module
- * @return 0
- */
-static int mod_detach(module_detach_ctx_t const *mctx)
-{
-	rlm_winbind_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_winbind_t);
-
-	fr_pool_free(inst->wb_pool);
 
 	return 0;
 }
@@ -364,7 +332,7 @@ static int mod_detach(module_detach_ctx_t const *mctx)
  */
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_winbind_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_winbind_t);
+	rlm_winbind_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_winbind_t);
 	winbind_autz_call_env_t	*env = talloc_get_type_abort(mctx->env_data, winbind_autz_call_env_t);
 	fr_pair_t		*vp;
 
@@ -377,7 +345,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 
 	if (!inst->auth_type) {
 		WARN("No 'authenticate %s {...}' section or 'Auth-Type = %s' set.  Cannot setup Winbind authentication",
-		     mctx->inst->name, mctx->inst->name);
+		     mctx->mi->name, mctx->mi->name);
 		RETURN_MODULE_NOOP;
 	}
 
@@ -395,8 +363,8 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
  */
 static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_winbind_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_winbind_t);
 	winbind_auth_call_env_t	*env = talloc_get_type_abort(mctx->env_data, winbind_auth_call_env_t);
+	rlm_winbind_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_winbind_thread_t);
 
 	/*
 	 *	Make sure the supplied password isn't empty
@@ -420,7 +388,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 	 *	many debug outputs or errors as the auth function is
 	 *	chatty enough.
 	 */
-	if (do_auth_wbclient_pap(inst, request, env) == 0) {
+	if (do_auth_wbclient_pap(request, env, t) == 0) {
 		RDEBUG2("User authenticated successfully using winbind");
 		RETURN_MODULE_OK;
 	}
@@ -438,7 +406,7 @@ static const call_env_method_t winbind_autz_method_env = {
 };
 
 static int domain_call_env_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci,
-				 UNUSED void const *data, UNUSED call_env_parser_t const *rule)
+				 UNUSED call_env_ctx_t const *cec, UNUSED call_env_parser_t const *rule)
 {
 	CONF_PAIR const			*to_parse = cf_item_to_pair(ci);
 	tmpl_t				*parsed_tmpl = NULL;
@@ -536,8 +504,7 @@ static const call_env_method_t winbind_group_xlat_call_env = {
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_winbind_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_winbind_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	CONF_SECTION		*conf = mctx->mi->conf;
 	xlat_t			*xlat;
 
 	/*
@@ -545,15 +512,36 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	 *	function automatically adds the module instance name
 	 *	as a prefix.
 	 */
-	xlat = xlat_func_register_module(inst, mctx, "group", winbind_group_xlat, FR_TYPE_BOOL);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "group", winbind_group_xlat, FR_TYPE_BOOL);
 	if (!xlat) {
 		cf_log_err(conf, "Failed registering group expansion");
 		return -1;
 	}
 
-	xlat_func_mono_set(xlat, winbind_group_xlat_arg);
+	xlat_func_args_set(xlat, winbind_group_xlat_arg);
 	xlat_func_call_env_set(xlat, &winbind_group_xlat_call_env);
 
+	return 0;
+}
+
+static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
+{
+	rlm_winbind_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_winbind_t);
+	rlm_winbind_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_winbind_thread_t);
+
+	t->inst = inst;
+	if (!(t->slab = winbind_slab_list_alloc(t, mctx->el, &inst->reuse, winbind_ctx_alloc, NULL, NULL, false, false))) {
+		ERROR("Connection handle pool instantiation failed");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
+{
+	rlm_winbind_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_winbind_thread_t);
+	talloc_free(t->slab);
 	return 0;
 }
 
@@ -575,13 +563,15 @@ module_rlm_t rlm_winbind = {
 		.config		= module_config,
 		.instantiate	= mod_instantiate,
 		.bootstrap	= mod_bootstrap,
-		.detach		= mod_detach
+		.thread_inst_size	= sizeof(rlm_winbind_thread_t),
+		.thread_instantiate	= mod_thread_instantiate,
+		.thread_detach		= mod_thread_detach,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize,
-		  .method_env = &winbind_autz_method_env },
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate,
-		  .method_env = &winbind_auth_method_env },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate, .method_env = &winbind_auth_method_env },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY), .method = mod_authorize, .method_env = &winbind_autz_method_env },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

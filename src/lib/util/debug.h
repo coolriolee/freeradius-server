@@ -32,7 +32,8 @@ extern "C" {
 #ifdef NO_ASSERT
 # define MEM(x) error "Use of MEM() not allowed in this source file.  Deal with memory allocation failure gracefully"
 #else
-# define MEM(x) do { if (!(x)) { fr_cond_assert_msg((x), "OUT OF MEMORY"); _fr_exit(__FILE__, __LINE__, EXIT_FAILURE, true); } } while (0)
+/* Short circuit condition to prevent duplicate evaluation */
+# define MEM(x) do { if (!(x)) { fr_cond_assert_msg(0 && (x),  "OUT OF MEMORY"); _fr_exit(__FILE__, __LINE__, EXIT_FAILURE, true); } } while (0)
 #endif
 
 typedef enum {
@@ -87,6 +88,8 @@ int			fr_set_dumpable(bool allow_core_dumps);
 int			fr_reset_dumpable(void);
 
 int			fr_log_talloc_report(TALLOC_CTX const *ctx);
+
+void			fr_fault_backtrace(void);
 
 void			fr_fault(int sig);
 
@@ -161,7 +164,7 @@ NEVER_RETURNS void	_fr_exit(char const *file, int line, int status, bool now);
  *
  * @param _x expression to test (should evaluate to true)
  */
-#define		fr_fatal_assert(_x) if (unlikely(!((bool)(_x)))) _fr_assert_exit(__FILE__, __LINE__, #_x, NULL))
+#define		fr_fatal_assert(_x) if (unlikely(!((bool)(_x)))) _fr_assert_fatal(__FILE__, __LINE__, #_x, NULL)
 
 /** Calls panic_action ifndef NDEBUG, else logs error and causes the server to exit immediately with code 134
  *

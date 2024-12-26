@@ -38,10 +38,7 @@ static _Thread_local fr_md5_free_list_t *md5_array;
 #  include <openssl/evp.h>
 #  include <openssl/crypto.h>
 #  include <openssl/err.h>
-
-#  if OPENSSL_VERSION_NUMBER >= 0x30000000L
-#    include <openssl/provider.h>
-#  endif
+#  include <openssl/provider.h>
 
 static int have_openssl_md5 = -1;
 
@@ -317,11 +314,7 @@ static fr_md5_ctx_t *fr_md5_local_ctx_alloc(void)
 		 *	md5 functions, and call the OpenSSL init
 		 *	function.
 		 */
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 		if (!EVP_default_properties_is_fips_enabled(NULL)) {
-#else
-		if (FIPS_mode() == 0) {
-#endif
 			have_openssl_md5 = 1;
 
 			/*
@@ -433,10 +426,9 @@ static void fr_md5_local_final(uint8_t out[static MD5_DIGEST_LENGTH], fr_md5_ctx
 	fr_md5_update(ctx_local, PADDING, padlen - 8); /* padlen - 8 <= 64 */
 	fr_md5_update(ctx_local, count, 8);
 
-	if (out != NULL) {
-		for (i = 0; i < 4; i++)
-			PUT_32BIT_LE(out + i * 4, ctx_local->state[i]);
-	}
+	for (i = 0; i < 4; i++)
+		PUT_32BIT_LE(out + i * 4, ctx_local->state[i]);
+
 	memset(ctx_local, 0, sizeof(*ctx_local));	/* in case it's sensitive */
 }
 

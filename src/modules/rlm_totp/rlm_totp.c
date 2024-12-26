@@ -57,7 +57,6 @@ static const call_env_method_t method_env = {
 
 /* Define a structure for the configuration variables */
 typedef struct rlm_totp_t {
-	char const	*name;			//!< name of this instance */
 	fr_totp_t	totp;			//! configuration entries passed to libfreeradius-totp
 } rlm_totp_t;
 
@@ -67,18 +66,69 @@ static const conf_parser_t module_config[] = {
 	{ FR_CONF_OFFSET("otp_length", rlm_totp_t, totp.otp_length), .dflt = "6" },
 	{ FR_CONF_OFFSET("lookback_steps", rlm_totp_t, totp.lookback_steps), .dflt = "1" },
 	{ FR_CONF_OFFSET("lookback_interval", rlm_totp_t, totp.lookback_interval), .dflt = "30" },
+	{ FR_CONF_OFFSET("lookforward_steps", rlm_totp_t, totp.lookforward_steps), .dflt = "0" },
 	CONF_PARSER_TERMINATOR
 };
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+/*
+ *  Do the authentication
+ */
+static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_totp_t   *inst = talloc_get_type_abort(mctx->inst->data, rlm_totp_t);
-	CONF_SECTION *conf = mctx->inst->conf;
+	rlm_totp_call_env_t	*env_data = talloc_get_type_abort(mctx->env_data, rlm_totp_call_env_t);
+	rlm_totp_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_totp_t);
+	fr_value_box_t		*user_password = &env_data->user_password;
+	fr_value_box_t		*secret = &env_data->secret;
+	fr_value_box_t		*key = &env_data->key;
 
-	inst->name = cf_section_name2(conf);
-	if (!inst->name) inst->name = cf_section_name1(conf);
+	uint8_t const		*our_key;
+	size_t			our_keylen;
+	uint8_t			buffer[80];	/* multiple of 5*8 characters */
 
-	return 0;
+	if (fr_type_is_null(user_password->type)) RETURN_MODULE_NOOP;
+
+	if (user_password->vb_length == 0) {
+		RWARN("TOTP.From-User is empty");
+		RETURN_MODULE_FAIL;
+	}
+
+	if ((user_password->vb_length != 6) && (user_password->vb_length != 8)) {
+		RWARN("TOTP.From-User has incorrect length. Expected 6 or 8, got %zu", user_password->vb_length);
+		RETURN_MODULE_FAIL;
+	}
+
+	/*
+	 *	Look for the raw key first.
+	 */
+	if (!fr_type_is_null(key->type)) {
+		our_key = key->vb_octets;
+		our_keylen = key->vb_length;
+
+	} else {
+		ssize_t len;
+
+		if (fr_type_is_null(secret->type)) RETURN_MODULE_NOOP;
+
+		len = fr_base32_decode(&FR_DBUFF_TMP((uint8_t *) buffer, sizeof(buffer)), &FR_SBUFF_IN(secret->vb_strvalue, secret->vb_length), true, true);
+		if (len < 0) {
+			RERROR("TOTP.Secret cannot be decoded");
+			RETURN_MODULE_FAIL;
+		}
+
+		our_key = buffer;
+		our_keylen = len;
+	}
+
+	switch (fr_totp_cmp(&inst->totp, request, fr_time_to_sec(request->packet->timestamp), our_key, our_keylen, user_password->vb_strvalue)) {
+	case 0:
+		RETURN_MODULE_OK;
+
+	case -2:
+		RETURN_MODULE_FAIL;
+
+	default:
+		RETURN_MODULE_REJECT;
+	}
 }
 
 /*
@@ -93,13 +143,15 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_totp_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_totp_t);
+	rlm_totp_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_totp_t);
 
 	FR_INTEGER_BOUND_CHECK("time_step", inst->totp.time_step, >=, 5);
 	FR_INTEGER_BOUND_CHECK("time_step", inst->totp.time_step, <=, 120);
 
 	FR_INTEGER_BOUND_CHECK("lookback_steps", inst->totp.lookback_steps, >=, 1);
 	FR_INTEGER_BOUND_CHECK("lookback_steps", inst->totp.lookback_steps, <=, 10);
+
+	FR_INTEGER_BOUND_CHECK("lookforward_steps", inst->totp.lookforward_steps, <=, 10);
 
 	FR_INTEGER_BOUND_CHECK("lookback_interval", inst->totp.lookback_interval, <=, inst->totp.time_step);
 
@@ -109,60 +161,6 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	if (inst->totp.otp_length == 7) inst->totp.otp_length = 8;
 
 	return 0;
-}
-
-/*
- *  Do the authentication
- */
-static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
-{
-	rlm_totp_call_env_t	*env_data = talloc_get_type_abort(mctx->env_data, rlm_totp_call_env_t);
-	rlm_totp_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_totp_t);
-	fr_value_box_t		*user_password = &env_data->user_password;
-	fr_value_box_t		*secret = &env_data->secret;
-	fr_value_box_t		*key = &env_data->key;
-
-	uint8_t const		*our_key;
-	size_t			our_keylen;
-	uint8_t			buffer[80];	/* multiple of 5*8 characters */
-
-	if (fr_type_is_null(user_password->type)) RETURN_MODULE_NOOP;
-
-	if (user_password->vb_length == 0) {
-		RDEBUG("TOTP.From-User is empty");
-		RETURN_MODULE_FAIL;
-	}
-
-	if ((user_password->vb_length != 6) && (user_password->vb_length != 8)) {
-		RDEBUG("TOTP.From-User has incorrect length. Expected 6 or 8, got %zu", user_password->vb_length);
-		RETURN_MODULE_FAIL;
-	}
-
-	/*
-	 *	Look for the raw key first.
-	 */
-	if (!fr_type_is_null(key->type)) {
-		our_key = key->vb_octets;
-		our_keylen = key->vb_length;
-
-	} else {
-		ssize_t len;
-
-		if (!fr_type_is_null(secret->type)) RETURN_MODULE_NOOP;
-
-		len = fr_base32_decode(&FR_DBUFF_TMP((uint8_t *) buffer, sizeof(buffer)), &FR_SBUFF_IN(secret->vb_strvalue, secret->vb_length), true, true);
-		if (len < 0) {
-			RDEBUG("TOTP.Secret cannot be decoded");
-			RETURN_MODULE_FAIL;
-		}
-
-		our_key = buffer;
-		our_keylen = len;
-	}
-
-	if (fr_totp_cmp(&inst->totp, request, fr_time_to_sec(request->packet->timestamp), our_key, our_keylen, user_password->vb_strvalue) != 0) RETURN_MODULE_FAIL;
-
-	RETURN_MODULE_OK;
 }
 
 /*
@@ -179,13 +177,14 @@ module_rlm_t rlm_totp = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "totp",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
+		.inst_size	= sizeof(rlm_totp_t),
 		.config		= module_config,
-		.bootstrap	= mod_bootstrap,
 		.instantiate	= mod_instantiate
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate,	.method_env = &method_env },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY), .method = mod_authenticate, .method_env = &method_env },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

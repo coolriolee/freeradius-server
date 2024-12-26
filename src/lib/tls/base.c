@@ -34,9 +34,7 @@ USES_APPLE_DEPRECATED_API	/* OpenSSL API has been deprecated by Apple */
 #include "bio.h"
 
 #include <openssl/conf.h>
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-#  include <openssl/provider.h>
-#endif
+#include <openssl/provider.h>
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/tls/attrs.h>
@@ -58,10 +56,8 @@ _Thread_local TALLOC_CTX 	*ssl_talloc_ctx;
  */
 static _Thread_local bool	*async_pool_init;
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static OSSL_PROVIDER *openssl_default_provider = NULL;
 static OSSL_PROVIDER *openssl_legacy_provider = NULL;
-#endif
 
 static uint32_t tls_instance_count = 0;
 
@@ -72,7 +68,6 @@ fr_dict_t const *dict_tls;
 extern fr_dict_autoload_t tls_dict[];
 fr_dict_autoload_t tls_dict[] = {
 	{ .out = &dict_freeradius, .proto = "freeradius" },
-	{ .out = &dict_radius, .proto = "radius" },
 	{ .out = &dict_tls, .proto = "tls" },
 	{ NULL }
 };
@@ -110,8 +105,7 @@ fr_dict_attr_t const *attr_tls_session_cert_file;
 fr_dict_attr_t const *attr_tls_session_require_client_cert;
 fr_dict_attr_t const *attr_tls_session_cipher_suite;
 fr_dict_attr_t const *attr_tls_session_version;
-
-fr_dict_attr_t const *attr_framed_mtu;
+fr_dict_attr_t const *attr_tls_session_resume_type;
 
 fr_dict_attr_t const *attr_tls_packet_type;
 fr_dict_attr_t const *attr_tls_session_data;
@@ -154,8 +148,7 @@ fr_dict_attr_autoload_t tls_dict_attr[] = {
 	{ .out = &attr_tls_session_require_client_cert, .name = "TLS-Session-Require-Client-Certificate", .type = FR_TYPE_BOOL, .dict = &dict_freeradius },
 	{ .out = &attr_tls_session_cipher_suite, .name = "TLS-Session-Cipher-Suite", .type = FR_TYPE_STRING, .dict = &dict_freeradius },
 	{ .out = &attr_tls_session_version, .name = "TLS-Session-Version", .type = FR_TYPE_STRING, .dict = &dict_freeradius },
-
-	{ .out = &attr_framed_mtu, .name = "Framed-MTU", .type = FR_TYPE_UINT32, .dict = &dict_radius },
+	{ .out = &attr_tls_session_resume_type, .name = "TLS-Session-Resume-Type", .type = FR_TYPE_UINT32, .dict = &dict_freeradius },
 
 	/*
 	 *	Eventually all TLS attributes will be in the TLS dictionary
@@ -175,6 +168,8 @@ fr_value_box_t const	*enum_tls_packet_type_load_session;
 fr_value_box_t const	*enum_tls_packet_type_store_session;
 fr_value_box_t const	*enum_tls_packet_type_clear_session;
 fr_value_box_t const	*enum_tls_packet_type_verify_certificate;
+fr_value_box_t const	*enum_tls_packet_type_new_session;
+fr_value_box_t const	*enum_tls_packet_type_establish_session;
 
 /*
  *	response types
@@ -183,16 +178,27 @@ fr_value_box_t const	*enum_tls_packet_type_success;
 fr_value_box_t const	*enum_tls_packet_type_failure;
 fr_value_box_t const	*enum_tls_packet_type_notfound;
 
+/*
+ *	session resumption
+ */
+fr_value_box_t const	*enum_tls_session_resumed_stateful;
+fr_value_box_t const	*enum_tls_session_resumed_stateless;
+
 extern fr_dict_enum_autoload_t tls_dict_enum[];
 fr_dict_enum_autoload_t tls_dict_enum[] = {
 	{ .out = &enum_tls_packet_type_load_session, .name = "Load-Session", .attr = &attr_tls_packet_type },
 	{ .out = &enum_tls_packet_type_store_session, .name = "Store-Session", .attr = &attr_tls_packet_type },
 	{ .out = &enum_tls_packet_type_clear_session, .name = "Clear-Session", .attr = &attr_tls_packet_type },
 	{ .out = &enum_tls_packet_type_verify_certificate, .name = "Verify-Certificate", .attr = &attr_tls_packet_type },
+	{ .out = &enum_tls_packet_type_new_session, .name = "New-Session", .attr = &attr_tls_packet_type },
+	{ .out = &enum_tls_packet_type_establish_session, .name = "Establish-Session", .attr = &attr_tls_packet_type },
 
 	{ .out = &enum_tls_packet_type_success, .name = "Success", .attr = &attr_tls_packet_type },
 	{ .out = &enum_tls_packet_type_failure, .name = "Failure", .attr = &attr_tls_packet_type },
 	{ .out = &enum_tls_packet_type_notfound, .name = "Notfound", .attr = &attr_tls_packet_type },
+
+	{ .out = &enum_tls_session_resumed_stateful, .name = "stateful", .attr = &attr_tls_session_resume_type },
+	{ .out = &enum_tls_session_resumed_stateless, .name = "stateless", .attr = &attr_tls_session_resume_type },
 	{ NULL }
 };
 
@@ -248,7 +254,7 @@ static void *fr_openssl_talloc(size_t len, char const *file, NDEBUG_UNUSED int l
 
 	chunk = talloc_array(ssl_talloc_ctx, uint8_t, len);
 #ifndef NDEBUG
-	talloc_set_name(chunk, "%s:%u", file, line);
+	talloc_set_name(chunk, "%s:%d", file, line);
 #endif
 	return chunk;
 }
@@ -265,7 +271,7 @@ static void *fr_openssl_talloc_realloc(void *old, size_t len, NDEBUG_UNUSED char
 
 	chunk = talloc_realloc_size(ssl_talloc_ctx, old, len);
 #ifndef NDEBUG
-	talloc_set_name(chunk, "%s:%u", file, line);
+	talloc_set_name(chunk, "%s:%d", file, line);
 #endif
 	return chunk;
 }
@@ -349,7 +355,6 @@ void fr_openssl_free(void)
 	fr_tls_bio_free();
 }
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 static void _openssl_provider_free(void)
 {
 	if (openssl_default_provider && !OSSL_PROVIDER_unload(openssl_default_provider)) {
@@ -362,14 +367,6 @@ static void _openssl_provider_free(void)
 	}
 	openssl_legacy_provider = NULL;
 }
-#endif
-
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-static void _openssl_engine_free(void)
-{
-	fr_tls_engine_free_all();
-}
-#endif
 
 static int fr_openssl_cleanup(UNUSED void *uctx)
 {
@@ -411,7 +408,6 @@ int fr_openssl_init(void)
 		return -1;
 	}
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	/*
 	 *	Load the default provider for most algorithms
 	 */
@@ -431,20 +427,13 @@ int fr_openssl_init(void)
 		fr_tls_log(NULL, "Failed loading legacy provider");
 		return -1;
 	}
-#endif
 
 	/*
 	 *	It's best to use OpenSSL's cleanup stack
 	 *	as then everything is cleaned up relative
 	 *	to the OPENSSL_cleanup() call.
 	 */
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	OPENSSL_atexit(_openssl_provider_free);
-#endif
-
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-	OPENSSL_atexit(_openssl_engine_free);
-#endif
 
 	/*
 	 *	SHA256 is in all versions of OpenSSL, but isn't
@@ -452,14 +441,6 @@ int fr_openssl_init(void)
 	 *	certificates.
 	 */
 	EVP_add_digest(EVP_sha256());
-
-	/*
-	 *	FIXME - This should be done _after_
-	 *	running any engine controls.
-	 */
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-	fr_tls_engine_load_builtin();
-#endif
 
 	fr_tls_log_init();
 
@@ -489,17 +470,10 @@ int fr_openssl_init(void)
  */
 int fr_openssl_fips_mode(bool enabled)
 {
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	if (!EVP_set_default_properties(NULL, enabled ? "fips=yes" : "fips=no")) {
 		fr_tls_log(NULL, "Failed %s OpenSSL FIPS mode", enabled ? "enabling" : "disabling");
 		return -1;
 	}
-#else
-	if (!FIPS_mode_set(enabled ? 1 : 0)) {
-		fr_tls_log(NULL, "Failed %s OpenSSL FIPS mode", enabled ? "enabling" : "disabling");
-		return -1;
-	}
-#endif
 
 	return 0;
 }

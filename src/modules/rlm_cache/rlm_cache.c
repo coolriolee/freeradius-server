@@ -19,18 +19,22 @@
  * @file rlm_cache.c
  * @brief Cache values and merge them back into future requests.
  *
+ * @copyright 2024 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
  * @copyright 2012-2014 The FreeRADIUS server project
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/server/modpriv.h>
 #include <freeradius-devel/server/dl_module.h>
 #include <freeradius-devel/server/rcode.h>
+#include <freeradius-devel/server/tmpl.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/util/types.h>
+#include <freeradius-devel/util/value.h>
 #include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/unlang/call_env.h>
 
@@ -38,11 +42,13 @@ RCSID("$Id$")
 
 extern module_rlm_t rlm_cache;
 
-static int cache_update_section_parse(TALLOC_CTX *ctx, call_env_parsed_head_t *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci, UNUSED call_env_parser_t const *rule);
+int submodule_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule);
+static int cache_key_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci, call_env_ctx_t const *cec, call_env_parser_t const *rule);
+static int cache_update_section_parse(TALLOC_CTX *ctx, call_env_parsed_head_t *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci, call_env_ctx_t const *cec, call_env_parser_t const *rule);
 
 static const conf_parser_t module_config[] = {
 	{ FR_CONF_OFFSET_TYPE_FLAGS("driver", FR_TYPE_VOID, 0, rlm_cache_t, driver_submodule), .dflt = "rbtree",
-			 .func = module_rlm_submodule_parse },
+			 .func = submodule_parse },
 	{ FR_CONF_OFFSET("ttl", rlm_cache_config_t, ttl), .dflt = "500s" },
 	{ FR_CONF_OFFSET("max_entries", rlm_cache_config_t, max_entries), .dflt = "0" },
 
@@ -57,11 +63,16 @@ typedef struct {
 	map_list_t		*maps;			//!< Attribute map applied to cache entries.
 } cache_call_env_t;
 
+typedef struct {
+	fr_type_t		ktype;		//!< Key type
+
+} cache_htrie_t;
+
 static const call_env_method_t cache_method_env = {
 	FR_CALL_ENV_METHOD_OUT(cache_call_env_t),
 	.env = (call_env_parser_t[]) {
-		{ FR_CALL_ENV_OFFSET("key", FR_TYPE_STRING, CALL_ENV_FLAG_REQUIRED | CALL_ENV_FLAG_CONCAT, cache_call_env_t, key) },
-		{ FR_CALL_ENV_SUBSECTION_FUNC("update", CF_IDENT_ANY, CALL_ENV_FLAG_REQUIRED, cache_update_section_parse) },
+		{ FR_CALL_ENV_OFFSET("key", FR_TYPE_VOID, CALL_ENV_FLAG_REQUIRED, cache_call_env_t, key), .pair.func = cache_key_parse },
+		{ FR_CALL_ENV_SUBSECTION_FUNC("update", CF_IDENT_ANY, CALL_ENV_FLAG_NONE, cache_update_section_parse) },
 		CALL_ENV_TERMINATOR
 	}
 };
@@ -92,6 +103,64 @@ fr_dict_attr_autoload_t rlm_cache_dict_attr[] = {
 	{ NULL }
 };
 
+int submodule_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, conf_parser_t const *rule)
+{
+	rlm_cache_t		*inst = talloc_get_type_abort(parent, rlm_cache_t);
+	module_instance_t	*mi;
+	int ret;
+
+	if (unlikely(ret = module_rlm_submodule_parse(ctx, out, parent, ci, rule) < 0)) return ret;
+
+	mi = talloc_get_type_abort(*((void **)out), module_instance_t);
+	inst->driver = (rlm_cache_driver_t const *)mi->exported; /* Public symbol exported by the submodule */
+
+	return 0;
+}
+
+static int cache_key_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci,
+			   call_env_ctx_t const *cec,
+			   call_env_parser_t const *rule)
+{
+	rlm_cache_t const	*inst = talloc_get_type_abort_const(cec->mi->data, rlm_cache_t);
+	call_env_parse_pair_t	func = inst->driver->key_parse ? inst->driver->key_parse : call_env_parse_pair;
+	tmpl_t			*key_tmpl;
+	fr_type_t		cast;
+	int			ret;
+	/*
+	 *	Call the custom key parse function, OR the standard call_env_parse_pair
+	 *	function, depending on whether the driver calls a custom parsing function.
+	 */
+	if (unlikely((ret = func(ctx, &key_tmpl, t_rules, ci, inst->driver_submodule->data, rule)) < 0)) return ret;
+	*((tmpl_t **)out) = key_tmpl;
+
+	/*
+	 *	Unless the driver has a custom key parse function, we only allow keys of
+	 *	type string.
+	 */
+	if (inst->driver->key_parse) return 0;
+
+	cast = tmpl_cast_get(key_tmpl);
+	switch (cast) {
+	case FR_TYPE_STRING:
+	case FR_TYPE_NULL:
+	case FR_TYPE_VOID:
+		break;
+
+	default:
+		cf_log_err(ci, "Driver only allows key type '%s', got '%s'",
+			   fr_type_to_str(FR_TYPE_STRING), fr_type_to_str(cast));
+		return -1;
+	}
+
+	if (tmpl_cast_set(key_tmpl, FR_TYPE_STRING) < 0) {
+		cf_log_perr(ci, "Can't convert key type '%s' to '%s'",
+			    fr_type_to_str(tmpl_expanded_type(key_tmpl)), fr_type_to_str(FR_TYPE_STRING));
+		return -1;
+	}
+
+	return 0;
+}
+
 /** Get exclusive use of a handle to access the cache
  *
  */
@@ -102,7 +171,7 @@ static int cache_acquire(rlm_cache_handle_t **out, rlm_cache_t const *inst, requ
 		return 0;
 	}
 
-	return inst->driver->acquire(out, &inst->config, inst->driver_submodule->dl_inst->data, request);
+	return inst->driver->acquire(out, &inst->config, inst->driver_submodule->data, request);
 }
 
 /** Release a handle we previously acquired
@@ -113,7 +182,7 @@ static void cache_release(rlm_cache_t const *inst, request_t *request, rlm_cache
 	if (!inst->driver->release) return;
 	if (!handle || !*handle) return;
 
-	inst->driver->release(&inst->config, inst->driver_submodule->dl_inst->data, request, *handle);
+	inst->driver->release(&inst->config, inst->driver_submodule->data, request, *handle);
 	*handle = NULL;
 }
 
@@ -124,7 +193,7 @@ static int cache_reconnect(rlm_cache_handle_t **handle, rlm_cache_t const *inst,
 {
 	fr_assert(inst->driver->reconnect);
 
-	return inst->driver->reconnect(handle, &inst->config, inst->driver_submodule->dl_inst->data, request);
+	return inst->driver->reconnect(handle, &inst->config, inst->driver_submodule->data, request);
 }
 
 /** Allocate a cache entry
@@ -137,7 +206,7 @@ static int cache_reconnect(rlm_cache_handle_t **handle, rlm_cache_t const *inst,
  */
 static rlm_cache_entry_t *cache_alloc(rlm_cache_t const *inst, request_t *request)
 {
-	if (inst->driver->alloc) return inst->driver->alloc(&inst->config, inst->driver_submodule->dl_inst->data, request);
+	if (inst->driver->alloc) return inst->driver->alloc(&inst->config, inst->driver_submodule->data, request);
 
 	return talloc_zero(NULL, rlm_cache_entry_t);
 }
@@ -228,7 +297,7 @@ static unlang_action_t cache_find(rlm_rcode_t *p_result, rlm_cache_entry_t **out
 	*out = NULL;
 
 	for (;;) {
-		ret = inst->driver->find(&c, &inst->config, inst->driver_submodule->dl_inst->data, request, *handle, key);
+		ret = inst->driver->find(&c, &inst->config, inst->driver_submodule->data, request, *handle, key);
 		switch (ret) {
 		case CACHE_RECONNECT:
 			RDEBUG2("Reconnecting...");
@@ -262,7 +331,7 @@ static unlang_action_t cache_find(rlm_rcode_t *p_result, rlm_cache_entry_t **out
 			fr_box_time(request->packet->timestamp));
 
 	expired:
-		inst->driver->expire(&inst->config, inst->driver_submodule->dl_inst->data, request, handle, key);
+		inst->driver->expire(&inst->config, inst->driver_submodule->data, request, handle, key);
 		cache_free(inst, &c);
 		RETURN_MODULE_NOTFOUND;	/* Couldn't find a non-expired entry */
 	}
@@ -292,7 +361,7 @@ static unlang_action_t cache_expire(rlm_rcode_t *p_result,
 				    rlm_cache_handle_t **handle, fr_value_box_t const *key)
 {
 	RDEBUG2("Expiring cache entry");
-	for (;;) switch (inst->driver->expire(&inst->config, inst->driver_submodule->dl_inst->data, request, *handle, key)) {
+	for (;;) switch (inst->driver->expire(&inst->config, inst->driver_submodule->data, request, *handle, key)) {
 	case CACHE_RECONNECT:
 		if (cache_reconnect(handle, inst, request) == 0) continue;
 		FALL_THROUGH;
@@ -329,7 +398,7 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 	TALLOC_CTX		*pool;
 
 	if ((inst->config.max_entries > 0) && inst->driver->count &&
-	    (inst->driver->count(&inst->config, inst->driver_submodule->dl_inst->data, request, handle) > inst->config.max_entries)) {
+	    (inst->driver->count(&inst->config, inst->driver_submodule->data, request, handle) > inst->config.max_entries)) {
 		RWDEBUG("Cache is full: %d entries", inst->config.max_entries);
 		RETURN_MODULE_FAIL;
 	}
@@ -352,6 +421,12 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 	c->expires = fr_unix_time_add(c->expires, ttl);
 
 	RDEBUG2("Creating new cache entry");
+
+	/*
+	 *	We don't have any maps to apply to the cache entry
+	 *	so don't try to expand them.
+	 */
+	if (!maps) goto skip_maps;
 
 	/*
 	 *	Alloc a pool so we don't have excessive allocs when
@@ -449,6 +524,8 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 	}
 	talloc_free(pool);
 
+skip_maps:
+
 	/*
 	 *	Check to see if we need to merge the entry into the request
 	 */
@@ -460,7 +537,7 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 	for (;;) {
 		cache_status_t ret;
 
-		ret = inst->driver->insert(&inst->config, inst->driver_submodule->dl_inst->data, request, *handle, c);
+		ret = inst->driver->insert(&inst->config, inst->driver_submodule->data, request, *handle, c);
 		switch (ret) {
 		case CACHE_RECONNECT:
 			if (cache_reconnect(handle, inst, request) == 0) continue;
@@ -494,7 +571,7 @@ static unlang_action_t cache_set_ttl(rlm_rcode_t *p_result,
 	if (!inst->driver->set_ttl) for (;;) {
 		cache_status_t ret;
 
-		ret = inst->driver->insert(&inst->config, inst->driver_submodule->dl_inst->data, request, *handle, c);
+		ret = inst->driver->insert(&inst->config, inst->driver_submodule->data, request, *handle, c);
 		switch (ret) {
 		case CACHE_RECONNECT:
 			if (cache_reconnect(handle, inst, request) == 0) continue;
@@ -516,7 +593,7 @@ static unlang_action_t cache_set_ttl(rlm_rcode_t *p_result,
 	for (;;) {
 		cache_status_t ret;
 
-		ret = inst->driver->set_ttl(&inst->config, inst->driver_submodule->dl_inst->data, request, *handle, c);
+		ret = inst->driver->set_ttl(&inst->config, inst->driver_submodule->data, request, *handle, c);
 		switch (ret) {
 		case CACHE_RECONNECT:
 			if (cache_reconnect(handle, inst, request) == 0) continue;
@@ -543,7 +620,7 @@ static unlang_action_t cache_set_ttl(rlm_rcode_t *p_result,
 static unlang_action_t CC_HINT(nonnull) mod_cache_it(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	rlm_cache_entry_t	*c = NULL;
-	rlm_cache_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort_const(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 
 	rlm_cache_handle_t	*handle;
@@ -813,7 +890,7 @@ xlat_action_t cache_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			 request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cache_entry_t 		*c = NULL;
-	rlm_cache_t			*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_cache_t);
+	rlm_cache_t			*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_cache_t);
 	cache_call_env_t		*env = talloc_get_type_abort(xctx->env_data, cache_call_env_t);
 	rlm_cache_handle_t		*handle = NULL;
 
@@ -880,6 +957,44 @@ xlat_action_t cache_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
+static xlat_action_t cache_ttl_get_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
+					xlat_ctx_t const *xctx,
+					request_t *request, UNUSED fr_value_box_list_t *in)
+{
+
+	rlm_cache_entry_t	*c = NULL;
+	rlm_cache_t		*inst = talloc_get_type_abort(xctx->mctx->mi->data, rlm_cache_t);
+	cache_call_env_t	*env = talloc_get_type_abort(xctx->env_data, cache_call_env_t);
+	rlm_cache_handle_t	*handle = NULL;
+
+	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
+
+	fr_value_box_t		*vb;
+
+	if (cache_acquire(&handle, inst, request) < 0) {
+		return XLAT_ACTION_FAIL;
+	}
+
+	cache_find(&rcode, &c, inst, request, &handle, env->key);
+	switch (rcode) {
+	case RLM_MODULE_OK:		/* found */
+		break;
+
+	default:
+		cache_release(inst, request, &handle);
+		return XLAT_ACTION_DONE;
+	}
+
+	MEM(vb = fr_value_box_alloc(ctx, FR_TYPE_TIME_DELTA, NULL));
+	vb->vb_time_delta = fr_unix_time_sub(c->expires, fr_time_to_unix_time(request->packet->timestamp));
+	fr_dcursor_append(out, vb);
+
+	cache_free(inst, &c);
+	cache_release(inst, request, &handle);
+
+	return XLAT_ACTION_DONE;
+}
+
 /** Release the allocated resources and cleanup the avps
  */
 static void cache_unref(request_t *request, rlm_cache_t const *inst, rlm_cache_entry_t *entry,
@@ -928,13 +1043,11 @@ static void cache_unref(request_t *request, rlm_cache_t const *inst, rlm_cache_e
  */
 static unlang_action_t CC_HINT(nonnull) mod_method_status(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	rlm_cache_entry_t 	*entry = NULL;
 	rlm_cache_handle_t 	*handle = NULL;
-
-	DEBUG3("Calling %s.status", mctx->inst->name);
 
 	if (env->key->vb_length == 0) {
 		REDEBUG("Zero length key string is invalid");
@@ -968,13 +1081,11 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_method_load(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	rlm_cache_entry_t 	*entry = NULL;
 	rlm_cache_handle_t 	*handle = NULL;
-
-	DEBUG3("Calling %s.load", mctx->inst->name);
 
 	if (env->key->vb_length == 0) {
 		REDEBUG("Zero length key string is invalid");
@@ -990,7 +1101,7 @@ static unlang_action_t CC_HINT(nonnull) mod_method_load(rlm_rcode_t *p_result, m
 	if (rcode == RLM_MODULE_FAIL) goto finish;
 
 	if (!entry) {
-		WARN("Entry not found to load");
+		RDEBUG2("Entry not found to load");
 		rcode = RLM_MODULE_NOTFOUND;
 		goto finish;
 	}
@@ -1003,16 +1114,16 @@ finish:
 	RETURN_MODULE_RCODE(rcode);
 }
 
-/** Create and insert a cache entry
+/** Create, or update a cache entry
  *
  * @return
  *	- #RLM_MODULE_OK on success.
  *	- #RLM_MODULE_UPDATED if we merged the cache entry.
  *	- #RLM_MODULE_FAIL on failure.
  */
-static unlang_action_t CC_HINT(nonnull) mod_method_store(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
+static unlang_action_t CC_HINT(nonnull) mod_method_update(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	fr_time_delta_t		ttl;
@@ -1020,8 +1131,6 @@ static unlang_action_t CC_HINT(nonnull) mod_method_store(rlm_rcode_t *p_result, 
 	rlm_cache_entry_t 	*entry = NULL;
 	rlm_cache_handle_t 	*handle = NULL;
 	fr_pair_t		*vp;
-
-	DEBUG3("Calling %s.store", mctx->inst->name);
 
 	if (env->key->vb_length == 0) {
 		REDEBUG("Zero length key string is invalid");
@@ -1074,10 +1183,75 @@ static unlang_action_t CC_HINT(nonnull) mod_method_store(rlm_rcode_t *p_result, 
 	 *	should perform upserts.
 	 */
 	if (expire) {
-		DEBUG4("Set the cache expire");
+		DEBUG3("Expiring cache entry");
 
 		cache_expire(&rcode, inst, request, &handle, env->key);
 		if (rcode == RLM_MODULE_FAIL) goto finish;
+	}
+
+	/*
+	 *	Inserts are upserts, so we don't care about the
+	 *	entry state.
+	 */
+	cache_insert(&rcode, inst, request, &handle, env->key, env->maps, ttl);
+	if (rcode == RLM_MODULE_OK) rcode = RLM_MODULE_UPDATED;
+
+finish:
+	cache_unref(request, inst, entry, handle);
+
+	RETURN_MODULE_RCODE(rcode);
+}
+
+/** Create, or update a cache entry
+ *
+ * @return
+ *	- #RLM_MODULE_NOOP if an entry already existed.
+ *	- #RLM_MODULE_UPDATED if we inserted a cache entry.
+ *	- #RLM_MODULE_FAIL on failure.
+ */
+static unlang_action_t CC_HINT(nonnull) mod_method_store(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
+{
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
+	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
+	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
+	fr_time_delta_t		ttl;
+	rlm_cache_entry_t 	*entry = NULL;
+	rlm_cache_handle_t 	*handle = NULL;
+	fr_pair_t		*vp;
+
+	if (env->key->vb_length == 0) {
+		REDEBUG("Zero length key string is invalid");
+		RETURN_MODULE_FAIL;
+	}
+
+	if (cache_acquire(&handle, inst, request) < 0) {
+		RETURN_MODULE_FAIL;
+	}
+
+	/* Process the TTL */
+	ttl = inst->config.ttl; /* Set the default value from cache { ttl=... } */
+	vp = fr_pair_find_by_da(&request->control_pairs, NULL, attr_cache_ttl);
+	if (vp && (vp->vp_int32 > 0)) {
+		ttl = fr_time_delta_from_sec(vp->vp_int32);
+
+		DEBUG3("Overriding default TTL %pV -> %d", fr_box_time_delta(ttl), vp->vp_int32);
+	}
+
+	/*
+	 *	We can only alter the TTL on an entry if it exists.
+	 */
+	cache_find(&rcode, &entry, inst, request, &handle, env->key);
+	switch (rcode) {
+	default:
+	case RLM_MODULE_OK:
+		rcode = RLM_MODULE_NOOP;
+		goto finish;
+
+	case RLM_MODULE_FAIL:
+		goto finish;
+
+	case RLM_MODULE_NOTFOUND:
+		break;
 	}
 
 	/*
@@ -1087,10 +1261,10 @@ static unlang_action_t CC_HINT(nonnull) mod_method_store(rlm_rcode_t *p_result, 
 	 *	insert.
 	 */
 	cache_insert(&rcode, inst, request, &handle, env->key, env->maps, ttl);
-	if (rcode == RLM_MODULE_OK) rcode = RLM_MODULE_UPDATED;
 
 finish:
 	cache_unref(request, inst, entry, handle);
+	if (rcode == RLM_MODULE_OK) rcode = RLM_MODULE_UPDATED;
 
 	RETURN_MODULE_RCODE(rcode);
 }
@@ -1104,13 +1278,13 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_method_clear(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	rlm_cache_entry_t 	*entry = NULL;
 	rlm_cache_handle_t 	*handle = NULL;
 
-	DEBUG3("Calling %s.clear", mctx->inst->name);
+	DEBUG3("Calling %s.clear", mctx->mi->name);
 
 	if (env->key->vb_length == 0) {
 		REDEBUG("Zero length key string is invalid");
@@ -1126,7 +1300,7 @@ static unlang_action_t CC_HINT(nonnull) mod_method_clear(rlm_rcode_t *p_result, 
 	if (rcode == RLM_MODULE_FAIL) goto finish;
 
 	if (!entry) {
-		WARN("Entry not found to delete");
+		REDEBUG2("Entry not found to delete");
 		rcode = RLM_MODULE_NOTFOUND;
 		goto finish;
 	}
@@ -1148,7 +1322,7 @@ finish:
  */
 static unlang_action_t CC_HINT(nonnull) mod_method_ttl(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 	cache_call_env_t	*env = talloc_get_type_abort(mctx->env_data, cache_call_env_t);
 	rlm_rcode_t		rcode = RLM_MODULE_NOOP;
 	fr_time_delta_t		ttl;
@@ -1156,7 +1330,7 @@ static unlang_action_t CC_HINT(nonnull) mod_method_ttl(rlm_rcode_t *p_result, mo
 	rlm_cache_handle_t 	*handle = NULL;
 	fr_pair_t		*vp;
 
-	DEBUG3("Calling %s.ttl", mctx->inst->name);
+	DEBUG3("Calling %s.ttl", mctx->mi->name);
 
 	if (env->key->vb_length == 0) {
 		REDEBUG("Zero length key string is invalid");
@@ -1212,7 +1386,7 @@ finish:
  */
 static int mod_detach(module_detach_ctx_t const *mctx)
 {
-	rlm_cache_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
+	rlm_cache_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
 
 	/*
 	 *	We need to explicitly free all children, so if the driver
@@ -1242,7 +1416,9 @@ static int cache_verify(map_t *map, void *uctx)
 	return 0;
 }
 
-static int cache_update_section_parse(TALLOC_CTX *ctx, call_env_parsed_head_t *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci, UNUSED call_env_parser_t const *rule)
+static int cache_update_section_parse(TALLOC_CTX *ctx, call_env_parsed_head_t *out, tmpl_rules_t const *t_rules,
+				      CONF_ITEM *ci,
+				      UNUSED call_env_ctx_t const *cec, UNUSED call_env_parser_t const *rule)
 {
 	CONF_SECTION		*update = cf_item_to_section(ci);
 	call_env_parsed_t	*parsed;
@@ -1276,8 +1452,16 @@ static int cache_update_section_parse(TALLOC_CTX *ctx, call_env_parsed_head_t *o
  */
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	rlm_cache_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t);
-	CONF_SECTION	*conf = mctx->inst->conf;
+	rlm_cache_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_cache_t);
+	CONF_SECTION	*conf = mctx->mi->conf;
+
+	/*
+	 *	Non optional fields and callbacks
+	 */
+	fr_assert(inst->driver->common.name);
+	fr_assert(inst->driver->find);
+	fr_assert(inst->driver->insert);
+	fr_assert(inst->driver->expire);
 
 	if (!fr_time_delta_ispos(inst->config.ttl)) {
 		cf_log_err(conf, "Must set 'ttl' to non-zero");
@@ -1297,24 +1481,16 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_cache_t 	*inst = talloc_get_type_abort(mctx->inst->data, rlm_cache_t );
 	xlat_t		*xlat;
-
-	inst->driver = (rlm_cache_driver_t const *)inst->driver_submodule->dl_inst->module->common;
-
-	/*
-	 *	Non optional fields and callbacks
-	 */
-	fr_assert(inst->driver->common.name);
-	fr_assert(inst->driver->find);
-	fr_assert(inst->driver->insert);
-	fr_assert(inst->driver->expire);
 
 	/*
 	 *	Register the cache xlat function
 	 */
-	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, cache_xlat, FR_TYPE_VOID);
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, NULL, cache_xlat, FR_TYPE_VOID);
 	xlat_func_args_set(xlat, cache_xlat_args);
+	xlat_func_call_env_set(xlat, &cache_method_env);
+
+	xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "ttl.get", cache_ttl_get_xlat, FR_TYPE_VOID);
 	xlat_func_call_env_set(xlat, &cache_method_env);
 
 	return 0;
@@ -1339,13 +1515,16 @@ module_rlm_t rlm_cache = {
 		.instantiate	= mod_instantiate,
 		.detach		= mod_detach
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "status", .name2 = CF_IDENT_ANY,		.method = mod_method_status,	.method_env = &cache_method_env },
-		{ .name1 = "load", .name2 = CF_IDENT_ANY,		.method = mod_method_load,	.method_env = &cache_method_env },
-		{ .name1 = "store", .name2 = CF_IDENT_ANY,		.method = mod_method_store,	.method_env = &cache_method_env },
-		{ .name1 = "clear", .name2 = CF_IDENT_ANY,		.method = mod_method_clear,	.method_env = &cache_method_env },
-		{ .name1 = "ttl", .name2 = CF_IDENT_ANY,		.method = mod_method_ttl,	.method_env = &cache_method_env },
-		{ .name1 = CF_IDENT_ANY, .name2 = CF_IDENT_ANY,		.method = mod_cache_it,		.method_env = &cache_method_env },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("clear", CF_IDENT_ANY), .method = mod_method_clear, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME("load", CF_IDENT_ANY), .method = mod_method_load, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME("status", CF_IDENT_ANY), .method = mod_method_status, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME("store", CF_IDENT_ANY), .method = mod_method_store, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME("ttl", CF_IDENT_ANY), .method = mod_method_ttl, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME("update", CF_IDENT_ANY), .method = mod_method_update, .method_env = &cache_method_env },
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_cache_it, .method_env = &cache_method_env },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

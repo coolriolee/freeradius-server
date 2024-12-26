@@ -89,8 +89,11 @@ void		_cf_item_insert_after(CONF_ITEM *parent, CONF_ITEM *prev, CONF_ITEM *child
 #define		cf_item_remove(_parent, _child) _cf_item_remove(CF_TO_ITEM(_parent), CF_TO_ITEM(_child))
 CONF_ITEM	*_cf_item_remove(CONF_ITEM *parent, CONF_ITEM *child);
 
-#define		cf_item_next(_ci, _prev) _cf_item_next(CF_TO_ITEM(_ci), _prev)
-CONF_ITEM	*_cf_item_next(CONF_ITEM const *ci, CONF_ITEM const *prev);
+#define		cf_item_next(_ci, _curr) _cf_item_next(CF_TO_ITEM(_ci), _curr)
+CONF_ITEM	*_cf_item_next(CONF_ITEM const *ci, CONF_ITEM const *curr);
+
+#define		cf_item_prev(_ci, _curr) _cf_item_prev(CF_TO_ITEM(_ci), _curr)
+CONF_ITEM	*_cf_item_prev(CONF_ITEM const *ci, CONF_ITEM const *prev);
 
 #define		cf_root(_cf) _cf_root(CF_TO_ITEM(_cf))
 CONF_SECTION	*_cf_root(CONF_ITEM const *ci);
@@ -145,17 +148,34 @@ CONF_SECTION	*_cf_section_alloc(TALLOC_CTX *ctx, CONF_SECTION *parent,
 				   char const *filename, int lineno);
 CONF_SECTION	*cf_section_dup(TALLOC_CTX *ctx, CONF_SECTION *parent, CONF_SECTION const *cs,
 				char const *name1, char const *name2, bool copy_meta);
+
+#define cf_section_foreach(_parent, _iter) \
+		for (CONF_SECTION *_iter = cf_section_first(_parent); _iter; _iter = cf_section_next(_parent, _iter))
+
 /** @hidecallergraph */
-CONF_SECTION	*cf_section_next(CONF_SECTION const *cs, CONF_SECTION const *prev);
+CONF_SECTION	*cf_section_first(CONF_SECTION const *cs);
+
+/** @hidecallergraph */
+CONF_SECTION	*cf_section_next(CONF_SECTION const *cs, CONF_SECTION const *curr);
+
+/** @hidecallergraph */
+CONF_SECTION	*cf_section_prev(CONF_SECTION const *cs, CONF_SECTION const *curr);
+
 /** @hidecallergraph */
 CONF_SECTION	*cf_section_find(CONF_SECTION const *cs, char const *name1, char const *name2);
 /** @hidecallergraph */
 CONF_SECTION	*cf_section_find_next(CONF_SECTION const *cs, CONF_SECTION const *subcs,
 				      char const *name1, char const *name2);
-CONF_SECTION	*cf_section_find_in_parent(CONF_SECTION const *cs,
-					   char const *name1, char const *name2);
-CONF_SECTION	*cf_section_find_parent(CONF_SECTION const *cs,
-				       char const *name1, char const *name2);
+
+#define		cf_section_find_in_parent(_cf, _name1, _name2) \
+		_cf_section_find_in_parent(CF_TO_ITEM(_cf), _name1, _name2)
+CONF_SECTION	*_cf_section_find_in_parent(CONF_ITEM const *ci,
+					    char const *name1, char const *name2);
+
+#define		cf_section_find_parent(_cf, _name1, _name2) \
+		_cf_section_find_parent(CF_TO_ITEM(_cf), _name1, _name2)
+CONF_SECTION	*_cf_section_find_parent(CONF_ITEM const *ci,
+					 char const *name1, char const *name2);
 
 char const 	*cf_section_value_find(CONF_SECTION const *, char const *attr);
 
@@ -182,7 +202,7 @@ void		cf_section_add_name2_quote(CONF_SECTION *cs, fr_token_t token);
 CONF_PAIR	*cf_pair_alloc(CONF_SECTION *parent, char const *attr, char const *value,
 			       fr_token_t op, fr_token_t lhs_type, fr_token_t rhs_type);
 
-CONF_PAIR	*cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp);
+CONF_PAIR	*cf_pair_dup(CONF_SECTION *parent, CONF_PAIR *cp, bool copy_meta);
 
 int		cf_pair_replace(CONF_SECTION *cs, CONF_PAIR *cp, char const *value);
 
@@ -190,7 +210,11 @@ void		cf_pair_mark_parsed(CONF_PAIR *cp);
 
 bool		cf_pair_is_parsed(CONF_PAIR *cp);
 
-CONF_PAIR	*cf_pair_next(CONF_SECTION const *cs, CONF_PAIR const *prev);
+CONF_PAIR	*cf_pair_first(CONF_SECTION const *cs);
+
+CONF_PAIR	*cf_pair_next(CONF_SECTION const *cs, CONF_PAIR const *curr);
+
+CONF_PAIR	*cf_pair_prev(CONF_SECTION const *cs, CONF_PAIR const *curr);
 
 CONF_PAIR	*cf_pair_find(CONF_SECTION const *cs, char const *name);
 
@@ -334,8 +358,11 @@ void		_cf_log_perr_by_child(fr_log_type_t type, CONF_SECTION const *parent, char
 				      char const *file, int line, fr_log_perror_format_t const *f_rules,
 				      char const *fmt, ...) CC_HINT(format (printf, 7, 8));
 
-#define		cf_debug(_cf) _cf_debug(CF_TO_ITEM(_cf))
-void		_cf_debug(CONF_ITEM const *ci);
+#define		cf_item_debug(_cf) _cf_item_debug(CF_TO_ITEM(_cf))
+void		_cf_item_debug(CONF_ITEM const *ci);
+
+void		cf_pair_debug(CONF_PAIR *cp);
+void		cf_section_debug(CONF_SECTION *cs);
 
 #define		cf_canonicalize_error(_ci, _slen, _msg, _str) _cf_canonicalize_error(CF_TO_ITEM(_ci), _slen, _msg, _str)
 void		_cf_canonicalize_error(CONF_ITEM *ci, ssize_t slen, char const *msg, char const *str);

@@ -30,6 +30,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/util/dict.h>
 #include <freeradius-devel/unlang/function.h>
 
 #include <ctype.h>
@@ -148,26 +149,26 @@ static int find_next_reset(rlm_sqlcounter_t *inst, fr_time_t now)
 		 *  Round up to the next nearest hour.
 		 */
 		tm->tm_hour += num;
-		inst->reset_time = fr_time_from_sec(mktime(tm));
+		inst->reset_time = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "daily") == 0 || last == 'd') {
 		/*
 		 *  Round up to the next nearest day.
 		 */
 		tm->tm_hour = 0;
 		tm->tm_mday += num;
-		inst->reset_time = fr_time_from_sec(mktime(tm));
+		inst->reset_time = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "weekly") == 0 || last == 'w') {
 		/*
 		 *  Round up to the next nearest week.
 		 */
 		tm->tm_hour = 0;
 		tm->tm_mday += (7 - tm->tm_wday) +(7*(num-1));
-		inst->reset_time = fr_time_from_sec(mktime(tm));
+		inst->reset_time = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "monthly") == 0 || last == 'm') {
 		tm->tm_hour = 0;
 		tm->tm_mday = 1;
 		tm->tm_mon += num;
-		inst->reset_time = fr_time_from_sec(mktime(tm));
+		inst->reset_time = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "never") == 0) {
 		inst->reset_time = fr_time_wrap(0);
 	} else {
@@ -216,26 +217,26 @@ static int find_prev_reset(rlm_sqlcounter_t *inst, fr_time_t now)
 		 *  Round down to the prev nearest hour.
 		 */
 		tm->tm_hour -= num - 1;
-		inst->last_reset = fr_time_from_sec(mktime(tm));
+		inst->last_reset = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "daily") == 0 || last == 'd') {
 		/*
 		 *  Round down to the prev nearest day.
 		 */
 		tm->tm_hour = 0;
 		tm->tm_mday -= num - 1;
-		inst->last_reset = fr_time_from_sec(mktime(tm));
+		inst->last_reset = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "weekly") == 0 || last == 'w') {
 		/*
 		 *  Round down to the prev nearest week.
 		 */
 		tm->tm_hour = 0;
 		tm->tm_mday -= tm->tm_wday +(7*(num-1));
-		inst->last_reset = fr_time_from_sec(mktime(tm));
+		inst->last_reset = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "monthly") == 0 || last == 'm') {
 		tm->tm_hour = 0;
 		tm->tm_mday = 1;
 		tm->tm_mon -= num - 1;
-		inst->last_reset = fr_time_from_sec(mktime(tm));
+		inst->last_reset = fr_time_from_sec(inst->utc ? timegm(tm) : mktime(tm));
 	} else if (strcmp(inst->reset, "never") == 0) {
 		inst->reset_time = fr_time_wrap(0);
 	} else {
@@ -257,7 +258,7 @@ typedef struct {
 
 /** Handle the result of calling the SQL query to retrieve the `counter` value.
  *
- * Create / update the `counter` attribute in the contol list
+ * Create / update the `counter` attribute in the control list
  * If `counter` > `limit`, optionally populate a reply message and return RLM_MODULE_REJECT.
  * Otherwise, optionally populate a reply attribute with the value of `limit` - `counter` and return RLM_MODULE_UPDATED.
  * If no reply attribute is set, return RLM_MODULE_OK.
@@ -383,7 +384,7 @@ static unlang_action_t mod_authorize_resume(rlm_rcode_t *p_result, UNUSED int *p
  */
 static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_sqlcounter_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_sqlcounter_t);
+	rlm_sqlcounter_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_sqlcounter_t);
 	sqlcounter_call_env_t	*env = talloc_get_type_abort(mctx->env_data, sqlcounter_call_env_t);
 	fr_pair_t		*limit, *vp;
 	sqlcounter_rctx_t	*rctx;
@@ -440,87 +441,12 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 	return UNLANG_ACTION_PUSHED_CHILD;
 }
 
-/*
- *	Do any per-module initialization that is separate to each
- *	configured instance of the module.  e.g. set up connections
- *	to external databases, read configuration files, set up
- *	dictionary entries, etc.
- *
- *	If configuration information is given in the config section
- *	that must be referenced in later calls, store a handle to it
- *	in *instance otherwise put a null pointer there.
- */
-static int mod_instantiate(module_inst_ctx_t const *mctx)
-{
-	rlm_sqlcounter_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_sqlcounter_t);
-	CONF_SECTION    	*conf = mctx->inst->conf;
-
-	fr_assert(inst->query && *inst->query);
-
-	inst->reset_time = fr_time_wrap(0);
-
-	if (find_next_reset(inst, fr_time()) == -1) {
-		cf_log_err(conf, "Invalid reset '%s'", inst->reset);
-		return -1;
-	}
-
-	/*
-	 *  Discover the beginning of the current time period.
-	 */
-	inst->last_reset = fr_time_wrap(0);
-
-	if (find_prev_reset(inst, fr_time()) < 0) {
-		cf_log_err(conf, "Invalid reset '%s'", inst->reset);
-		return -1;
-	}
-
-	return 0;
-}
-
-#define ATTR_CHECK(_tmpl, _name) if (tmpl_is_attr_unresolved(inst->_tmpl)) { \
-	if (fr_dict_attr_add(fr_dict_unconst(dict_freeradius), fr_dict_root(dict_freeradius), tmpl_attr_tail_unresolved(inst->_tmpl), -1, FR_TYPE_UINT64, &flags) < 0) { \
-		cf_log_perr(conf, "Failed defining %s attribute", _name); \
-		return -1; \
-	} \
-} else if (tmpl_is_attr(inst->_tmpl)) { \
-	if (tmpl_attr_tail_da(inst->_tmpl)->type != FR_TYPE_UINT64) { \
-		cf_log_err(conf, "%s attribute %s must be uint64", _name, tmpl_attr_tail_da(inst->_tmpl)->name); \
-		return -1; \
-	} \
-}
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	rlm_sqlcounter_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_sqlcounter_t);
-	CONF_SECTION    	*conf = mctx->inst->conf;
-	fr_dict_attr_flags_t	flags = (fr_dict_attr_flags_t) { .internal = 1, .length = 8 };
-	module_instance_t const	*sql_inst;
-
-	ATTR_CHECK(start_attr, "reset_period_start")
-	ATTR_CHECK(end_attr, "reset_period_end")
-	ATTR_CHECK(counter_attr, "counter")
-	ATTR_CHECK(limit_attr, "check")
-
-	sql_inst = module_rlm_by_name(NULL, inst->sql_name);
-	if (!sql_inst) {
-		cf_log_err(conf, "Module \"%s\" not found", inst->sql_name);
-		return -1;
-	}
-
-	if (!talloc_get_type(sql_inst->dl_inst->data, rlm_sql_t)) {
-		cf_log_err(conf, "\"%s\" is not an instance of rlm_sql", inst->sql_name);
-		return -1;
-	}
-
-	return 0;
-}
-
 /** Custom call_env parser to tokenize the SQL query xlat used for counter retrieval
  */
-static int call_env_query_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci, void const *data,
-				UNUSED call_env_parser_t const *rule)
+static int call_env_query_parse(TALLOC_CTX *ctx, void *out, tmpl_rules_t const *t_rules, CONF_ITEM *ci,
+				call_env_ctx_t const *cec, UNUSED call_env_parser_t const *rule)
 {
-	rlm_sqlcounter_t const	*inst = talloc_get_type_abort_const(data, rlm_sqlcounter_t);
+	rlm_sqlcounter_t const	*inst = talloc_get_type_abort_const(cec->mi->data, rlm_sqlcounter_t);
 	CONF_PAIR const		*to_parse = cf_item_to_pair(ci);
 	char			*query;
 	xlat_exp_head_t		*ex;
@@ -564,6 +490,87 @@ static const call_env_method_t sqlcounter_call_env = {
 	}
 };
 
+
+/*
+ *	Do any per-module initialization that is separate to each
+ *	configured instance of the module.  e.g. set up connections
+ *	to external databases, read configuration files, set up
+ *	dictionary entries, etc.
+ *
+ *	If configuration information is given in the config section
+ *	that must be referenced in later calls, store a handle to it
+ *	in *instance otherwise put a null pointer there.
+ */
+static int mod_instantiate(module_inst_ctx_t const *mctx)
+{
+	rlm_sqlcounter_t	*inst = talloc_get_type_abort(mctx->mi->data, rlm_sqlcounter_t);
+	CONF_SECTION    	*conf = mctx->mi->conf;
+	module_instance_t const	*sql_inst;
+	fr_assert(inst->query && *inst->query);
+
+	sql_inst = module_rlm_static_by_name(NULL, inst->sql_name);
+	if (!sql_inst) {
+		cf_log_err(conf, "Module \"%s\" not found", inst->sql_name);
+		return -1;
+	}
+
+	if (!talloc_get_type(sql_inst->data, rlm_sql_t)) {
+		cf_log_err(conf, "\"%s\" is not an instance of rlm_sql", inst->sql_name);
+		return -1;
+	}
+
+	inst->reset_time = fr_time_wrap(0);
+
+	if (find_next_reset(inst, fr_time()) == -1) {
+		cf_log_err(conf, "Invalid reset '%s'", inst->reset);
+		return -1;
+	}
+
+	/*
+	 *  Discover the beginning of the current time period.
+	 */
+	inst->last_reset = fr_time_wrap(0);
+
+	if (find_prev_reset(inst, fr_time()) < 0) {
+		cf_log_err(conf, "Invalid reset '%s'", inst->reset);
+		return -1;
+	}
+
+	return 0;
+}
+
+static inline int attr_check(CONF_SECTION *conf, tmpl_t *tmpl, char const *name, fr_dict_attr_flags_t *flags)
+{
+	if (tmpl_is_attr_unresolved(tmpl) && !fr_dict_attr_by_name(NULL, fr_dict_root(dict_freeradius), tmpl_attr_tail_unresolved(tmpl))) {
+		if (fr_dict_attr_add_name_only(fr_dict_unconst(dict_freeradius), fr_dict_root(dict_freeradius),
+					       tmpl_attr_tail_unresolved(tmpl), FR_TYPE_UINT64, flags) < 0) {
+			cf_log_perr(conf, "Failed defining %s attribute", name);
+			return -1;
+		}
+	} else if (tmpl_is_attr(tmpl)) {
+		if (tmpl_attr_tail_da(tmpl)->type != FR_TYPE_UINT64) {
+			cf_log_err(conf, "%s attribute %s must be uint64", name, tmpl_attr_tail_da(tmpl)->name);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int mod_bootstrap(module_inst_ctx_t const *mctx)
+{
+	rlm_sqlcounter_t const	*inst = talloc_get_type_abort(mctx->mi->data, rlm_sqlcounter_t);
+	CONF_SECTION    	*conf = mctx->mi->conf;
+	fr_dict_attr_flags_t	flags = { .internal = 1, .length = 8, .name_only = 1 };
+
+	if (unlikely(attr_check(conf, inst->start_attr, "reset_period_start", &flags) < 0)) return -1;
+	if (unlikely(attr_check(conf, inst->end_attr, "reset_period_end", &flags) < 0)) return -1;
+	if (unlikely(attr_check(conf, inst->counter_attr, "counter", &flags) < 0)) return -1;
+	if (unlikely(attr_check(conf, inst->limit_attr, "check", &flags) < 0)) return -1;
+
+	return 0;
+}
+
 /*
  *	The module name should be the only globally exported symbol.
  *	That is, everything else should be 'static'.
@@ -578,15 +585,15 @@ module_rlm_t rlm_sqlcounter = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "sqlcounter",
-		.flags		= MODULE_TYPE_THREAD_SAFE,
 		.inst_size	= sizeof(rlm_sqlcounter_t),
 		.config		= module_config,
 		.bootstrap	= mod_bootstrap,
 		.instantiate	= mod_instantiate,
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = CF_IDENT_ANY,	.name2 = CF_IDENT_ANY,		.method = mod_authorize,
-		  .method_env = &sqlcounter_call_env },
-		MODULE_NAME_TERMINATOR
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME(CF_IDENT_ANY, CF_IDENT_ANY), .method = mod_authorize, .method_env = &sqlcounter_call_env },
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

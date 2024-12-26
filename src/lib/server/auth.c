@@ -27,8 +27,9 @@
 RCSID("$Id$")
 
 #include <freeradius-devel/io/listen.h>
-#include <freeradius-devel/server/base.h>
+#include <freeradius-devel/server/auth.h>
 #include <freeradius-devel/server/module.h>
+#include <freeradius-devel/server/protocol.h>
 #include <freeradius-devel/server/rcode.h>
 #include <freeradius-devel/server/state.h>
 #include <freeradius-devel/unlang/call.h>
@@ -38,8 +39,6 @@ RCSID("$Id$")
 #include <freeradius-devel/radius/defs.h>
 
 #include <freeradius-devel/protocol/freeradius/freeradius.internal.h>
-
-#include <ctype.h>
 
 /*
  *	Run a virtual server auth and postauth
@@ -174,7 +173,7 @@ unlang_action_t rad_virtual_server(rlm_rcode_t *p_result, request_t *request)
 
 	RDEBUG("server %s {", cf_section_name2(unlang_call_current(request)));
 	request->async->process(&final,
-				MODULE_CTX(dl_module_instance_by_data(request->async->process_inst), NULL, NULL, NULL),
+				MODULE_CTX(module_rlm_by_data(request->async->process_inst), NULL, NULL, NULL),
 				request);
 	RDEBUG("} # server %s", cf_section_name2(unlang_call_current(request)));
 
@@ -196,7 +195,7 @@ unlang_action_t rad_virtual_server(rlm_rcode_t *p_result, request_t *request)
 /*
  *	Debug the packet if requested.
  */
-void common_packet_debug(request_t *request, fr_radius_packet_t *packet, fr_pair_list_t *pairs, bool received)
+void common_packet_debug(request_t *request, fr_packet_t *packet, fr_pair_list_t *pairs, bool received)
 {
 #ifdef WITH_IFINDEX_NAME_RESOLUTION
 	char if_name[IFNAMSIZ];

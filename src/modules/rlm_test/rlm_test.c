@@ -24,7 +24,7 @@
  */
 RCSID("$Id$")
 
-#define LOG_PREFIX mctx->inst->name
+#define LOG_PREFIX mctx->mi->name
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
@@ -41,8 +41,6 @@ RCSID("$Id$")
  *	be used as the instance handle.
  */
 typedef struct {
-	char const	*name;
-
 	tmpl_t		*tmpl;
 	tmpl_t		**tmpl_m;
 	char const	*string;
@@ -420,7 +418,7 @@ static xlat_action_t test_xlat_fail(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t 
 
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_test_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_test_t);
+	rlm_test_t *inst = talloc_get_type_abort(mctx->mi->data, rlm_test_t);
 	rlm_test_thread_t *t = talloc_get_type_abort(mctx->thread, rlm_test_thread_t);
 
 	t->inst = inst;
@@ -453,7 +451,7 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	rlm_test_t *inst = talloc_get_type_abort(mctx->inst->data, rlm_test_t);
+	rlm_test_t const *inst = talloc_get_type_abort(mctx->mi->data, rlm_test_t);
 	xlat_t *xlat;
 
 	/*
@@ -482,10 +480,10 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		INFO("inst->tmpl_m is NULL");
 	}
 
-	if (!(xlat = xlat_func_register_module(inst, mctx, "passthrough", test_xlat_passthrough, FR_TYPE_VOID))) return -1;
+	if (!(xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "passthrough", test_xlat_passthrough, FR_TYPE_VOID))) return -1;
 	xlat_func_args_set(xlat, test_xlat_passthrough_args);
 
-	if (!(xlat = xlat_func_register_module(inst, mctx, "fail", test_xlat_fail, FR_TYPE_VOID))) return -1;
+	if (!(xlat = module_rlm_xlat_register(mctx->mi->boot, mctx, "fail", test_xlat_fail, FR_TYPE_VOID))) return -1;
 	xlat_func_args_set(xlat, test_xlat_fail_args);
 
 	return 0;
@@ -520,7 +518,7 @@ module_rlm_t rlm_test = {
 	.common = {
 		.magic			= MODULE_MAGIC_INIT,
 		.name			= "test",
-		.flags			= MODULE_TYPE_THREAD_SAFE | MODULE_TYPE_RETRY,
+		.flags			= MODULE_TYPE_RETRY,
 		.inst_size		= sizeof(rlm_test_t),
 		.thread_inst_size	= sizeof(rlm_test_thread_t),
 		.config			= module_config,
@@ -530,19 +528,22 @@ module_rlm_t rlm_test = {
 		.thread_instantiate	= mod_thread_instantiate,
 		.thread_detach		= mod_thread_detach
 	},
-	.method_names = (module_method_name_t[]){
-		{ .name1 = "authorize",		.name2 = CF_IDENT_ANY,		.method = mod_authorize },
+	.method_group = {
+		.bindings = (module_method_binding_t[]){
+			{ .section = SECTION_NAME("accounting", CF_IDENT_ANY),		.method = mod_accounting },
+			{ .section = SECTION_NAME("authenticate", CF_IDENT_ANY),	.method = mod_authenticate },
+			{ .section = SECTION_NAME("authorize", CF_IDENT_ANY),		.method = mod_authorize },
 
-		{ .name1 = "recv",		.name2 = "accounting-request",	.method = mod_preacct },
-		{ .name1 = "recv",		.name2 = CF_IDENT_ANY,		.method = mod_authorize },
-		{ .name1 = "accounting",	.name2 = CF_IDENT_ANY,		.method = mod_accounting },
-		{ .name1 = "authenticate",	.name2 = CF_IDENT_ANY,		.method = mod_authenticate },
+			{ .section = SECTION_NAME("name1_null", NULL),			.method = mod_return },
 
-		{ .name1 = "recv",		.name2 = "access-challenge",	.method = mod_return },
-		{ .name1 = "name1_null",	.name2 = NULL,			.method = mod_return },
-		{ .name1 = "send",		.name2 = CF_IDENT_ANY,		.method = mod_return },
-		{ .name1 = "retry",		.name2 = NULL,			.method = mod_retry },
+			{ .section = SECTION_NAME("recv", "access-challenge"),		.method = mod_return },
+			{ .section = SECTION_NAME("recv", "accounting-request"),	.method = mod_preacct },
+			{ .section = SECTION_NAME("recv", CF_IDENT_ANY),		.method = mod_authorize },
 
-		MODULE_NAME_TERMINATOR
+			{ .section = SECTION_NAME("retry", NULL),			.method = mod_retry },
+			{ .section = SECTION_NAME("send", CF_IDENT_ANY),		.method = mod_return },
+
+			MODULE_BINDING_TERMINATOR
+		}
 	}
 };

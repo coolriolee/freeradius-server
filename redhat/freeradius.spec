@@ -1,3 +1,6 @@
+# Selinux type we're building for
+%global selinuxtype targeted
+
 # Optional modules and libraries
 %bcond_with rlm_cache_memcached
 %bcond_with rlm_idn
@@ -6,7 +9,40 @@
 %bcond_with rlm_opendirectory
 %bcond_with rlm_securid
 %bcond_with rlm_sigtran
+
+#
+#  Oracle conditions and definitions
+#
+#  The name of instantclient packages, and where they install libraries and headers
+#  varies wildly between the version of the package and what operating system you're
+#  using.  The following definitions allow the defaults for the rlm_sql_oracle module
+#  to be overridden.
+#
+#  Pass in --with rlm_sql_oracle to build with Oracle support
+#
+#  Specify the version of Oracle you're using with:
+#    --define '_oracle_version <version>'
+#  Specify the include and lib directories for Oracle with:
+#    --define '_oracle_include_dir <dir>' and --define '_oracle_lib_dir <dir>'
+#  Specify runtime dependencies with:
+#    --define '_oracle_requires <package>'
+#  Specify the build dependencies with:
+#    --define '_oracle_build_requires <package>'
+#
 %bcond_with rlm_sql_oracle
+%if %{with rlm_sql_oracle}
+  %{!?_oracle_requires:%define _oracle_requires oracle-instantclient%{?_oracle_version}}
+  %{!?_oracle_build_requires:%define _oracle_build_requires oracle-instantclient%{?_oracle_version}-devel}
+  %ifarch x86_64
+    %{!?_oracle_include_dir:%define _oracle_include_dir /usr/include/oracle%{?_oracle_version:/%{_oracle_version}}/client64}
+    %{!?_oracle_lib_dir:%define _oracle_lib_dir %{_prefix}/lib/oracle/%{?_oracle_version:/%{_oracle_version}}/client64/lib}
+  %endif
+  %ifarch i386
+    %{!?_oracle_include_dir:%define _oracle_include_dir /usr/include/oracle%{?_oracle_version:/%{_oracle_version}}/client}
+    %{!?_oracle_lib_dir:%define _oracle_lib_dir %{_prefix}/lib/oracle/%{?_oracle_version:/%{_oracle_version}}/client/lib}
+  %endif
+%endif
+
 %bcond_with rlm_yubikey
 
 # Build all experimental modules
@@ -35,6 +71,9 @@
 
 # Enable asserts and additional debugging
 %bcond_with developer
+
+# Integrate with gperftools
+%bcond_with gperftools
 
 # Enable various clang/gcc debugging tool support
 %bcond_with address_sanitizer
@@ -78,11 +117,7 @@ BuildRequires: gdbm-devel
 %if %{with freeradius_openssl}
 BuildRequires: freeradius-openssl, freeradius-openssl-devel
 %else
-%if 0%{?rhel}%{?fedora} < 8
-BuildRequires: nwkrad-openssl-devel >= 1.1.1
-%else
 BuildRequires: openssl, openssl-devel
-%endif
 %endif
 
 BuildRequires: libcap-devel
@@ -107,13 +142,11 @@ Requires(pre): shadow-utils glibc-common
 Requires(post): /sbin/chkconfig /usr/sbin/setsebool
 Requires(preun): /sbin/chkconfig
 Requires: freeradius-config = %{version}-%{release}
+Requires: freeradius-common = %{version}-%{release}
+Requires: (%{name}-selinux if selinux-policy-%{selinuxtype})
 %if %{with freeradius_openssl}
 Requires: freeradius-openssl
 %else
-%if 0%{?rhel}%{?fedora} < 8
-# (We also need the system openssl on CentOS7 for the utilities)
-Requires: nwkrad-openssl >= 1.1.1, nwkrad-openssl-perl
-%endif
 # Need openssl-perl for c_rehash, which is used when
 # generating certificates
 Requires: openssl, openssl-perl
@@ -163,10 +196,16 @@ FreeRADIUS default config files
 This package should be used as a base for a site local package
 to configure the FreeRADIUS server.
 
+%package common
+Summary: Main utility library, protocol libraries, and dictionaries
+
+%description common
+Provides the main utility library, protocol libraries, and the dictionaries
+
 %package utils
 Group: System Environment/Daemons
 Summary: FreeRADIUS utilities
-Requires: %{name}%{?_isa} = %{version}-%{release}
+Requires: freeradius-common = %{version}-%{release}
 Requires: libpcap >= 0.9.4
 
 %description utils
@@ -177,6 +216,21 @@ of the server, and let you decide if they satisfy your needs.
 
 Support for RFC and VSA Attributes Additional server configuration
 attributes Selecting a particular configuration Authentication methods
+
+# No requirements here, as selinux is installed by the base package
+# as are any of the utilities we need to compile/manage policies.
+%package selinux
+Summary: A custom selinux policy for FreeRADIUS which adds multiple bools
+Requires: %{name} = %{version}-%{release}
+Requires: selinux-policy-%{selinuxtype}
+Requires(post): selinux-policy-%{selinuxtype}
+BuildRequires: selinux-policy-devel
+%{?selinux_requires}
+
+%description selinux
+This packages installs a custom selinux policy to allow the FreeRADIUS
+daemon to operate on additional ports, and communicate with other services
+directly using unix sockets.
 
 %package snmp
 Summary: SNMP MIBs and SNMP utilities used by FreeRADIUS
@@ -202,7 +256,7 @@ SQL databases.
 %package libfreeradius-curl
 Summary: curl wrapper library for FreeRADIUS
 Requires: %{name}%{?_isa} = %{version}-%{release}
-Requires: freeradius-libfreeradius-util = %{version}-%{release}
+Requires: freeradius-common = %{version}-%{release}
 Requires: libcurl >= 7.24.0
 BuildRequires: libcurl-devel >= 7.24.0
 
@@ -213,13 +267,8 @@ Integrates libcurl with FreeRADIUS' internal event loop.
 Summary: Internal support library for FreeRADIUS modules using json-c
 Group: System Environment/Daemons
 Requires: %{name}%{?_isa} = %{version}-%{release}
-%if 0%{?rhel}%{?fedora} < 8
-Requires: nwkrad-json-c >= 0.13
-BuildRequires: nwkrad-json-c-devel >= 0.13
-%else
 Requires: json-c >= 0.13
 BuildRequires: json-c-devel >= 0.13
-%endif
 
 %description libfreeradius-json
 Internal support library for FreeRADIUS modules using json-c, required by all modules that use json-c.
@@ -259,14 +308,6 @@ Provides a producer module to push messages into a Kafka queue
 # END kafka libraries and modules
 #
 
-%package libfreeradius-radius
-Summary: RADIUS protocol library for FreeRADIUS
-Requires: %{name}%{?_isa} = %{version}-%{release}
-Requires: freeradius-libfreeradius-util = %{version}-%{release}
-
-%description libfreeradius-radius
-Provides protocol encoders and decoders for the RADIUS protocol.
-
 %package libfreeradius-redis
 Summary: Internal support library for FreeRADIUS modules using hiredis
 Group: System Environment/Daemons
@@ -277,15 +318,19 @@ BuildRequires: hiredis-devel >= 0.10
 %description libfreeradius-redis
 Internal support library for FreeRADIUS modules using hiredis, required by all modules that use hiredis.
 
-%package libfreeradius-util
-Summary: Utility library used by all other FreeRADIUS libraries
-
-%description libfreeradius-util
-Provides common functions used by other FreeRADIUS libraries and modules.
-
 #
 # END 3rd party utility library packages
 #
+%package brotli
+Summary: Brotli compression and decompression
+Group: System Environment/Daemons
+Requires: %{name}%{?_isa} = %{version}-%{release}
+Requires: brotli
+BuildRequires: brotli-devel
+
+%description brotli
+This module adds brotli compression and decompression support to FreeRADIUS.
+
 %package imap
 Summary: IMAP support for FreeRADIUS
 Group: System Environment/Daemons
@@ -293,7 +338,7 @@ Requires: %{name}%{?_isa} = %{version}-%{release}
 Requires: freeradius-libfreeradius-curl = %{version}
 
 %description imap
-This plugin provides the ability to authenticate users against an IMAP server.
+This module provides the ability to authenticate users against an IMAP server.
 
 %if %{with rlm_cache_memcached}
 %package memcached
@@ -356,12 +401,7 @@ Group: System Environment/Daemons
 Requires: %{name}%{?_isa} = %{version}-%{release}
 Requires: perl(:MODULE_COMPAT_%(eval "`%{__perl} -V:version`"; echo $version))
 %{?fedora:BuildRequires: perl-devel}
-%if 0%{?rhel} <= 5
-BuildRequires: perl
-%endif
-%if 0%{?rhel} >= 6
 BuildRequires: perl-devel
-%endif
 BuildRequires: perl(ExtUtils::Embed)
 
 %description perl
@@ -388,16 +428,11 @@ This plugin provides Python support for the FreeRADIUS server project.
 Summary: MySQL support for FreeRADIUS
 Group: System Environment/Daemons
 Requires: %{name}%{?_isa} = %{version}-%{release}
-%if 0%{?rhel} <= 7
-Requires: mysql
-%endif
-%if 0%{?rhel} >= 8
-Requires: mysql-libs
-%endif
-BuildRequires: mysql-devel
+Requires: mariadb-connector-c
+BuildRequires: mariadb-connector-c-devel
 
 %description mysql
-This plugin provides MySQL support for the FreeRADIUS server project.
+This plugin provides MySQL / MariaDB support for the FreeRADIUS server project.
 
 %package postgresql
 Summary: PostgreSQL support for FreeRADIUS
@@ -444,20 +479,10 @@ This plugin provides FreeTDS support for the FreeRADIUS server project.
 Summary: Oracle support for FreeRADIUS
 Group: System Environment/Daemons
 Requires: %{name}%{?_isa} = %{version}-%{release}
-Requires: oracle-instantclient11.2
-BuildRequires: oracle-instantclient11.2-devel
-
+Requires: %{_oracle_requires}
+BuildRequires: %{_oracle_build_requires}
 %description oracle
 This plugin provides Oracle support for the FreeRADIUS server project.
-
-%ifarch x86_64
-%global oracle_include_dir /usr/include/oracle/11.2/client64
-%global oracle_lib_dir %{_prefix}/lib/oracle/11.2/client64/lib
-%endif
-%ifarch i386
-%global oracle_include_dir /usr/include/oracle/11.2/client
-%global oracle_lib_dir %{_prefix}/lib/oracle/11.2/client/lib
-%endif
 %endif
 
 %package redis
@@ -527,8 +552,6 @@ BuildRequires: libosmo-sccp-devel, libosmo-xua-devel, libosmo-mtp-devel, libosmo
 This plugin provides an experimental M3UA/SCCP/TCAP/MAP stack for the FreeRADIUS server project.
 %endif
 
-# libcurl version is too old in Centos/EL 7
-%if 0%{?rhel}%{?fedora} > 7
 %package smtp
 Summary: SMTP support for FreeRADIUS
 Group: System Environment/Daemons
@@ -537,7 +560,6 @@ Requires: freeradius-libfreeradius-curl = %{version}
 
 %description smtp
 This plugin provides the ability to authenticate users against SMTP servers and send email.
-%endif
 
 %if %{with rlm_yubikey}
 %package yubikey
@@ -562,14 +584,8 @@ This plugin provides YubiCloud support for the FreeRADIUS server project.
 #
 # Disable _debuginfo_subpackage.  They don't work. rpbuild doesn't split out the debug info for the files
 # into the subpackages.  It also doesn't split out the source files.
-%if 0%{?fedora} >= 27
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
-%endif
-%if 0%{?rhel} >= 8
-%undefine _debugsource_packages
-%undefine _debuginfo_subpackages
-%endif
 
 %prep
 %setup -q -n freeradius-server-%{version}
@@ -638,6 +654,11 @@ export RADIUSD_VERSION_RELEASE="%{release}"
         --with-threads \
         --with-thread-pool \
         --with-docdir=%{docdir} \
+%if %{without developer}
+        --disable-developer \
+%else
+        --enable-developer \
+%endif
         %{autoconf_mod_with experimental-modules} \
         %{autoconf_mod_with rlm_cache_memcached} \
         %{autoconf_mod_with rlm_idn} \
@@ -670,8 +691,8 @@ export RADIUSD_VERSION_RELEASE="%{release}"
 %if %{without rlm_sql_oracle}
         --without-rlm_sql_oracle \
 %else
-        --with-oracle-include-dir=%{oracle_include_dir} \
-        --with-oracle-lib-dir=%{oracle_lib_dir} \
+        --with-oracle-include-dir=%{_oracle_include_dir} \
+        --with-oracle-lib-dir=%{_oracle_lib_dir} \
 %endif
         --with-mysql-lib-dir=%{_libdir}/mysql \
         --with-unixodbc-lib-dir=%{_libdir} \
@@ -679,26 +700,15 @@ export RADIUSD_VERSION_RELEASE="%{release}"
         --with-rlm-krb5-include-dir=/usr/kerberos/include \
         --without-rlm_sql_firebird \
         --without-rlm_sql_db2 \
-%if 0%{?rhel}%{?fedora} < 8
-        --with-jsonc-lib-dir=/opt/nwkrad/lib64 \
-        --with-jsonc-include-dir=/opt/nwkrad/include \
-%else
         --with-jsonc-lib-dir=%{_libdir} \
         --with-jsonc-include-dir=/usr/include/json \
-%endif
         --with-winbind-include-dir=/usr/include/samba-4.0 \
         --with-winbind-lib-dir=/usr/lib64/samba \
 %if %{with freeradius_openssl}
         --with-openssl-lib-dir=/opt/openssl/lib \
         --with-openssl-include-dir=/opt/openssl/include \
-%else
-%if 0%{?rhel}%{?fedora} < 8
-        --with-openssl-lib-dir=/opt/nwkrad/lib64 \
-        --with-openssl-include-dir=/opt/nwkrad/include \
 %endif
-%endif
-%if %{with developer}
-        --enable-developer=yes \
+%if %{with gperftools}
         --with-gperftools \
 %endif
 %if %{with address_sanitizer}
@@ -716,6 +726,9 @@ export RADIUSD_VERSION_RELEASE="%{release}"
 
 # Do not use %__make here, as we may be using the non-system make
 make %{?_smp_mflags}
+
+# Compile the selinux policy and produce the .bz2 containing the compiled policy
+make -f redhat/selinux/Makefile
 
 %install
 %__rm -rf $RPM_BUILD_ROOT
@@ -800,6 +813,9 @@ Please reference that document.
 
 EOF
 
+# Install the selinux module
+%__install -D -m 0644 -t %{buildroot}%{_datadir}/selinux/packages/%{selinuxtype} redhat/selinux/%{name}.pp.bz2
+
 %clean
 %__rm -rf $RPM_BUILD_ROOT
 
@@ -815,10 +831,12 @@ getent group  radiusd >/dev/null || /usr/sbin/groupadd -r -g 95 radiusd
 getent passwd radiusd >/dev/null || /usr/sbin/useradd  -r -g radiusd -u 95 -c "radiusd user" -s /sbin/nologin radiusd > /dev/null 2>&1
 exit 0
 
+%pre selinux
+%selinux_relabel_pre -s %{selinuxtype}
 
 %post
 if [ $1 = 1 ]; then
-  /usr/sbin/setsebool -P radius_use_jit=1 &> /dev/null || :
+  %selinux_set_booleans -s %{selinuxtype} radius_use_jit=on
 %if %{?_unitdir:1}%{!?_unitdir:0}
   /bin/systemctl enable radiusd
 %else
@@ -833,6 +851,10 @@ if [ $1 = 1 ]; then
   fi
 fi
 
+%post selinux
+%selinux_modules_install -s %{selinuxtype} %{_datadir}/selinux/packages/%{selinuxtype}/%{name}.pp.bz2
+%selinux_relabel_post -s %{selinuxtype}
+
 %preun
 if [ $1 = 0 ]; then
 %if %{?_unitdir:1}%{!?_unitdir:0}
@@ -846,6 +868,15 @@ fi
 if [ $1 -ge 1 ]; then
   /sbin/service radiusd condrestart >/dev/null 2>&1 || :
 fi
+%selinux_unset_booleans -s %{selinuxtype} radius_jit
+
+%postun selinux
+if [ $1 -eq 0 ]; then
+  %selinux_modules_uninstall -s %{selinuxtype} %{name}
+fi
+
+%posttrans selinux
+%selinux_relabel_post -s %{selinuxtype}
 
 %files
 %defattr(-,root,root)
@@ -868,16 +899,12 @@ fi
 %doc %{_mandir}/man1/smbencrypt.1.gz
 %doc %{_mandir}/man5/checkrad.5.gz
 %doc %{_mandir}/man5/clients.conf.5.gz
-%doc %{_mandir}/man5/dictionary.5.gz
 %doc %{_mandir}/man5/radiusd.conf.5.gz
 %doc %{_mandir}/man5/unlang.5.gz
 %doc %{_mandir}/man8/radcrypt.8.gz
 %doc %{_mandir}/man8/raddebug.8.gz
 %doc %{_mandir}/man8/radmin.8.gz
 %doc %{_mandir}/man8/radiusd.8.gz
-# dictionaries
-%dir %attr(755,root,root) /usr/share/freeradius
-%{_datadir}/freeradius/dictionary/*
 # logs
 %dir %attr(700,radiusd,radiusd) /var/log/radius/
 %dir %attr(700,radiusd,radiusd) /var/log/radius/radacct/
@@ -945,27 +972,14 @@ fi
 %{_libdir}/freeradius/proto_vmps.so
 %{_libdir}/freeradius/proto_vmps_udp.so
 
-# Support libraries without external deps
-%{_libdir}/freeradius/libfreeradius-arp.so
-%{_libdir}/freeradius/libfreeradius-bfd.so
-%{_libdir}/freeradius/libfreeradius-bio.so
+# Support libraries without external deps.
+# Protocol libraries should not be included here, they should be added to the common package instead.
 %{_libdir}/freeradius/libfreeradius-control.so
-%{_libdir}/freeradius/libfreeradius-dhcpv4.so
-%{_libdir}/freeradius/libfreeradius-dhcpv6.so
-%{_libdir}/freeradius/libfreeradius-dns.so
-%{_libdir}/freeradius/libfreeradius-eap-aka-sim.so
-%{_libdir}/freeradius/libfreeradius-eap.so
-%{_libdir}/freeradius/libfreeradius-ethernet.so
-%{_libdir}/freeradius/libfreeradius-internal.so
 %{_libdir}/freeradius/libfreeradius-io.so
 %{_libdir}/freeradius/libfreeradius-server.so
-%{_libdir}/freeradius/libfreeradius-sim.so
-%{_libdir}/freeradius/libfreeradius-tacacs.so
-%{_libdir}/freeradius/libfreeradius-tftp.so
 %{_libdir}/freeradius/libfreeradius-tls.so
 %{_libdir}/freeradius/libfreeradius-totp.so
 %{_libdir}/freeradius/libfreeradius-unlang.so
-%{_libdir}/freeradius/libfreeradius-vmps.so
 
 # Backend modules without external deps
 %{_libdir}/freeradius/rlm_always.so
@@ -1006,7 +1020,6 @@ fi
 %{_libdir}/freeradius/rlm_pap.so
 %{_libdir}/freeradius/rlm_passwd.so
 %{_libdir}/freeradius/rlm_radius.so
-%{_libdir}/freeradius/rlm_radius_udp.so
 %{_libdir}/freeradius/rlm_radutmp.so
 %{_libdir}/freeradius/rlm_sometimes.so
 %{_libdir}/freeradius/rlm_sql.so
@@ -1025,6 +1038,38 @@ fi
 %{?with_rlm_idn: %{_libdir}/freeradius/rlm_idn.so}
 %if %{with experimental_modules}
 %endif
+
+%files common
+# The protocol libraries are needed to load dictionaries, which are used by the server
+# and the majority of utility binaries.
+%{_libdir}/freeradius/libfreeradius-arp.so
+%{_libdir}/freeradius/libfreeradius-bfd.so
+%{_libdir}/freeradius/libfreeradius-cbor.so
+%{_libdir}/freeradius/libfreeradius-dhcpv4.so
+%{_libdir}/freeradius/libfreeradius-dhcpv6.so
+%{_libdir}/freeradius/libfreeradius-dns.so
+%{_libdir}/freeradius/libfreeradius-eap-aka-sim.so
+%{_libdir}/freeradius/libfreeradius-eap.so
+%{_libdir}/freeradius/libfreeradius-ethernet.so
+%{_libdir}/freeradius/libfreeradius-internal.so
+%{_libdir}/freeradius/libfreeradius-radius.so
+%{_libdir}/freeradius/libfreeradius-radius-bio.so
+%{_libdir}/freeradius/libfreeradius-sim.so
+%{_libdir}/freeradius/libfreeradius-tacacs.so
+%{_libdir}/freeradius/libfreeradius-tftp.so
+%{_libdir}/freeradius/libfreeradius-vmps.so
+
+# Utility libraries
+%{_libdir}/freeradius/libfreeradius-bio.so
+%{_libdir}/freeradius/libfreeradius-bio-config.so
+%{_libdir}/freeradius/libfreeradius-util.so
+
+# dictionaries
+%dir %attr(755,root,root) /usr/share/freeradius
+%{_datadir}/freeradius/dictionary/*
+
+# man pages for dictionaries
+%doc %{_mandir}/man5/dictionary.5.gz
 
 %files config
 %dir %attr(755,root,radiusd) %{_sysconfdir}/raddb
@@ -1123,6 +1168,12 @@ fi
 %attr(640,root,radiusd) %config(noreplace)	%{_sysconfdir}/raddb/mods-config/sql/driver/oracle
 %endif
 
+#
+#  Firebird / InterBase
+#
+%config(noreplace)	%{_sysconfdir}/raddb/mods-config/sql/main/firebird
+%config(noreplace)	%{_sysconfdir}/raddb/mods-config/sql/ippool/firebird
+
 %if %{with rlm_unbound}
 %config(noreplace)	%{_sysconfdir}/raddb/mods-config/unbound/default.conf
 %endif
@@ -1139,6 +1190,7 @@ fi
 /usr/bin/radsniff
 /usr/bin/radsqlrelay
 /usr/bin/radtest
+/usr/bin/raduat
 /usr/bin/radwho
 /usr/bin/radzap
 /usr/bin/smbencrypt
@@ -1158,6 +1210,10 @@ fi
 %{_datadir}/snmp/mibs/*
 %dir %attr(750,radiusd,radiusd) %{_sharedstatedir}/radiusd/snmp
 
+%files selinux
+%defattr(-,root,root,0755)
+%attr(0644,root,root) %{_datadir}/selinux/packages/%{selinuxtype}/*.pp.bz2
+
 %files perl-util
 %defattr(-,root,root)
 /usr/bin/rlm_sqlippool_tool
@@ -1176,17 +1232,13 @@ fi
 %defattr(-,root,root)
 %{_libdir}/freeradius/libfreeradius-json.so
 
-%files libfreeradius-radius
-%defattr(-,root,root)
-%{_libdir}/freeradius/libfreeradius-radius.so
-
 %files libfreeradius-redis
 %defattr(-,root,root)
 %{_libdir}/freeradius/libfreeradius-redis.so
 
-%files libfreeradius-util
+%files brotli
 %defattr(-,root,root)
-%{_libdir}/freeradius/libfreeradius-util.so
+%{_libdir}/freeradius/rlm_brotli.so
 
 %if %{with rlm_cache_memcached}
 %files memcached
@@ -1280,12 +1332,9 @@ fi
 %{_libdir}/freeradius/rlm_mruby.so
 %endif
 
-# libcurl version is too old in Centos/EL 7
-%if 0%{?rhel}%{?fedora} > 7
 %files smtp
 %defattr(-,root,root)
 %{_libdir}/freeradius/rlm_smtp.so
-%endif
 
 %files freetds
 %defattr(-,root,root)

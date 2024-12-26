@@ -39,12 +39,13 @@ RCSID("$Id$")
  */
 
 static bool			init = false;
-static fr_test_point_proto_decode_t *tp	= NULL;
 static dl_t			*dl = NULL;
 static dl_loader_t		*dl_loader;
 static fr_dict_protocol_t	*dl_proto;
 
 static fr_dict_t		*dict = NULL;
+
+extern fr_test_point_proto_decode_t XX_PROTOCOL_XX_tp_decode_proto;
 
 int LLVMFuzzerInitialize(int *argc, char ***argv);
 int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len);
@@ -68,6 +69,23 @@ static void exitHandler(void)
 	fr_atexit_global_trigger_all();
 }
 
+static inline
+fr_dict_protocol_t *fuzzer_dict_init(void *dl_handle, char const *proto)
+{
+	char			buffer[256];
+	fr_dict_protocol_t	*our_dl_proto;
+
+	snprintf(buffer, sizeof(buffer), "libfreeradius_%s_dict_protocol", proto);
+
+	our_dl_proto = dlsym(dl_handle, buffer);
+	if (our_dl_proto && our_dl_proto->init() && (our_dl_proto->init() < 0)) {
+		fr_perror("fuzzer: Failed initializing library %s", buffer);
+		fr_exit_now(EXIT_FAILURE);
+	}
+
+	return our_dl_proto;
+}
+
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
 	char const		*lib_dir  	= getenv("FR_LIBRARY_PATH");
@@ -79,7 +97,6 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 	char			*dict_dir_to_free = NULL;
 	char			*lib_dir_to_free = NULL;
 #endif
-	char			buffer[1024];
 
 	if (!argc || !argv || !*argv) return -1; /* shut up clang scan */
 
@@ -208,34 +225,11 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 	 */
 	fr_hostname_lookups = fr_reverse_lookups = false;
 
-	dl_loader = dl_loader_init(NULL, NULL, 0, false);
-	if (!dl_loader) {
-		fr_perror("fuzzer: Failed initializing library loader");
-		fr_exit_now(EXIT_FAILURE);
-	}
-
-	snprintf(buffer, sizeof(buffer), "libfreeradius-%s", proto);
-	dl = dl_by_name(dl_loader, buffer, NULL, false);
-	if (!dl) {
-		fr_perror("fuzzer: Failed loading library %s", buffer);
-		fr_exit_now(EXIT_FAILURE);
-	}
-
-	snprintf(buffer, sizeof(buffer), "libfreeradius_%s_dict_protocol", proto);
-
-	dl_proto = dlsym(dl->handle, buffer);
-	if (dl_proto && dl_proto->init() && (dl_proto->init() < 0)) {
-		fr_perror("fuzzer: Failed initializing library %s", buffer);
-		fr_exit_now(EXIT_FAILURE);
-	}
-
-	snprintf(buffer, sizeof(buffer), "%s_tp_decode_proto", proto);
-
-	tp = dlsym(dl->handle, buffer);
-	if (!tp) {
-		fr_perror("fuzzer: Failed finding test point %s", buffer);
-		fr_exit_now(EXIT_FAILURE);
-	}
+	/*
+	 *	Search in our symbol space first.  We may have been dynamically
+	 *	or statically linked to the library we're fuzzing...
+	 */
+	dl_proto = fuzzer_dict_init(RTLD_DEFAULT, proto);
 
 	init = true;
 
@@ -252,11 +246,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len)
 	TALLOC_CTX *   ctx = talloc_init_const("fuzzer");
 	fr_pair_list_t vps;
 	void *decode_ctx = NULL;
+	fr_test_point_proto_decode_t *tp = &XX_PROTOCOL_XX_tp_decode_proto;
 
 	fr_pair_list_init(&vps);
 	if (!init) LLVMFuzzerInitialize(NULL, NULL);
 
-	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, NULL) < 0)) {
+	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, NULL, dict) < 0)) {
 		fr_perror("fuzzer: Failed initializing test point decode_ctx");
 		fr_exit_now(EXIT_FAILURE);
 	}

@@ -33,6 +33,7 @@ extern "C" {
 #include <freeradius-devel/unlang/xlat_ctx.h>
 #include <freeradius-devel/unlang/xlat.h>
 #include <freeradius-devel/unlang/xlat_func.h>
+#include <freeradius-devel/server/module_ctx.h>
 #include <freeradius-devel/io/pair.h>
 #include <freeradius-devel/util/talloc.h>
 #include <freeradius-devel/build.h>
@@ -56,14 +57,17 @@ extern "C" {
 #endif
 
 typedef struct xlat_s {
-	fr_rb_node_t		node;			//!< Entry in the xlat function tree.
+	fr_rb_node_t		func_node;		//!< Entry in the xlat function tree.
+	fr_dlist_t		mi_entry;		//!< Entry in the list of functions
+							///< registered to a module instance.
+
 	char const		*name;			//!< Name of xlat function.
 	xlat_func_t		func;			//!< async xlat function (async unsafe).
 
 	bool			internal;		//!< If true, cannot be redefined.
 	fr_token_t		token;			//!< for expressions
 
-	module_inst_ctx_t const	*mctx;			//!< Original module instantiation ctx if this
+	module_inst_ctx_t	*mctx;			//!< Original module instantiation ctx if this
 							///< xlat was registered by a module.
 
 	xlat_instantiate_t	instantiate;		//!< Instantiation function.
@@ -226,6 +230,7 @@ static inline CC_HINT(nonnull) void xlat_flags_merge(xlat_flags_t *parent, xlat_
 	parent->pure &= child->pure; /* purity can only be removed, never added */
 	parent->can_purify |= child->can_purify;
 	parent->constant &= child->constant;
+	parent->impure_func |= child->impure_func;
 }
 
 static inline CC_HINT(nonnull) int xlat_exp_insert_tail(xlat_exp_head_t *head, xlat_exp_t *node)
@@ -290,6 +295,8 @@ extern fr_dict_attr_t const *attr_expr_bool_enum;
 extern fr_dict_attr_t const *attr_module_return_code;
 extern fr_dict_attr_t const *attr_cast_base;
 
+fr_dict_attr_t const *xlat_time_res_attr(char const *res);
+
 /*
  *	xlat_tokenize.c
  */
@@ -335,9 +342,6 @@ int		xlat_register_expressions(void);
  */
 int		xlat_tokenize_expansion(xlat_exp_head_t *head, fr_sbuff_t *in,
 					tmpl_rules_t const *t_rules);
-
-int		xlat_tokenize_function_args(xlat_exp_head_t *head, fr_sbuff_t *in,
-					    tmpl_rules_t const *t_rules);
 
 ssize_t		xlat_print_node(fr_sbuff_t *out, xlat_exp_head_t const *head, xlat_exp_t const *node,
 				fr_sbuff_escape_rules_t const *e_rules, char c);

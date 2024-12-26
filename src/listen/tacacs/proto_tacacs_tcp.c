@@ -63,7 +63,7 @@ typedef struct {
 	bool				recv_buff_is_set;	//!< Whether we were provided with a recv_buff
 	bool				dynamic_clients;	//!< whether we have dynamic clients
 
-	fr_client_list_t			*clients;		//!< local clients
+	fr_client_list_t		*clients;		//!< local clients
 
 	fr_trie_t			*trie;			//!< for parsed networks
 	fr_ipaddr_t			*allow;			//!< allowed networks for dynamic clients
@@ -131,7 +131,7 @@ static ssize_t mod_read(fr_listen_t *li, UNUSED void **packet_ctx, fr_time_t *re
 	size_t				in_buffer;
 
 	/*
-	 *	We may hvae read multiple packets in the previous read.  In which case the buffer may already
+	 *	We may have read multiple packets in the previous read.  In which case the buffer may already
 	 *	have packets remaining.  In that case, we can return packets directly from the buffer, and
 	 *	skip the read().
 	 */
@@ -238,9 +238,19 @@ have_packet:
 	 */
 	FR_PROTO_HEX_DUMP(buffer, packet_len, "tacacs_tcp_recv");
 
-	DEBUG2("proto_tacacs_tcp - Received %s seq_no %d length %d %s",
-	       packet_name[buffer[1]], buffer[2],
-	       (int) packet_len, thread->name);
+	if (DEBUG_ENABLED2) {
+		char bogus_type[4];
+		char const *type;
+
+		if (buffer[1] && buffer[1] <= FR_TAC_PLUS_ACCT) type = packet_name[buffer[1]];
+		else {
+			snprintf(bogus_type, sizeof(bogus_type), "%d", buffer[1]);
+			type = bogus_type;
+		}
+		DEBUG2("proto_tacacs_tcp - Received %s seq_no %d length %zd %s",
+		       type, buffer[2],
+		       packet_len, thread->name);
+	}
 
 	return packet_len;
 }
@@ -317,7 +327,7 @@ static int mod_connection_set(fr_listen_t *li, fr_io_address_t *connection)
 	return 0;
 }
 
-static void mod_network_get(void *instance, int *ipproto, bool *dynamic_clients, fr_trie_t const **trie)
+static void mod_network_get(int *ipproto, bool *dynamic_clients, fr_trie_t const **trie, void *instance)
 {
 	proto_tacacs_tcp_t *inst = talloc_get_type_abort(instance, proto_tacacs_tcp_t);
 
@@ -398,10 +408,10 @@ static char const *mod_name(fr_listen_t *li)
 	return thread->name;
 }
 
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
+static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_tacacs_tcp_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_tacacs_tcp_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
+	proto_tacacs_tcp_t	*inst = talloc_get_type_abort(mctx->mi->data, proto_tacacs_tcp_t);
+	CONF_SECTION		*conf = mctx->mi->conf;
 	size_t			num;
 	CONF_ITEM		*ci;
 	CONF_SECTION		*server_cs;
@@ -459,7 +469,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
-	ci = cf_parent(inst->cs); /* listen { ... } */
+	ci = cf_section_to_item(mctx->mi->parent->conf); /* listen { ... } */
 	fr_assert(ci != NULL);
 	ci = cf_parent(ci);
 	fr_assert(ci != NULL);
@@ -507,7 +517,7 @@ fr_app_io_t proto_tacacs_tcp = {
 		.config			= tcp_listen_config,
 		.inst_size		= sizeof(proto_tacacs_tcp_t),
 		.thread_inst_size	= sizeof(proto_tacacs_tcp_thread_t),
-		.bootstrap		= mod_bootstrap,
+		.instantiate		= mod_instantiate,
 	},
 	.default_message_size	= 4096,
 	.track_duplicates	= false,

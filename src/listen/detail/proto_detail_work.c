@@ -116,7 +116,7 @@ static int mod_decode(void const *instance, request_t *request, UNUSED uint8_t *
 {
 
 	proto_detail_work_t const	*inst = talloc_get_type_abort_const(instance, proto_detail_work_t);
-	fr_detail_entry_t const		*track = request->async->packet_ctx;
+	fr_detail_entry_t const		*track = talloc_get_type_abort_const(request->async->packet_ctx, fr_detail_entry_t);
 	fr_pair_t *vp;
 
 	request->client = inst->client;
@@ -313,6 +313,7 @@ redo:
 			p[1] = '\0';
 			next = p + 2;
 			stopped_search = next;
+			thread->last_line++;
 			break;
 		}
 
@@ -321,9 +322,10 @@ redo:
 		 *	record, every line MUST have a leading tab.
 		 */
 		if (p[1] != '\t') {
-			ERROR("proto_detail (%s): Malformed line found at offset %zu in file %s",
-			      thread->name, (size_t)((p - buffer) + thread->header_offset),
-			      thread->filename_work);
+			ERROR("proto_detail (%s): Missing tab indent at %s[%u], offset from start of file %zu",
+			      thread->name,
+			      thread->filename_work, thread->last_line,
+			      (size_t)((p - buffer) + thread->header_offset));
 			return -1;
 		}
 
@@ -363,10 +365,10 @@ redo:
 		 *	this, it's malformed.
 		 */
 		if (memcmp(p, " = ", 3) != 0) {
-			ERROR("proto_detail (%s): Malformed line found at offset %zu: %.*s of file %s",
+			ERROR("proto_detail (%s): Missing pair assignment operator at %s[%u], offset from start of file %zu: %.*s",
 			      thread->name,
-			      (size_t)((p - buffer) + thread->header_offset), (int) (end - p), p,
-			      thread->filename_work);
+			      thread->filename_work, thread->last_line,
+			      (size_t)((p - buffer) + thread->header_offset), (int) (end - p), p);
 			return -1;
 		}
 
@@ -482,14 +484,14 @@ redo:
 	/*
 	 *	Allocate the tracking entry.
 	 */
-	track = talloc_zero(thread, fr_detail_entry_t);
+	MEM(track = talloc_zero(thread, fr_detail_entry_t));
 	track->parent = thread;
 	track->timestamp = fr_time();
 	track->id = thread->count++;
 
 	track->done_offset = done_offset;
 	if (inst->retransmit) {
-		track->packet = talloc_memdup(track, buffer, packet_len);
+		MEM(track->packet = talloc_memdup(track, buffer, packet_len));
 		track->packet_len = packet_len;
 	}
 
@@ -759,14 +761,6 @@ static int mod_close_internal(proto_detail_work_thread_t *thread)
 	close(thread->fd);
 	thread->fd = -1;
 
-	/*
-	 *	If we've been spawned from proto_detail_file, clean
-	 *	ourselves up, including our listener.
-	 */
-	if (thread->listen) {
-		talloc_free(thread->listen);
-	}
-
 	if (inst->parent->exit_when_done) {
 		INFO("Done reading detail files, process will now exit");
 
@@ -842,37 +836,12 @@ static char const *mod_name(fr_listen_t *li)
 
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
-	proto_detail_work_t *inst = talloc_get_type_abort(mctx->inst->data, proto_detail_work_t);
+	proto_detail_work_t *inst = talloc_get_type_abort(mctx->mi->data, proto_detail_work_t);
 	fr_client_t *client;
+	CONF_SECTION		*cs = mctx->mi->conf;
+	module_instance_t const	*mi = mctx->mi;
 
-	client = inst->client = talloc_zero(inst, fr_client_t);
-	if (!inst->client) return 0;
-
-	client->ipaddr.af = AF_INET;
-	client->ipaddr.addr.v4.s_addr = htonl(INADDR_NONE);
-	client->src_ipaddr = client->ipaddr;
-
-	client->longname = client->shortname = client->secret = inst->filename;
-	client->nas_type = talloc_strdup(client, "other");
-
-	return 0;
-}
-
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	proto_detail_work_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_detail_work_t);
-	CONF_SECTION		*cs = mctx->inst->conf;
-	dl_module_inst_t const	*dl_inst;
-
-	/*
-	 *	Find the dl_module_inst_t holding our instance data
-	 *	so we can find out what the parent of our instance
-	 *	was.
-	 */
-	dl_inst = dl_module_instance_by_data(mctx->inst->data);
-	fr_assert(dl_inst);
-
-	inst->parent = talloc_get_type_abort(dl_inst->parent->data, proto_detail_t);
+	inst->parent = talloc_get_type_abort(mi->parent->data, proto_detail_t);
 	inst->cs = cs;
 
 	if (inst->track_progress) {
@@ -900,9 +869,18 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 
 	FR_INTEGER_BOUND_CHECK("limit.max_outstanding", inst->max_outstanding, >=, 1);
 
+	client = inst->client = talloc_zero(inst, fr_client_t);
+	if (!inst->client) return 0;
+
+	client->ipaddr.af = AF_INET;
+	client->ipaddr.addr.v4.s_addr = htonl(INADDR_NONE);
+	client->src_ipaddr = client->ipaddr;
+
+	client->longname = client->shortname = client->secret = inst->filename;
+	client->nas_type = talloc_strdup(client, "other");
+
 	return 0;
 }
-
 
 /** Private interface for use by proto_detail_file
  *
@@ -915,7 +893,6 @@ fr_app_io_t proto_detail_work = {
 		.config			= file_listen_config,
 		.inst_size		= sizeof(proto_detail_work_t),
 		.thread_inst_size	= sizeof(proto_detail_work_thread_t),
-		.bootstrap		= mod_bootstrap,
 		.instantiate		= mod_instantiate
 	},
 	.default_message_size	= 65536,

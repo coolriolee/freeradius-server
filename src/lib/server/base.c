@@ -27,18 +27,26 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <freeradius-devel/server/trigger.h>
+#include <freeradius-devel/server/password.h>
+#include <freeradius-devel/server/packet.h>
 #include <freeradius-devel/unlang/xlat.h>
+#include <freeradius-devel/util/dict.h>
+
+extern bool tmpl_require_enum_prefix;
 
 /** Initialize src/lib/server/
  *
  *  This is just so that the callers don't need to call a million functions.
  *
- *  @param cs The root configuration section.
+ *  @param[in] cs 	 The root configuration section.
+ *  @param[in] dict_dir	The path to the raddb directory.
+ *  @param[in] dict	 the main dictionary, usually the internal dictionary.
  *  @return
  *	- 0 on success.
  *	- -1 on failure.
  */
-int server_init(CONF_SECTION *cs)
+int server_init(CONF_SECTION *cs, char const *dict_dir, fr_dict_t *dict)
 {
 	/*
 	 *	Initialize the dictionary attributes needed by the tmpl code.
@@ -82,6 +90,24 @@ int server_init(CONF_SECTION *cs)
 	if (xlat_protocols_register() < 0) return -1;
 
 	/*
+	 *	Load in the custom dictionary.  We do this after the listeners
+	 *	have loaded their relevant dictionaries, and after the modules
+	 *	have created any attributes they need to, so that we can define
+	 *	additional protocol attributes, and add
+	 */
+	switch (fr_dict_read(dict, dict_dir, FR_DICTIONARY_FILE)) {
+	case -1:
+		PERROR("Error reading custom dictionary");
+		return -1;
+	case 0:
+		DEBUG2("Including dictionary file \"%s/%s\"", dict_dir, FR_DICTIONARY_FILE);
+		break;
+
+	default:
+		break;
+	}
+
+	/*
 	 *	And then load the virtual servers.
 	 */
 	if (virtual_servers_instantiate() < 0) return -1;
@@ -101,6 +127,8 @@ int server_init(CONF_SECTION *cs)
 	 */
 	if (packet_global_init() < 0) return -1;
 
+	tmpl_require_enum_prefix = main_config_migrate_option_get("require_enum_prefix");
+
 	return 0;
 }
 
@@ -111,38 +139,7 @@ int server_init(CONF_SECTION *cs)
 void server_free(void)
 {
 	/*
-	 *	Free any resources used by 'Net.' packet
-	 */
-	packet_global_free();
-
-	/*
 	 *	Free xlat instance data, and call any detach methods
 	 */
 	xlat_instances_free();
-
-	/*
-	 *	Free password dictionaries
-	 */
-	password_free();
-
-	/*
-	 *	The only maps remaining are the ones registered by the server core.
-	 */
-	map_proc_free();
-
-	/*
-	 *	Now we're sure no more triggers can fire, free the
-	 * 	trigger tree.
-	 */
-	trigger_exec_free();
-
-	/*
-	 *	Free the internal dictionaries the request uses
-	 */
-	request_global_free();
-
-	/*
-	 *	Free the internal dictionaries the tmpl code uses
-	 */
-	tmpl_global_free();
 }

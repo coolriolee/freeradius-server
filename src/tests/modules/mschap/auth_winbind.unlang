@@ -2,7 +2,7 @@
 
 mschap_winbind
 
-if !(&control.Auth-Type == mschap_winbind) {
+if !(&control.Auth-Type == ::mschap_winbind) {
 	test_fail
 }
 
@@ -15,6 +15,7 @@ mschap_winbind.authenticate {
 #  Handle false failures
 #
 if (&Module-Failure-Message[*] == 'mschap_winbind: Unable to contact winbind!') {
+	&reply := {}
 	test_pass
 	return
 }

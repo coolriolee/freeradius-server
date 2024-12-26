@@ -28,35 +28,40 @@
  */
 RCSIDH(module_ctx_h, "$Id$")
 
-#include <freeradius-devel/server/dl_module.h>
 #include <freeradius-devel/util/event.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+typedef struct module_instance_s module_instance_t;
 
 /** Temporary structure to hold arguments for module calls
  *
  */
 typedef struct {
-	dl_module_inst_t const		*inst;		//!< Dynamic loader API handle for the module.
+	module_instance_t const		*mi;		//!< Instance of the module being instantiated.
 	void				*thread;	//!< Thread specific instance data.
 	void				*env_data;	//!< Per call environment data.
 	void				*rctx;		//!< Resume ctx that a module previously set.
 } module_ctx_t;
 
 /** Temporary structure to hold arguments for instantiation calls
- *
  */
 typedef struct {
-	dl_module_inst_t const		*inst;		//!< Dynamic loader API handle for the module.
+	module_instance_t		*mi;		//!< Instance of the module being instantiated.
 } module_inst_ctx_t;
+
+/** Temporary structure to hold arguments for detach calls
+ */
+typedef struct {
+	module_instance_t		*mi;		//!< Module instance to detach.
+} module_detach_ctx_t;
 
 /** Temporary structure to hold arguments for thread_instantiation calls
  *
  */
 typedef struct {
-	dl_module_inst_t const		*inst;		//!< Dynamic loader API handle for the module.
+	module_instance_t const		*mi;		//!< Instance of the module being instantiated.
 							///< Must come first to allow cast between
 							///< module_inst_ctx.
 	void				*thread;	//!< Thread instance data.
@@ -74,7 +79,7 @@ static module_ctx_t *module_ctx_from_inst(TALLOC_CTX *ctx, module_inst_ctx_t con
 
 	nmctx = talloc_zero(ctx, module_ctx_t);
 	if (unlikely(!nmctx)) return NULL;
-	nmctx->inst = mctx->inst;
+	nmctx->mi = mctx->mi;
 
 	return nmctx;
 }
@@ -88,7 +93,7 @@ static module_ctx_t *module_ctx_from_thread_inst(TALLOC_CTX *ctx, module_thread_
 
 	nmctx = talloc_zero(ctx, module_ctx_t);
 	if (unlikely(!nmctx)) return NULL;
-	nmctx->inst = mctx->inst;
+	nmctx->mi = mctx->mi;
 	nmctx->thread = mctx->thread;
 
 	return nmctx;
@@ -115,12 +120,12 @@ DIAG_ON(unused-function)
  * which don't set the required fields.  Additional arguments should be added
  * to this macro whenever the module_ctx_t fields are altered.
  *
- * @param[in] _dl_inst	of the module being called.
+ * @param[in] _mi	of the module being called.
  * @param[in] _thread 	instance of the module being called.
  * @param[in] _env_data	Call environment data.
  * @param[in] _rctx	Resume ctx (if any).
  */
-#define MODULE_CTX(_dl_inst, _thread, _env_data, _rctx) &(module_ctx_t){ .inst = _dl_inst, .thread = _thread, .env_data = _env_data, .rctx = _rctx }
+#define MODULE_CTX(_mi, _thread, _env_data, _rctx) &(module_ctx_t){ .mi = _mi, .thread = _thread, .env_data = _env_data, .rctx = _rctx }
 
 /** Wrapper to create a module_ctx_t as a compound literal from a module_inst_ctx_t
  *
@@ -130,7 +135,7 @@ DIAG_ON(unused-function)
  *
  * @param[in] _mctx	to copy fields from.
  */
-#define MODULE_CTX_FROM_INST(_mctx) &(module_ctx_t){ .inst = (_mctx)->inst }
+#define MODULE_CTX_FROM_INST(_mctx) &(module_ctx_t){ .mi = (_mctx)->mi }
 
 /** Wrapper to create a module_ctx_t as a compound literal from a module_inst_ctx_t
  *
@@ -140,7 +145,7 @@ DIAG_ON(unused-function)
  *
  * @param[in] _mctx	to copy fields from.
  */
-#define MODULE_CTX_FROM_THREAD_INST(_mctx) &(module_ctx_t){ .inst = (_mctx)->inst, .thread = (_mctx)->thread, .env_data = (_mctx)->env_data }
+#define MODULE_CTX_FROM_THREAD_INST(_mctx) &(module_ctx_t){ .mi = (_mctx)->mi, .thread = (_mctx)->thread, .env_data = (_mctx)->env_data }
 
 /** Wrapper to create a module_inst_ctx_t as a compound literal
  *
@@ -148,9 +153,15 @@ DIAG_ON(unused-function)
  * which don't set the required fields.  Additional arguments should be added
  * to this macro whenever the module_inst_ctx_t fields are altered.
  *
- * @param[in] _dl_inst	of the module being called..
+ * @param[in] _mi	of the module being called..
  */
-#define MODULE_INST_CTX(_dl_inst) &(module_inst_ctx_t){ .inst = _dl_inst }
+#define MODULE_INST_CTX(_mi) &(module_inst_ctx_t){ .mi = _mi }
+
+/** Wrapper to create a module_detach_ctx_t as a compound literal
+ *
+ * @param[in] _mi	of the module being called..
+ */
+#define MODULE_DETACH_CTX(_mi) &(module_detach_ctx_t){ .mi = _mi }
 
 /** Wrapper to create a module_thread_inst_ctx_t as a compound literal
  *
@@ -158,19 +169,19 @@ DIAG_ON(unused-function)
  * which don't set the required fields.  Additional arguments should be added
  * to this macro whenever the module_thread_inst_ctx_t fields are altered.
  *
- * @param[in] _dl_inst	of the module being called.
+ * @param[in] _mi	of the module being called.
  * @param[in] _thread 	instance of the module being called.
  * @param[in] _el	Thread specific event list.
  */
-#define MODULE_THREAD_INST_CTX(_dl_inst, _thread, _el) &(module_thread_inst_ctx_t){ .inst = _dl_inst, .thread = _thread, .el = _el }
+#define MODULE_THREAD_INST_CTX(_mi, _thread, _el) &(module_thread_inst_ctx_t){ .mi = _mi, .thread = _thread, .el = _el }
 
 /** Wrapper to create a module_inst_ctx_t as a comound listeral from a module_thread_ctx_t
  *
- * Extract the dl_module_inst_t from a module_thread_inst_ctx_t.
+ * Extract the module_instance_t from a module_thread_inst_ctx_t.
  *
  * @param[in] _mctx	to extract module_thread_inst_ctx_t from.
  */
-#define MODULE_THREAD_INST_CTX_FROM_INST_CTX(_mctx) &(module_ctx_t){ .inst = (_mctx)->inst }
+#define MODULE_THREAD_INST_CTX_FROM_INST_CTX(_mctx) &(module_ctx_t){ .mi = (_mctx)->mi }
 
 #ifdef __cplusplus
 }

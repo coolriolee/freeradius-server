@@ -120,7 +120,7 @@ fr_pcap_t *fr_pcap_init(TALLOC_CTX *ctx, char const *name, fr_pcap_type_t type)
 	fr_pcap_t	*this;
 
 	if (!fr_cond_assert(type >= PCAP_INTERFACE_IN && type <= PCAP_INTERFACE_IN_OUT)) {
-		fr_strerror_printf("Invalid PCAP type: %d", type);
+		fr_strerror_printf("Invalid PCAP type: %u", type);
 		return NULL;
 	}
 
@@ -352,7 +352,7 @@ int fr_pcap_open(fr_pcap_t *pcap)
 	case PCAP_INVALID:
 	default:
 		(void)fr_cond_assert(0);
-		fr_strerror_printf("Bad handle type (%i)", pcap->type);
+		fr_strerror_printf("Bad handle type (%u)", pcap->type);
 		return -1;
 	}
 
@@ -486,6 +486,9 @@ bool fr_pcap_link_layer_supported(int link_layer)
 #ifdef DLT_LINUX_SLL
 	case DLT_LINUX_SLL:
 #endif
+#ifdef DLT_LINUX_SLL2
+	case DLT_LINUX_SLL2:
+#endif
 	case DLT_PFLOG:
 		return true;
 
@@ -573,6 +576,15 @@ ssize_t fr_pcap_link_layer_offset(uint8_t const *data, size_t len, int link_laye
 #ifdef DLT_LINUX_SLL
 	case DLT_LINUX_SLL:
 		p += 16;
+		if (((size_t)(p - data)) > len) {
+			goto ood;
+		}
+		break;
+#endif
+
+#ifdef DLT_LINUX_SLL2
+	case DLT_LINUX_SLL2:
+		p += 20;
 		if (((size_t)(p - data)) > len) {
 			goto ood;
 		}

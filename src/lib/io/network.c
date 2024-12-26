@@ -285,7 +285,7 @@ int fr_network_directory_add(fr_network_t *nr, fr_listen_t *li)
 	return fr_control_message_send(nr->control, rb, FR_CONTROL_ID_DIRECTORY, &li, sizeof(li));
 }
 
-/** Add a worker to a network
+/** Add a worker to a network in a different thread
  *
  * @param nr the network
  * @param worker the worker
@@ -302,6 +302,19 @@ int fr_network_worker_add(fr_network_t *nr, fr_worker_t *worker)
 
 	return fr_control_message_send(nr->control, rb, FR_CONTROL_ID_WORKER, &worker, sizeof(worker));
 }
+
+static void fr_network_worker_started_callback(void *ctx, void const *data, size_t data_size, fr_time_t now);
+
+/** Add a worker to a network in the same thread
+ *
+ * @param nr the network
+ * @param worker the worker
+ */
+void fr_network_worker_add_self(fr_network_t *nr, fr_worker_t *worker)
+{
+	fr_network_worker_started_callback(nr, &worker, sizeof(worker), fr_time_wrap(0));
+}
+
 
 /** Signal the network to read from a listener
  *
@@ -1278,6 +1291,7 @@ static int _network_socket_free(fr_network_socket_t *s)
 	}
 
 	talloc_free(s->waiting);
+	talloc_free(s->listen);
 
 	return 0;
 }
@@ -1292,52 +1306,53 @@ static int _network_socket_free(fr_network_socket_t *s)
  */
 static void fr_network_listen_callback(void *ctx, void const *data, size_t data_size, UNUSED fr_time_t now)
 {
-	fr_network_t		*nr = ctx;
-	fr_listen_t		*listen;
+	fr_network_t		*nr = talloc_get_type_abort(ctx, fr_network_t);
+	fr_listen_t		*li;
 
-	fr_assert(data_size == sizeof(listen));
+	fr_assert(data_size == sizeof(li));
 
-	if (data_size != sizeof(listen)) return;
+	if (data_size != sizeof(li)) return;
 
-	memcpy(&listen, data, sizeof(listen));
+	li = talloc_get_type_abort(*((void * const *)data), fr_listen_t);
 
-	(void) fr_network_listen_add_self(nr, listen);
+	(void) fr_network_listen_add_self(nr, li);
 }
 
-static int fr_network_listen_add_self(fr_network_t *nr, fr_listen_t *listen)
+static int fr_network_listen_add_self(fr_network_t *nr, fr_listen_t *li)
 {
 	fr_network_socket_t	*s;
 	fr_app_io_t const	*app_io;
 	size_t			size;
 	int			num_messages;
 
-	fr_assert(listen->app_io != NULL);
+	fr_assert(li->app_io != NULL);
 
 	/*
 	 *	Non-socket listeners just get told about the event
 	 *	list, and nothing else.
 	 */
-	if (listen->non_socket_listener) {
-		fr_assert(listen->app_io->event_list_set != NULL);
-		fr_assert(!listen->app_io->read);
-		fr_assert(!listen->app_io->write);
+	if (li->non_socket_listener) {
+		fr_assert(li->app_io->event_list_set != NULL);
+		fr_assert(!li->app_io->read);
+		fr_assert(!li->app_io->write);
 
-		listen->app_io->event_list_set(listen, nr->el, nr);
+		li->app_io->event_list_set(li, nr->el, nr);
 
 		/*
 		 *	We use fr_log() here to avoid the "Network - " prefix.
 		 */
 		fr_log(nr->log, L_DBG, __FILE__, __LINE__, "Listener %s bound to virtual server %s",
-		       listen->name, cf_section_name2(listen->server_cs));
+		       li->name, cf_section_name2(li->server_cs));
 
 		return 0;
 	}
 
 	s = talloc_zero(nr, fr_network_socket_t);
 	fr_assert(s != NULL);
+	talloc_steal(s, li);
 
 	s->nr = nr;
-	s->listen = listen;
+	s->listen = li;
 	s->number = nr->num_sockets++;
 
 	MEM(s->waiting = fr_heap_alloc(s, waiting_cmp, fr_channel_data_t, channel.heap_id, 0));
@@ -1371,7 +1386,7 @@ static int fr_network_listen_add_self(fr_network_t *nr, fr_listen_t *listen)
 	app_io = s->listen->app_io;
 	s->filter = FR_EVENT_FILTER_IO;
 
-	if (fr_event_fd_insert(nr, nr->el, s->listen->fd,
+	if (fr_event_fd_insert(nr, NULL, nr->el, s->listen->fd,
 			       fr_network_read,
 			       s->listen->no_write_callback ? NULL : fr_network_write,
 			       fr_network_error,
@@ -1419,20 +1434,22 @@ static int fr_network_listen_add_self(fr_network_t *nr, fr_listen_t *listen)
 static void fr_network_directory_callback(void *ctx, void const *data, size_t data_size, UNUSED fr_time_t now)
 {
 	int			num_messages;
-	fr_network_t		*nr = ctx;
+	fr_network_t		*nr = talloc_get_type_abort(ctx, fr_network_t);
+	fr_listen_t		*li = talloc_get_type_abort(*((void * const *)data), fr_listen_t);
 	fr_network_socket_t	*s;
 	fr_app_io_t const	*app_io;
 	fr_event_vnode_func_t	funcs = { .extend = fr_network_vnode_extend };
 
-	fr_assert(data_size == sizeof(s->listen));
+	if (fr_cond_assert(data_size == sizeof(li))) return;
 
-	if (data_size != sizeof(s->listen)) return;
+	memcpy(&li, data, sizeof(li));
 
 	s = talloc_zero(nr, fr_network_socket_t);
 	fr_assert(s != NULL);
+	talloc_steal(s, li);
 
 	s->nr = nr;
-	memcpy(&s->listen, data, sizeof(s->listen));
+	s->listen = li;
 	s->number = nr->num_sockets++;
 
 	MEM(s->waiting = fr_heap_alloc(s, waiting_cmp, fr_channel_data_t, channel.heap_id, 0));
@@ -1803,9 +1820,9 @@ void fr_network(fr_network_t *nr)
 		 *	Check the event list.  If there's an error
 		 *	(e.g. exit), we stop looping and clean up.
 		 */
-		DEBUG3("Gathering events - %s", wait_for_event ? "will wait" : "Will not wait");
+		DEBUG4("Gathering events - %s", wait_for_event ? "will wait" : "Will not wait");
 		num_events = fr_event_corral(nr->el, fr_time(), wait_for_event);
-		DEBUG3("%u event(s) pending%s",
+		DEBUG4("%u event(s) pending%s",
 		       num_events == -1 ? 0 : num_events, num_events == -1 ? " - event loop exiting" : "");
 		if (num_events < 0) break;
 
@@ -1979,7 +1996,7 @@ fr_network_t *fr_network_create(TALLOC_CTX *ctx, fr_event_list_t *el, char const
 	if (fr_nonblock(nr->signal_pipe[0]) < 0) goto fail2;
 	if (fr_nonblock(nr->signal_pipe[1]) < 0) goto fail2;
 
-	if (fr_event_fd_insert(nr, nr->el, nr->signal_pipe[0], _signal_pipe_read, NULL, NULL, nr) < 0) {
+	if (fr_event_fd_insert(nr, NULL, nr->el, nr->signal_pipe[0], _signal_pipe_read, NULL, NULL, nr) < 0) {
 		fr_strerror_const("Failed inserting event for signal pipe");
 		goto fail2;
 	}

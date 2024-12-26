@@ -180,8 +180,8 @@ static bool stack_expand(fr_lst_t *lst, pivot_stack_t *s)
 
 	n = talloc_realloc(lst, s->data, fr_lst_index_t, n_size);
 	if (unlikely(!n)) {
-		fr_strerror_printf("Failed expanding lst stack to %u elements (%u bytes)",
-				   n_size, n_size * (unsigned int)sizeof(fr_lst_index_t));
+		fr_strerror_printf("Failed expanding lst stack to %u elements (%zu bytes)",
+				   n_size, n_size * sizeof(fr_lst_index_t));
 		return false;
 	}
 
@@ -418,8 +418,8 @@ static bool lst_expand(fr_lst_t *lst)
 
 	n = talloc_realloc(lst, lst->p, void *, n_capacity);
 	if (unlikely(!n)) {
-		fr_strerror_printf("Failed expanding lst to %u elements (%u bytes)",
-				   n_capacity, n_capacity * (unsigned int)sizeof(void *));
+		fr_strerror_printf("Failed expanding lst to %u elements (%zu bytes)",
+				   n_capacity, n_capacity * sizeof(void *));
 		return false;
 	}
 

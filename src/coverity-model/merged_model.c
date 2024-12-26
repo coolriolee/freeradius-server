@@ -257,7 +257,7 @@ typedef struct {
 } decode_fail_t;
 
 bool fr_radius_ok(uint8_t const *packet, size_t *packet_len_p,
-                  uint32_t max_attributes, bool require_ma, decode_fail_t *reason)
+                  uint32_t max_attributes, bool require_message_authenticator, decode_fail_t *reason)
 {
 	bool result;
 
@@ -266,5 +266,16 @@ bool fr_radius_ok(uint8_t const *packet, size_t *packet_len_p,
 		__coverity_mark_pointee_as_sanitized__(packet, TAINTED_SCALAR_GENERIC);
 		__coverity_mark_pointee_as_sanitized__(packet_len_p, TAINTED_SCALAR_GENERIC);
 	}
+	return result;
+}
+
+typedef struct {
+} fr_ipaddr_t;
+
+int fr_inet_pton4(fr_ipaddr_t *out, char const *value, ssize_t inlen, bool resolve, bool fallback, bool mask_bits)
+{
+	int result;
+
+	__coverity_writeall__(out);
 	return result;
 }

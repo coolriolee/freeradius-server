@@ -70,7 +70,10 @@ typedef struct fr_io_track_s {
  *  creates the listener, and adds it to the scheduler.
  */
 typedef struct {
-	dl_module_inst_t const   	*dl_inst;			//!< our parent dl_inst
+	module_instance_t 	  	*mi;				//!< our parent mi
+	module_list_t			*clients;			//!< Holds client modules created to represent
+									///< sockets created as clients connect to the
+									///< listener.
 
 	uint32_t			max_connections;		//!< maximum number of connections to allow
 	uint32_t			max_clients;			//!< maximum number of dynamic clients to allow
@@ -85,7 +88,7 @@ typedef struct {
 
 	CONF_SECTION			*server_cs;			//!< server CS for this listener
 
-	dl_module_inst_t		*submodule;			//!< As provided by the transport_parse
+	module_instance_t		*submodule;			//!< As provided by the transport_parse
 									///< callback.  Broken out into the
 									///< app_io_* fields below for convenience.
 	fr_app_t			*app;				//!< main protocol handler
@@ -96,15 +99,13 @@ typedef struct {
 	CONF_SECTION			*app_io_conf;			//!< Easy access to the app_io's config section.
 
 	int				ipproto;			//!< IP proto by number
-	char const			*transport;			//!< transport, typically name of IP proto
-
 	fr_trie_t const			*networks;     			//!< trie of allowed networks
 } fr_io_instance_t;
 
 extern fr_app_io_t fr_master_app_io;
 
 fr_trie_t *fr_master_io_network(TALLOC_CTX *ctx, int af, fr_ipaddr_t *allow, fr_ipaddr_t *deny);
-int fr_master_io_listen(TALLOC_CTX *ctx, fr_io_instance_t *io, fr_schedule_t *sc,
+int fr_master_io_listen(fr_io_instance_t *io, fr_schedule_t *sc,
 			size_t default_message_size, size_t num_messages) CC_HINT(nonnull);
 fr_io_track_t *fr_master_io_track_alloc(fr_listen_t *li, fr_client_t *client, fr_ipaddr_t const *src_ipaddr, int src_port,
 					fr_ipaddr_t const *dst_ipaddr, int dst_port);

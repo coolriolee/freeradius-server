@@ -1056,6 +1056,10 @@ static void test_file_extend(void)
 	memcpy(fbuff + sizeof(fbuff) - PATTERN_LEN, PATTERN, PATTERN_LEN);
 
 	fp = fmemopen(fbuff, sizeof(fbuff), "r");
+#ifdef __clang_analyzer__
+	if (fp == NULL) return;
+#endif
+
 	TEST_CHECK(fp != NULL);
 	TEST_CHECK(fr_sbuff_init_file(&sbuff, &fctx, buff, sizeof(buff), fp, 128) == &sbuff);
 	our_sbuff = FR_SBUFF_BIND_CURRENT(&sbuff);
@@ -1064,7 +1068,7 @@ static void test_file_extend(void)
 	TEST_CHECK_LEN(fr_sbuff_adv_past_whitespace(&our_sbuff, SIZE_MAX, NULL), sizeof(fbuff) - PATTERN_LEN);
 	TEST_CASE("Verify extend on unused child buffer");
 	child_sbuff = FR_SBUFF(&our_sbuff);
-	slen = fr_sbuff_extend_file(&child_sbuff, 0);
+	slen = fr_sbuff_extend_file(NULL, &child_sbuff, 0);
 	TEST_CHECK_SLEN(slen, sizeof(fbuff) % PATTERN_LEN);
 	TEST_CASE("Verify that we passed all and only whitespace");
 	(void) fr_sbuff_out_abstrncpy(NULL, &post_ws, &our_sbuff, 24);
@@ -1087,6 +1091,10 @@ static void test_file_extend(void)
 
 	TEST_CASE("Verify fr_sbuff_out_bstrncpy_until() extends from file properly");
 	fp = fmemopen(fbuff, sizeof(fbuff), "r");
+#ifdef __clang_analyzer__
+	if (fp == NULL) return;
+#endif
+
 	TEST_CHECK(fp != NULL);
 	TEST_CHECK(fr_sbuff_init_file(&sbuff, &fctx, buff, sizeof(buff), fp, 128) == &sbuff);
 	our_sbuff = FR_SBUFF_BIND_CURRENT(&sbuff);
@@ -1107,6 +1115,9 @@ static void test_file_extend_max(void)
 
 	TEST_CASE("Initialization");
 	fp = fmemopen(fbuff, sizeof(fbuff) - 1, "r");
+#ifdef __clang_analyzer__
+	if (fp == NULL) return;
+#endif
 	TEST_CHECK(fp != NULL);
 	TEST_CHECK(fr_sbuff_init_file(&sbuff, &fctx, buff, sizeof(buff), fp, sizeof(fbuff) - 8) == &sbuff);
 

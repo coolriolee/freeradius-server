@@ -46,9 +46,11 @@ typedef struct request_s request_t;
 #include <freeradius-devel/util/base64.h>
 #include <freeradius-devel/util/calc.h>
 #include <freeradius-devel/util/conf.h>
+#include <freeradius-devel/util/dict.h>
 #include <freeradius-devel/util/dns.h>
 #include <freeradius-devel/util/file.h>
 #include <freeradius-devel/util/log.h>
+#include <freeradius-devel/util/misc.h>
 #include <freeradius-devel/util/pair_legacy.h>
 #include <freeradius-devel/util/sha1.h>
 #include <freeradius-devel/util/syserror.h>
@@ -266,6 +268,9 @@ static dl_t		*dl;
 static dl_loader_t	*dl_loader = NULL;
 
 static fr_event_list_t	*el = NULL;
+
+static char const	*write_filename = NULL;
+static FILE		*write_fp = NULL;
 
 size_t process_line(command_result_t *result, command_file_ctx_t *cc, char *data, size_t data_used, char *in, size_t inlen);
 static int process_file(bool *exit_now, TALLOC_CTX *ctx,
@@ -963,16 +968,26 @@ static ssize_t load_test_point_by_command(void **symbol, char *command, char con
 	return p - command;
 }
 
+static fr_dict_t *dictionary_current(command_file_ctx_t *cc)
+{
+	if (cc->tmpl_rules.attr.dict_def) {
+		return UNCONST(fr_dict_t *, cc->tmpl_rules.attr.dict_def);
+	}
+
+	return cc->config->dict;
+}
+
 /** Common dictionary load function
  *
  * Callers call fr_dict_global_ctx_set to set the context
  * the dictionaries will be loaded into.
  */
-static int dictionary_load_common(command_result_t *result, command_file_ctx_t *cc, char *in, char const *default_subdir)
+static int dictionary_load_common(command_result_t *result, command_file_ctx_t *cc, char const *in, char const *default_subdir)
 {
-	char		*name, *tmp = NULL;
 	char const	*dir;
 	char		*q;
+	char const	*name;
+	char		*tmp = NULL;
 	int		ret;
 	fr_dict_t	*dict;
 
@@ -1003,6 +1018,7 @@ static int dictionary_load_common(command_result_t *result, command_file_ctx_t *
 	if (ret < 0) RETURN_COMMAND_ERROR();
 
 	cc->tmpl_rules.attr.dict_def = dict;
+	cc->tmpl_rules.attr.namespace = fr_dict_root(dict);
 
 	/*
 	 *	Dump the dictionary if we're in super debug mode
@@ -1137,6 +1153,11 @@ static size_t command_include(command_result_t *result, command_file_ctx_t *cc,
 	char	*q;
 	bool	exit_now = false;
 	int	ret;
+
+	if (write_fp) {
+		fprintf(stderr, "Can't do $INCLUDE with -w %s\n", write_filename);
+		RETURN_EXIT(1);
+	}
 
 	q = strrchr(cc->path, '/');
 	if (q) {
@@ -1367,10 +1388,13 @@ static size_t command_radmin_add(command_result_t *result, command_file_ctx_t *c
 	char		*p, *name;
 	char		*parent = NULL;
 	fr_cmd_table_t	*table;
+	char		buffer[8192];
 
 	table = talloc_zero(cc->tmp_ctx, fr_cmd_table_t);
 
-	p = strchr(in, ':');
+	strlcpy(buffer, in, sizeof(buffer));
+
+	p = strchr(buffer, ':');
 	if (!p) {
 		fr_strerror_const("no ':name' specified");
 		RETURN_PARSE_ERROR(0);
@@ -1547,7 +1571,7 @@ static size_t command_decode_pair(command_result_t *result, command_file_ctx_t *
 	p += slen;
 	fr_skip_whitespace(p);
 
-	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, cc->tmp_ctx) < 0)) {
+	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, cc->tmp_ctx, dictionary_current(cc)) < 0)) {
 		fr_strerror_const_push("Failed initialising decoder testpoint");
 		RETURN_COMMAND_ERROR();
 	}
@@ -1580,7 +1604,7 @@ static size_t command_decode_pair(command_result_t *result, command_file_ctx_t *
 	 *	point to produce fr_pair_ts.
 	 */
 	while (to_dec < to_dec_end) {
-		slen = tp->func(head, &head->vp_group, fr_dict_root(cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict),
+		slen = tp->func(head, &head->vp_group, cc->tmpl_rules.attr.namespace,
 				(uint8_t *)to_dec, (to_dec_end - to_dec), decode_ctx);
 		cc->last_ret = slen;
 		if (slen <= 0) {
@@ -1648,7 +1672,7 @@ static size_t command_decode_proto(command_result_t *result, command_file_ctx_t 
 	p += slen;
 	fr_skip_whitespace(p);
 
-	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, cc->tmp_ctx) < 0)) {
+	if (tp->test_ctx && (tp->test_ctx(&decode_ctx, cc->tmp_ctx, dictionary_current(cc)) < 0)) {
 		fr_strerror_const_push("Failed initialising decoder testpoint");
 		RETURN_COMMAND_ERROR();
 	}
@@ -1715,7 +1739,7 @@ static size_t command_decode_proto(command_result_t *result, command_file_ctx_t 
 static size_t command_dictionary_attribute_parse(command_result_t *result, command_file_ctx_t *cc,
 					  	 char *data, UNUSED size_t data_used, char *in, UNUSED size_t inlen)
 {
-	if (fr_dict_parse_str(cc->config->dict, in, fr_dict_root(cc->config->dict)) < 0) RETURN_OK_WITH_ERROR();
+	if (fr_dict_parse_str(dictionary_current(cc), in, cc->tmpl_rules.attr.namespace) < 0) RETURN_OK_WITH_ERROR();
 
 	RETURN_OK(strlcpy(data, "ok", COMMAND_OUTPUT_MAX));
 }
@@ -1726,7 +1750,7 @@ static size_t command_dictionary_attribute_parse(command_result_t *result, comma
 static size_t command_dictionary_dump(command_result_t *result, command_file_ctx_t *cc,
 				      UNUSED char *data, size_t data_used, UNUSED char *in, UNUSED size_t inlen)
 {
-	fr_dict_debug(cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict);
+	fr_dict_debug(dictionary_current(cc));
 
 	/*
 	 *	Don't modify the contents of the data buffer
@@ -1742,8 +1766,11 @@ size_t command_encode_dns_label(command_result_t *result, command_file_ctx_t *cc
 	ssize_t		ret;
 	char		*p, *next;
 	uint8_t		*enc_p;
+	char		buffer[8192];
 
-	p = in;
+	strlcpy(buffer, in, sizeof(buffer));
+
+	p = buffer;
 	next = strchr(p, ',');
 	if (next) *next = 0;
 
@@ -1838,19 +1865,18 @@ static size_t command_encode_pair(command_result_t *result, command_file_ctx_t *
 {
 	fr_test_point_pair_encode_t	*tp = NULL;
 
-	fr_dcursor_t	cursor;
-	void		*encode_ctx = NULL;
-	ssize_t		slen;
-	char		*p = in;
+	fr_dcursor_t			cursor;
+	void				*encode_ctx = NULL;
+	ssize_t				slen;
+	char				*p = in;
 
-	uint8_t		*enc_p, *enc_end;
-	fr_pair_list_t	head;
-	fr_pair_t	*vp;
-	bool		truncate = false;
+	uint8_t				*enc_p, *enc_end;
+	fr_pair_list_t			head;
+	fr_pair_t			*vp;
+	bool				truncate = false;
 
-	size_t		iterations = 0;
-	fr_dict_t const	*dict;
-	fr_pair_parse_t	root, relative;
+	size_t				iterations = 0;
+	fr_pair_parse_t			root, relative;
 
 	fr_pair_list_init(&head);
 
@@ -1880,17 +1906,15 @@ static size_t command_encode_pair(command_result_t *result, command_file_ctx_t *
 		fr_skip_whitespace(p);
 	}
 
-	if (tp->test_ctx && (tp->test_ctx(&encode_ctx, cc->tmp_ctx) < 0)) {
+	if (tp->test_ctx && (tp->test_ctx(&encode_ctx, cc->tmp_ctx, dictionary_current(cc)) < 0)) {
 		fr_strerror_const_push("Failed initialising encoder testpoint");
 		CLEAR_TEST_POINT(cc);
 		RETURN_COMMAND_ERROR();
 	}
 
-	dict = cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict;
-
 	root = (fr_pair_parse_t) {
 		.ctx = cc->tmp_ctx,
-		.da = fr_dict_root(dict),
+		.da = cc->tmpl_rules.attr.namespace,
 		.list = &head,
 	};
 	relative = (fr_pair_parse_t) { };
@@ -1929,7 +1953,7 @@ static size_t command_encode_pair(command_result_t *result, command_file_ctx_t *
 
 		for (vp = fr_pair_dcursor_iter_init(&cursor, &head,
 						    tp->next_encodable ? tp->next_encodable : fr_proto_next_encodable,
-						    cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict);
+						    dictionary_current(cc));
 		     vp;
 		     vp = fr_dcursor_current(&cursor)) {
 			slen = tp->func(&FR_DBUFF_TMP(enc_p, enc_end), &cursor, encode_ctx);
@@ -2008,8 +2032,11 @@ static size_t command_encode_raw(command_result_t *result, command_file_ctx_t *c
 			         char *data, UNUSED size_t data_used, char *in, UNUSED size_t inlen)
 {
 	size_t	len;
+	char	buffer[8192];
 
-	len = encode_rfc(in, cc->buffer_start, cc->buffer_end - cc->buffer_start);
+	strlcpy(buffer, in, sizeof(buffer));
+
+	len = encode_rfc(buffer, cc->buffer_start, cc->buffer_end - cc->buffer_start);
 	if (len <= 0) RETURN_PARSE_ERROR(0);
 
 	if (len >= (size_t)(cc->buffer_end - cc->buffer_start)) {
@@ -2085,7 +2112,6 @@ static size_t command_encode_proto(command_result_t *result, command_file_ctx_t 
 	char		*p = in;
 
 	fr_pair_list_t	head;
-	fr_dict_t const *dict;
 	fr_pair_parse_t	root, relative;
 
 	fr_pair_list_init(&head);
@@ -2099,17 +2125,15 @@ static size_t command_encode_proto(command_result_t *result, command_file_ctx_t 
 
 	p += ((size_t)slen);
 	fr_skip_whitespace(p);
-	if (tp->test_ctx && (tp->test_ctx(&encode_ctx, cc->tmp_ctx) < 0)) {
+	if (tp->test_ctx && (tp->test_ctx(&encode_ctx, cc->tmp_ctx, dictionary_current(cc)) < 0)) {
 		fr_strerror_const_push("Failed initialising encoder testpoint");
 		CLEAR_TEST_POINT(cc);
 		RETURN_COMMAND_ERROR();
 	}
 
-	dict = cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict;
-
 	root = (fr_pair_parse_t) {
 		.ctx = cc->tmp_ctx,
-		.da = fr_dict_root(dict),
+		.da = cc->tmpl_rules.attr.namespace,
 		.list = &head,
 	};
 	relative = (fr_pair_parse_t) { };
@@ -2272,6 +2296,11 @@ static size_t command_match(command_result_t *result, command_file_ctx_t *cc,
 			    char *data, size_t data_used, char *in, size_t inlen)
 {
 	if (strcmp(in, data) != 0) {
+		if (write_fp) {
+			strcpy(in, data);
+			RETURN_OK(data_used);
+		}
+
 		mismatch_print(cc, "match", in, inlen, data, data_used, true);
 		RETURN_MISMATCH(data_used);
 	}
@@ -2342,6 +2371,8 @@ static size_t command_max_buffer_size(command_result_t *result, command_file_ctx
 	RETURN_OK(snprintf(data, COMMAND_OUTPUT_MAX, "%ld", size));
 }
 
+extern bool tmpl_require_enum_prefix;
+
 /** Set or clear migration flags.
  *
  */
@@ -2357,6 +2388,10 @@ static size_t command_migrate(command_result_t *result, command_file_ctx_t *cc,
 	if (strncmp(p, "xlat_new_functions", sizeof("xlat_new_functions") - 1) == 0) {
 		p += sizeof("xlat_new_functions") - 1;
 		out = &cc->tmpl_rules.xlat.new_functions;
+
+	} else if (strncmp(p, "tmpl_require_enum_prefix", sizeof("tmpl_require_enum_prefix") - 1) == 0) {
+		p += sizeof("tmpl_require_enum_prefix") - 1;
+		out = &tmpl_require_enum_prefix;
 
 	} else {
 		fr_strerror_const("Unknown migration flag");
@@ -2448,7 +2483,7 @@ static size_t command_pair(command_result_t *result, command_file_ctx_t *cc,
 {
 	fr_pair_list_t 	head;
 	ssize_t		slen;
-	fr_dict_t const	*dict = cc->tmpl_rules.attr.dict_def ? cc->tmpl_rules.attr.dict_def : cc->config->dict;
+	fr_dict_t const	*dict = dictionary_current(cc);
 	fr_pair_parse_t	root, relative;
 
 	fr_pair_list_init(&head);
@@ -2507,6 +2542,28 @@ static size_t command_proto_dictionary(command_result_t *result, command_file_ct
 {
 	fr_dict_global_ctx_set(cc->config->dict_gctx);
 	return dictionary_load_common(result, cc, in, NULL);
+}
+
+static size_t command_proto_dictionary_root(command_result_t *result, command_file_ctx_t *cc,
+					    UNUSED char *data, UNUSED size_t data_used, char *in, UNUSED size_t inlen)
+{
+	fr_dict_t const		*dict = dictionary_current(cc);
+	fr_dict_attr_t const	*root_da = fr_dict_root(dict);
+	fr_dict_attr_t const	*new_root;
+
+	if (is_whitespace(in) || (*in == '\0')) {
+		new_root = fr_dict_root(dict);
+	} else {
+		new_root = fr_dict_attr_by_name(NULL, fr_dict_root(dict), in);
+		if (!new_root) {
+			fr_strerror_printf("dictionary attribute \"%s\" not found in %s", in, root_da->name);
+			RETURN_PARSE_ERROR(0);
+		}
+	}
+
+	cc->tmpl_rules.attr.namespace = new_root;
+
+	RETURN_OK(0);
 }
 
 /** Touch a file to indicate a test completed
@@ -2782,8 +2839,7 @@ static size_t command_xlat_normalise(command_result_t *result, command_file_ctx_
 	dec_len = xlat_tokenize(cc->tmp_ctx, &head, &FR_SBUFF_IN(in, input_len), &p_rules,
 				&(tmpl_rules_t) {
 					.attr = {
-						.dict_def = cc->tmpl_rules.attr.dict_def ?
-						cc->tmpl_rules.attr.dict_def : cc->config->dict,
+						.dict_def = dictionary_current(cc),
 						.list_def = request_attr_request,
 						.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved
 					},
@@ -2820,8 +2876,7 @@ static size_t command_xlat_expr(command_result_t *result, command_file_ctx_t *cc
 	dec_len = xlat_tokenize_expression(cc->tmp_ctx, &head, &FR_SBUFF_IN(in, input_len), NULL,
 					   &(tmpl_rules_t) {
 					   	.attr = {
-							.dict_def = cc->tmpl_rules.attr.dict_def ?
-							   cc->tmpl_rules.attr.dict_def : cc->config->dict,
+							.dict_def = dictionary_current(cc),
 							.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved,
 							.list_def = request_attr_request,
 						}
@@ -2853,8 +2908,7 @@ static size_t command_xlat_purify(command_result_t *result, command_file_ctx_t *
 	size_t			input_len = strlen(in), escaped_len;
 	tmpl_rules_t		t_rules = (tmpl_rules_t) {
 						   .attr = {
-							   .dict_def = cc->tmpl_rules.attr.dict_def ?
-							   cc->tmpl_rules.attr.dict_def : cc->config->dict,
+							.dict_def = dictionary_current(cc),
 							.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved,
 							.list_def = request_attr_request,
 						   },
@@ -2917,8 +2971,7 @@ static size_t command_xlat_argv(command_result_t *result, command_file_ctx_t *cc
 				  NULL, NULL,
 				  &(tmpl_rules_t) {
 					  .attr = {
-						  .dict_def = cc->tmpl_rules.attr.dict_def ?
-						  cc->tmpl_rules.attr.dict_def : cc->config->dict,
+						  .dict_def = dictionary_current(cc),
 						  .list_def = request_attr_request,
 						  .allow_unresolved = cc->tmpl_rules.attr.allow_unresolved
 					  },
@@ -2968,7 +3021,7 @@ static fr_table_ptr_sorted_t	commands[] = {
 					.usage = "calc <type1> <value1> <operator> <type2> <value2> -> <output-type>",
 					.description = "Perform calculations on value boxes",
 				}},
-	{ L("calc_nary "), &(command_entry_t){
+	{ L("calc_nary "), 	&(command_entry_t){
 					.func = command_calc_nary,
 					.usage = "calc_nary op <type1> <value1> <type2> <value2> ... -> <output-type>",
 					.description = "Perform calculations on value boxes",
@@ -3061,7 +3114,8 @@ static fr_table_ptr_sorted_t	commands[] = {
 	{ L("load-dictionary "),&(command_entry_t){
 					.func = command_load_dictionary,
 					.usage = "load-dictionary <name> [<dir>]",
-					.description = "Load an additional dictionary from the same directory as the input file.  Optionally you can specify a full path via <dir>",
+					.description = "Load an additional dictionary from the same directory as the input file.  "
+						       "Optionally you can specify a full path via <dir>.  ",
 				}},
 	{ L("match"),		&(command_entry_t){
 					.func = command_match,
@@ -3107,6 +3161,14 @@ static fr_table_ptr_sorted_t	commands[] = {
 					.func = command_proto_dictionary,
 					.usage = "proto-dictionary <proto_name> [<proto_dir>]",
 					.description = "Switch the active dictionary.  Root is set to the default dictionary path, or the one specified with -d.  <proto_dir> is relative to the root.",
+				}},
+
+
+	{ L("proto-dictionary-root "), &(command_entry_t){
+					.func = command_proto_dictionary_root,
+					.usage = "proto-dictionary-root[ <root_attribute>]",
+					.description = "Set the root attribute for the current protocol dictionary.  "
+						       "If no attribute name is provided, the root will be reset to the root of the current dictionary",
 				}},
 	{ L("raw "),		&(command_entry_t){
 					.func = command_encode_raw,
@@ -3181,7 +3243,21 @@ size_t process_line(command_result_t *result, command_file_ctx_t *cc, char *data
 
 	p = in;
 	fr_skip_whitespace(p);
-	if (*p == '\0') RETURN_NOOP(data_used);
+
+	/*
+	 *	Skip empty lines and comments.
+	 */
+	if (!*p || (*p == '#')) {
+		/*
+		 *	Dump the input to the output.
+		 */
+		if (write_fp) {
+			fputs(in, write_fp);
+			fputs("\n", write_fp);
+		}
+
+		RETURN_NOOP(data_used);
+	}
 
 	DEBUG2("%s[%d]: %s", cc->filename, cc->lineno, p);
 
@@ -3193,11 +3269,6 @@ size_t process_line(command_result_t *result, command_file_ctx_t *cc, char *data
 		fr_strerror_printf("Unknown command: %s", p);
 		RETURN_COMMAND_ERROR();
 	}
-
-	/*
-	 *	Skip processing the command
-	 */
-	if (command->func == command_comment) RETURN_NOOP(data_used);
 
 	p += match_len;						/* Jump to after the command */
 	fr_skip_whitespace(p);					/* Skip any whitespace */
@@ -3231,6 +3302,14 @@ size_t process_line(command_result_t *result, command_file_ctx_t *cc, char *data
 		DEBUG2("%s[%d]: --> %s", cc->filename, cc->lineno,
 		       fr_table_str_by_value(command_rcode_table, result->rcode, "<INVALID>"));
 	}
+
+	/*
+	 *	Dump the input to the output.
+	 */
+	if (write_fp) {
+		fputs(in, write_fp);
+		fputs("\n", write_fp);
+	};
 
 	talloc_free_children(cc->tmp_ctx);
 
@@ -3303,6 +3382,7 @@ static command_file_ctx_t *command_ctx_alloc(TALLOC_CTX *ctx,
 	cc->fuzzer_dir = -1;
 
 	cc->tmpl_rules.attr.list_def = request_attr_request;
+	cc->tmpl_rules.attr.namespace = fr_dict_root(cc->config->dict);
 
 	return cc;
 }
@@ -3509,6 +3589,7 @@ static void usage(char const *name)
 	INFO("  -M                 Show talloc memory report.");
 	INFO("  -p                 Allow xlat_purify");
 	INFO("  -r <receipt_file>  Create the <receipt_file> as a 'success' exit.");
+	INFO("  -w <output_file>   Write 'corrected' output to <output_file>.");
 	INFO("Where <filename> is a file containing one or more commands and '-' indicates commands should be read from stdin.");
 	INFO("Ranges of <lines> may be specified in the format <start>[-[<end>]][,]");
 }
@@ -3690,7 +3771,7 @@ int main(int argc, char *argv[])
 	default_log.fd = STDOUT_FILENO;
 	default_log.print_level = false;
 
-	while ((c = getopt(argc, argv, "cd:D:F:fxMhpr:")) != -1) switch (c) {
+	while ((c = getopt(argc, argv, "cd:D:F:fxMhpr:w:")) != -1) switch (c) {
 		case 'c':
 			do_commands = true;
 			break;
@@ -3726,6 +3807,10 @@ int main(int argc, char *argv[])
 
 		case 'p':
 			allow_purify = true;
+			break;
+
+		case 'w':
+			write_filename = optarg;
 			break;
 
 		case 'h':
@@ -3789,14 +3874,6 @@ int main(int argc, char *argv[])
 	}
 
 	/*
-	 *	Load the custom dictionary
-	 */
-	if (fr_dict_read(config.dict, config.raddb_dir, FR_DICTIONARY_FILE) == -1) {
-		fr_perror("unit_test_attribute");
-		EXIT_WITH_FAILURE;
-	}
-
-	/*
 	 *	Always needed so we can load the list attributes
 	 *	otherwise the tmpl_tokenize code fails.
 	 */
@@ -3846,6 +3923,11 @@ int main(int argc, char *argv[])
 	 *	Read tests from stdin
 	 */
 	if (argc < 2) {
+		if (write_filename) {
+			ERROR("Can't use '-w' with stdin");
+			EXIT_WITH_FAILURE;
+		}
+
 		ret = process_file(&exit_now, autofree, &config, name, "-", NULL);
 
 	/*
@@ -3854,6 +3936,22 @@ int main(int argc, char *argv[])
 	} else {
 		int i;
 
+		if (write_filename) {
+			if (argc != 2) { /* program name and file to write */
+				ERROR("Can't use '-w' with multiple filenames");
+				EXIT_WITH_FAILURE;
+			}
+
+			write_fp = fopen(write_filename, "w");
+			if (!write_fp) {
+				ERROR("Failed opening %s: %s", write_filename, strerror(errno));
+				EXIT_WITH_FAILURE;
+			}
+		}
+
+		/*
+		 *	Loop over all input files.
+		 */
 		for (i = 1; i < argc; i++) {
 			char			*dir = NULL, *file;
 			fr_sbuff_t		in = FR_SBUFF_IN(argv[i], strlen(argv[i]));
@@ -3906,6 +4004,14 @@ int main(int argc, char *argv[])
 
 			if ((ret != 0) || exit_now) break;
 		}
+
+		if (write_fp) {
+			fclose(write_fp);
+			if (rename(write_filename, argv[1]) < 0) {
+				ERROR("Failed renaming %s: %s", write_filename, strerror(errno));
+				EXIT_WITH_FAILURE;
+			}
+		}
 	}
 
 	/*
@@ -3937,10 +4043,6 @@ cleanup:
 		fr_perror("unit_test_attribute");
 		EXIT_WITH_FAILURE;
 	}
-
-	unlang_global_free();
-
-	request_global_free();
 
 	if (receipt_file && (ret == EXIT_SUCCESS) && (fr_touch(NULL, receipt_file, 0644, true, 0755) <= 0)) {
 		fr_perror("unit_test_attribute");

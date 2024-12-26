@@ -62,7 +62,7 @@ sub authorize {
 # Function to handle authenticate
 sub authenticate {
 	# For debugging purposes only
-#	log_request_attributes();
+	log_request_attributes();
 
 	if ($RAD_REQUEST{'User-Name'} =~ /^baduser/i) {
 		# Reject user and tell him why
@@ -71,14 +71,22 @@ sub authenticate {
 		return RLM_MODULE_NOTFOUND;
 	} else {
 		# Accept user and set some attribute
-		if (&radiusd::xlat("%(client:group)") eq 'UltraAllInclusive') {
+		if (&radiusd::xlat("%client(group)") eq 'UltraAllInclusive') {
 			# User called from NAS with unlim plan set, set higher limits
-# TODO - re-enabled when nested attributes are handled
-#			$RAD_REPLY{'Vendor-Specific.Cisco.h323-credit-amount'} = "1000000";
+			$RAD_REPLY{'Vendor-Specific'}{'Cisco'}{'h323-credit-amount'} = "1000000";
 			$RAD_REPLY{'Filter-Id'} = 'Everything'
 		} else {
-#			$RAD_REPLY{'Vendor-Specific.Cisco.h323-credit-amount'} = "100";
-			$RAD_REPLY{'Filter-Id'} = 'Hello'
+			# Check we received two values for Cisco.AVPair
+			if ($RAD_REQUEST{'Vendor-Specific'}{'Cisco'}{'AVPair'}[1] ne 'is=crazy') {
+				return RLM_MODULE_DISALLOW;
+			}
+			if ($RAD_REQUEST{'Class'} ne 'abcdef') {
+				return RLM_MODULE_REJECT;
+			}
+			$RAD_REPLY{'Vendor-Specific'}{'Cisco'}{'h323-credit-amount'} = "100";
+			$RAD_REPLY{'Filter-Id'} = 'Hello '.$RAD_REQUEST{'Net'}{'Src'}{'IP'}.' '.$RAD_REQUEST{'Vendor-Specific'}{'3GPP2'}{'Remote-IP'}[1]{'Address'};
+			$RAD_REQUEST{'User-Name'} = 'tim';
+			$RAD_CONFIG{'NAS-Identifier'} = 'dummy';
 		}
 		return RLM_MODULE_OK;
 	}
@@ -159,10 +167,31 @@ sub test_call {
 	# Some code goes here
 }
 
+sub log_attributes {
+	my %hash = %{$_[0]};
+	my $indent = $_[1];
+	for (keys %hash) {
+		if (ref $hash{$_} eq 'HASH') {
+			radiusd::log(L_DBG, ' 'x$indent . "$_ =>");
+			log_attributes($hash{$_}, $indent + 2);
+		} elsif (ref $hash{$_} eq 'ARRAY') {
+			foreach my $attr (@{$hash{$_}}) {
+				if (ref $attr eq 'HASH') {
+					radiusd::log(L_DBG, ' 'x$indent . "$_ =>");
+					log_attributes($attr, $indent + 2);
+				} else {
+					radiusd::log(L_DBG, ' 'x$indent . "$_ = $attr");
+				}
+			}
+		} else {
+			radiusd::log(L_DBG, ' 'x$indent . "$_ = $hash{$_}");
+		}
+	}
+}
+
 sub log_request_attributes {
 	# This shouldn't be done in production environments!
 	# This is only meant for debugging!
-	for (keys %RAD_REQUEST) {
-		radiusd::log(L_DBG, "RAD_REQUEST: $_ = $RAD_REQUEST{$_}");
-	}
+	radiusd::log(L_DBG, "RAD_REQUEST:");
+	log_attributes(\%RAD_REQUEST, 2);
 }

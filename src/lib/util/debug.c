@@ -434,38 +434,55 @@ DIAG_ON(deprecated-declarations)
 			/* Tell the parent what happened */
 		send_status:
 			if (write(from_child[1], &ret, sizeof(ret)) < 0) {
-				fprintf(stderr, "Writing ptrace status to parent failed: %s", fr_syserror(errno));
+				fprintf(stderr, "Writing ptrace status to parent failed: %s\n", fr_syserror(errno));
 			}
 
 			/* Detach */
 			_PTRACE_DETACH(ppid);
+
+
+			/*
+			*	We call _exit() instead of exit().  This means that we skip the atexit() handlers,
+			*	which don't need to run in a temporary child process.  Skipping them means that we
+			*	avoid dirtying those pages to "clean things up", which is then immediately followed by
+			*	exiting.
+			*
+			*	Skipping the atexit() handlers also means that we're not worried about memory leaks
+			*	because things "aren't cleaned up correctly".  We're not exiting cleanly here (and
+			*	don't care to exit cleanly).  So just exiting with no cleanups is fine.
+			*/
 			_exit(0); /* don't run the atexit() handlers. */
 		/*
-		 *	We could attach because of a permissions issue, we don't know
-		 *      whether we're being traced or not.
+		 *	man ptrace says the following:
+		 *
+		 *	EPERM  The specified process cannot be traced.  This could be
+                 *	because the tracer has insufficient privileges (the
+                 *	required capability is CAP_SYS_PTRACE); unprivileged
+                 *	processes cannot trace processes that they cannot send
+                 *	signals to or those running set-user-ID/set-group-ID
+                 *	programs, for obvious reasons.  Alternatively, the process
+		 *	may already be being traced, or (before Linux 2.6.26) be
+        	 *	init(1) (PID 1).
+		 *
+		 *	In any case, we are very unlikely to be able to attach to
+		 *	the process from the panic action.
+		 *
+		 *	We checked for CAP_SYS_PTRACE previously, so know that
+		 *	we _should_ haven been ablle to attach, so if we can't, it's
+		 *	likely that we're already being traced.
 		 */
 		} else if (errno == EPERM) {
-			ret = DEBUGGER_STATE_UNKNOWN;
+			ret = DEBUGGER_STATE_ATTACHED;
 			goto send_status;
 		}
 
-		ret = DEBUGGER_STATE_ATTACHED;
-		/* Tell the parent what happened */
-		if (write(from_child[1], &ret, sizeof(ret)) < 0) {
-			fprintf(stderr, "Writing ptrace status to parent failed: %s", fr_syserror(errno));
-		}
-
 		/*
-		 *	We call _exit() instead of exit().  This means that we skip the atexit() handlers,
-		 *	which don't need to run in a temporary child process.  Skipping them means that we
-		 *	avoid dirtying those pages to "clean things up", which is then immediately followed by
-		 *	exiting.
-		 *
-		 *	Skipping the atexit() handlers also means that we're not worried about memory leaks
-		 *	because things "aren't cleaned up correctly".  We're not exiting cleanly here (and
-		 *	don't care to exit cleanly).  So just exiting with no cleanups is fine.
+		 *	Unexpected error, we don't know whether we're already running
+		 * 	under a debugger or not...
 		 */
-		_exit(0);
+		ret = DEBUGGER_STATE_UNKNOWN;
+		fprintf(stderr, "Debugger check failed to attach to parent with unexpected error: %s\n", fr_syserror(errno));
+		goto send_status;
 	/* Parent */
 	} else {
 		int8_t ret = DEBUGGER_STATE_UNKNOWN;
@@ -922,6 +939,35 @@ static int fr_fault_check_permissions(void)
 	return 0;
 }
 
+/** Split out so it can be sprinkled throughout the server and called via a debugger
+ *
+ */
+void fr_fault_backtrace(void)
+{
+
+	/*
+	 *	Produce a simple backtrace - They're very basic but at least give us an
+	 *	idea of the area of the code we hit the issue in.
+	 *
+	 *	See below in fr_fault_setup() and
+	 *	https://sourceware.org/bugzilla/show_bug.cgi?id=16159
+	 *	for why we only print backtraces in debug builds if we're using GLIBC.
+	 */
+#if defined(HAVE_EXECINFO) && (!defined(NDEBUG) || !defined(__GNUC__))
+	if (fr_fault_log_fd >= 0) {
+		size_t frame_count;
+		void *stack[MAX_BT_FRAMES];
+
+		frame_count = backtrace(stack, MAX_BT_FRAMES);
+
+		FR_FAULT_LOG("Backtrace of last %zu frames:", frame_count);
+
+		backtrace_symbols_fd(stack, frame_count, fr_fault_log_fd);
+	}
+#endif
+	return;
+}
+
 /** Prints a simple backtrace (if execinfo is available) and calls panic_action if set.
  *
  * @param sig caught
@@ -960,26 +1006,7 @@ NEVER_RETURNS void fr_fault(int sig)
 	 */
 	if (panic_cb && (panic_cb(sig) < 0)) goto finish;
 
-	/*
-	 *	Produce a simple backtrace - They're very basic but at least give us an
-	 *	idea of the area of the code we hit the issue in.
-	 *
-	 *	See below in fr_fault_setup() and
-	 *	https://sourceware.org/bugzilla/show_bug.cgi?id=16159
-	 *	for why we only print backtraces in debug builds if we're using GLIBC.
-	 */
-#if defined(HAVE_EXECINFO) && (!defined(NDEBUG) || !defined(__GNUC__))
-	if (fr_fault_log_fd >= 0) {
-		size_t frame_count;
-		void *stack[MAX_BT_FRAMES];
-
-		frame_count = backtrace(stack, MAX_BT_FRAMES);
-
-		FR_FAULT_LOG("Backtrace of last %zu frames:", frame_count);
-
-		backtrace_symbols_fd(stack, frame_count, fr_fault_log_fd);
-	}
-#endif
+	fr_fault_backtrace();
 
 	/* No panic action set... */
 	if (panic_action[0] == '\0') {
@@ -1397,7 +1424,7 @@ void fr_fault_log_hex(uint8_t const *data, size_t data_len)
 
 		for (p = buffer, j = 0; j < len; j++, p += 3) snprintf(p, end - p, "%02x ", data[i + j]);
 
-		dprintf(fr_fault_log_fd, "%04x: %s\n", (int)i, buffer);
+		dprintf(fr_fault_log_fd, "%04x: %s\n", (unsigned int) i, buffer);
 	}
 }
 
@@ -1430,19 +1457,19 @@ bool _fr_assert_fail(char const *file, int line, char const *expr, char const *m
 		va_end(ap);
 
 #ifndef NDEBUG
-		FR_FAULT_LOG("ASSERT FAILED %s[%u]: %s: %s", file, line, expr, str);
+		FR_FAULT_LOG("ASSERT FAILED %s[%d]: %s: %s", file, line, expr, str);
 		fr_fault(SIGABRT);
 #else
-		FR_FAULT_LOG("ASSERT WOULD FAIL %s[%u]: %s: %s", file, line, expr, str);
+		FR_FAULT_LOG("ASSERT WOULD FAIL %s[%d]: %s: %s", file, line, expr, str);
 		return false;
 #endif
 	}
 
 #ifndef NDEBUG
-	FR_FAULT_LOG("ASSERT FAILED %s[%u]: %s", file, line, expr);
+	FR_FAULT_LOG("ASSERT FAILED %s[%d]: %s", file, line, expr);
 	fr_fault(SIGABRT);
 #else
-	FR_FAULT_LOG("ASSERT WOULD FAIL %s[%u]: %s", file, line, expr);
+	FR_FAULT_LOG("ASSERT WOULD FAIL %s[%d]: %s", file, line, expr);
 	return false;
 #endif
 }
@@ -1465,9 +1492,9 @@ void _fr_assert_fatal(char const *file, int line, char const *expr, char const *
 		(void)vsnprintf(str, sizeof(str), msg, ap);
 		va_end(ap);
 
-		FR_FAULT_LOG("FATAL ASSERT %s[%u]: %s: %s", file, line, expr, str);
+		FR_FAULT_LOG("FATAL ASSERT %s[%d]: %s: %s", file, line, expr, str);
 	} else {
-		FR_FAULT_LOG("FATAL ASSERT %s[%u]: %s", file, line, expr);
+		FR_FAULT_LOG("FATAL ASSERT %s[%d]: %s", file, line, expr);
 	}
 
 #ifdef NDEBUG
@@ -1493,10 +1520,10 @@ NEVER_RETURNS void _fr_exit(char const *file, int line, int status, bool now)
 		char const *error = fr_strerror();
 
 		if (error && *error && (status != 0)) {
-			FR_FAULT_LOG("%sEXIT(%i) CALLED %s[%u].  Last error was: %s", now ? "_" : "",
+			FR_FAULT_LOG("%sEXIT(%i) CALLED %s[%d].  Last error was: %s", now ? "_" : "",
 				     status, file, line, error);
 		} else {
-			FR_FAULT_LOG("%sEXIT(%i) CALLED %s[%u]", now ? "_" : "", status, file, line);
+			FR_FAULT_LOG("%sEXIT(%i) CALLED %s[%d]", now ? "_" : "", status, file, line);
 		}
 
 		fr_debug_break(false);	/* If running under GDB we'll break here */

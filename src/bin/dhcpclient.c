@@ -133,12 +133,12 @@ static NEVER_RETURNS void usage(void)
 /*
  *	Initialize the request.
  */
-static int request_init(fr_radius_packet_t **out, fr_pair_list_t *packet_vps, char const *filename)
+static int request_init(fr_packet_t **out, fr_pair_list_t *packet_vps, char const *filename)
 {
 	FILE			*fp;
 	fr_pair_t		*vp;
 	bool			filedone = false;
-	fr_radius_packet_t	*packet;
+	fr_packet_t	*packet;
 
 	/*
 	 *	Determine where to read the VP's from.
@@ -154,14 +154,14 @@ static int request_init(fr_radius_packet_t **out, fr_pair_list_t *packet_vps, ch
 		fp = stdin;
 	}
 
-	packet = fr_radius_packet_alloc(NULL, false);
+	packet = fr_packet_alloc(NULL, false);
 
 	/*
 	 *	Read the VP's.
 	 */
 	if (fr_pair_list_afrom_file(packet, dict_dhcpv4, packet_vps, fp, &filedone) < 0) {
 		fr_perror("dhcpclient");
-		fr_radius_packet_free(&packet);
+		fr_packet_free(&packet);
 		if (fp != stdin) fclose(fp);
 		return -1;
 	}
@@ -194,7 +194,7 @@ static int request_init(fr_radius_packet_t **out, fr_pair_list_t *packet_vps, ch
 	 *	Fill in the packet header from attributes, and then
 	 *	re-realize the attributes.
 	 */
-	fr_packet_pairs_to_packet(packet, packet_vps);
+	fr_packet_net_from_pairs(packet, packet_vps);
 
 	if (fp != stdin) fclose(fp);
 
@@ -214,11 +214,11 @@ static int request_init(fr_radius_packet_t **out, fr_pair_list_t *packet_vps, ch
  *	We'll just return the first eligible reply, and display the others.
  */
 #if defined(HAVE_LINUX_IF_PACKET_H) || defined (HAVE_LIBPCAP)
-static fr_radius_packet_t *fr_dhcpv4_recv_raw_loop(int lsockfd,
+static fr_packet_t *fr_dhcpv4_recv_raw_loop(int lsockfd,
 #ifdef HAVE_LINUX_IF_PACKET_H
 					    struct sockaddr_ll *p_ll,
 #endif
-					    fr_radius_packet_t *request,
+					    fr_packet_t *request,
 #ifndef HAVE_LINUX_IF_PACKET_H
 					    UNUSED
 #endif
@@ -226,8 +226,8 @@ static fr_radius_packet_t *fr_dhcpv4_recv_raw_loop(int lsockfd,
 					    )
 {
 	fr_time_delta_t	our_timeout;
-	fr_radius_packet_t	*found = NULL;
-	fr_radius_packet_t	*reply = NULL;
+	fr_packet_t	*found = NULL;
+	fr_packet_t	*reply = NULL;
 	fr_pair_list_t		reply_vps;
 	int			nb_reply = 0;
 	int			nb_offer = 0;
@@ -326,7 +326,7 @@ static fr_radius_packet_t *fr_dhcpv4_recv_raw_loop(int lsockfd,
 }
 #endif	/* <if/packet.h> or <pcap.h> */
 
-static int send_with_socket(fr_radius_packet_t **reply, fr_radius_packet_t *request,
+static int send_with_socket(fr_packet_t **reply, fr_packet_t *request,
 #ifndef HAVE_LINUX_IF_PACKET_H
 			    UNUSED
 #endif
@@ -411,7 +411,7 @@ static int send_with_socket(fr_radius_packet_t **reply, fr_radius_packet_t *requ
 }
 
 #ifdef HAVE_LIBPCAP
-static int send_with_pcap(fr_radius_packet_t **reply, fr_radius_packet_t *request, fr_pair_list_t *request_list)
+static int send_with_pcap(fr_packet_t **reply, fr_packet_t *request, fr_pair_list_t *request_list)
 {
 	char ip[16];
 	char pcap_filter[255];
@@ -462,9 +462,9 @@ static int send_with_pcap(fr_radius_packet_t **reply, fr_radius_packet_t *reques
 }
 #endif	/* HAVE_LIBPCAP */
 
-static void dhcp_packet_debug(fr_radius_packet_t *packet, fr_pair_list_t *list, bool received)
+static void dhcp_packet_debug(fr_packet_t *packet, fr_pair_list_t *list, bool received)
 {
-	char		buffer[2048];
+	char		buffer[2048] = "";
 
 	char		src_ipaddr[INET6_ADDRSTRLEN];
 	char		dst_ipaddr[INET6_ADDRSTRLEN];
@@ -531,9 +531,9 @@ int main(int argc, char **argv)
 	char const		*dict_dir = DICTDIR;
 	char const		*filename = NULL;
 
-	fr_radius_packet_t	*packet = NULL;
+	fr_packet_t	*packet = NULL;
 	fr_pair_list_t		packet_vps;
-	fr_radius_packet_t	*reply = NULL;
+	fr_packet_t	*reply = NULL;
 	fr_pair_list_t		reply_vps;
 
 	int			ret;
@@ -737,8 +737,6 @@ int main(int argc, char **argv)
 	}
 
 	fr_dhcpv4_global_free();
-
-	packet_global_free();
 
 	if (fr_dict_autofree(dhcpclient_dict) < 0) {
 		fr_perror("dhcpclient");

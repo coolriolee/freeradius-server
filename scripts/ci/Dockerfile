@@ -1,7 +1,7 @@
-FROM ubuntu:20.04
+FROM ubuntu:24.04
 
-ARG llvm_ver=12
-ARG gcc_ver=9
+ARG llvm_ver=18
+ARG gcc_ver=14
 ARG openssl_ver=3.0.2
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -54,6 +54,16 @@ RUN DIST=$(lsb_release -is | tr '[:upper:]' '[:lower:]') && \
 RUN apt-get update
 
 #
+#  Install some basics
+#
+#  sudo is to maintain compatibility with GitHub hosted runners
+#
+RUN apt-get install -y --no-install-recommends \
+	git \
+	git-lfs \
+	sudo
+
+#
 #  Install FreeRADIUS build-dep packages
 #  After NR repo so that we pick up newer libkqueue packages.
 #
@@ -64,7 +74,7 @@ RUN apt-get install -y --no-install-recommends /tmp/freeradius-build-deps.deb &&
 	apt-get install -y --no-install-recommends /tmp/freeradius-build-deps-extra.deb && \
 	apt-get --purge -y remove freeradius-build-deps
 
-RUN pip3 install tacacs_plus
+RUN PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install tacacs_plus
 
 #
 #  Install Clang and GCC
@@ -99,8 +109,6 @@ RUN apt-get install -y --no-install-recommends \
 RUN apt-get install -yd --no-install-recommends \
 	heimdal-dev \
 	libpcre3-dev
-
-
 
 #
 #  Extra installs for the CI testing stage
@@ -140,4 +148,3 @@ RUN apt-get install -y --no-install-recommends \
 #  - install eapol_test
 #  - install openssl 3.0 (needs CI update to enable/disable)
 #
-

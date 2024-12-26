@@ -104,7 +104,7 @@ ATTRIBUTE	Stripped-User-Domain			1001	string
 # Connext-Rate, Add-Prefix, Add-Suffix
 ATTRIBUTE	Expiration				1010	date
 
-# 1011 was Client-Shortname.  Use %{client:shortname} instead
+# 1011 was Client-Shortname.  Use %client(shortname) instead
 
 # 1012 Was Raw-Attribute.  No longer supported
 ATTRIBUTE	User-Category				1013	string
@@ -153,11 +153,24 @@ ATTRIBUTE	FreeRADIUS-Client-IP-Address		1120	ipaddr
 ATTRIBUTE	FreeRADIUS-Client-IPv6-Address		1121	ipv6addr
 
 # The rest of the FreeRADIUS-Client-* attributes are at 1150...
-ATTRIBUTE	FreeRADIUS-Client-Require-MA		1122	bool
-ATTRIBUTE	FreeRADIUS-Client-Secret		1123	string
-ATTRIBUTE	FreeRADIUS-Client-Shortname		1124	string
-ATTRIBUTE	FreeRADIUS-Client-NAS-Type		1125	string
-ATTRIBUTE	FreeRADIUS-Client-Virtual-Server	1126	string
+ATTRIBUTE	FreeRADIUS-Client-Require-MA		1122	uint8
+
+# Ordering is important here, as the values are a bitmask.
+VALUE	FreeRADIUS-Client-Require-MA		No			0
+VALUE	FreeRADIUS-Client-Require-MA		Auto			1
+VALUE	FreeRADIUS-Client-Require-MA		Yes			2
+
+ATTRIBUTE	FreeRADIUS-Client-Limit-Proxy-State	1123	uint8
+
+# Ordering is important here, as the values are a bitmask.
+VALUE	FreeRADIUS-Client-Limit-Proxy-State	No			0
+VALUE	FreeRADIUS-Client-Limit-Proxy-State	Auto			1
+VALUE	FreeRADIUS-Client-Limit-Proxy-State	Yes			2
+
+ATTRIBUTE	FreeRADIUS-Client-Secret		1124	string
+ATTRIBUTE	FreeRADIUS-Client-Shortname		1125	string
+ATTRIBUTE	FreeRADIUS-Client-NAS-Type		1126	string
+ATTRIBUTE	FreeRADIUS-Client-Virtual-Server	1127	string
 
 #
 #	For send/recv CoA packets (like Auth-Type, Acct-Type, etc.)
@@ -367,6 +380,12 @@ ATTRIBUTE	Tmp-Time-Delta-7			1807	time_delta
 ATTRIBUTE	Tmp-Time-Delta-8			1808	time_delta
 ATTRIBUTE	Tmp-Time-Delta-9			1809	time_delta
 
+ATTRIBUTE	Tmp-TLV-0				1810	tlv
+ATTRIBUTE	a					.1	uint32
+ATTRIBUTE	b					.2	uint32
+ATTRIBUTE	c					.3	string
+ATTRIBUTE	d					.4	ipaddr
+
 #
 #  1810 - 1879 - unused
 #
@@ -402,7 +421,7 @@ ATTRIBUTE	Log-Type				1896	integer
 ATTRIBUTE	WiMAX-MN-NAI				1900	string
 
 ATTRIBUTE	TLS-Certificate				1901	tlv
-BEGIN-TLV	TLS-Certificate
+BEGIN		TLS-Certificate
 ATTRIBUTE	Serial					1	octets
 ATTRIBUTE	Signature				2	octets
 ATTRIBUTE	Signature-Algorithm			3	string
@@ -420,7 +439,7 @@ ATTRIBUTE	X509v3-Extended-Key-Usage		14	string
 ATTRIBUTE	X509v3-Subject-Key-Identifier		15	string
 ATTRIBUTE	X509v3-Authority-Key-Identifier		16	string
 ATTRIBUTE	X509v3-Basic-Constraints		17	string
-END-TLV		TLS-Certificate
+END		TLS-Certificate
 
 ATTRIBUTE	TLS-PSK-Identity			1933	string
 ATTRIBUTE	TLS-Session-Certificate-File		1934	string
@@ -476,9 +495,28 @@ VALUE	TLS-Client-Error-Code		No-Application-Protocol	120
 
 ATTRIBUTE	TLS-Session-Version			1947	string
 ATTRIBUTE	TLS-Session-Cipher-Suite		1948	string
+ATTRIBUTE	TLS-Session-Resume-Type			1949	integer
+
+VALUE	TLS-Session-Resume-Type		stateful		1
+VALUE	TLS-Session-Resume-Type		stateless		2
 
 #
-#	Range:	1951-2199
+#  Attributes for casting
+#
+ATTRIBUTE	Cast-Time-Res-Sec			1950	time_delta	precision=seconds
+ATTRIBUTE	Cast-Time-Res-Min			1951	time_delta	precision=minutes
+ATTRIBUTE	Cast-Time-Res-Hour			1952	time_delta	precision=hours
+ATTRIBUTE	Cast-Time-Res-Day			1953	time_delta	precision=days
+ATTRIBUTE	Cast-Time-Res-Week			1954	time_delta	precision=weeks
+ATTRIBUTE	Cast-Time-Res-Month			1955	time_delta	precision=months
+ATTRIBUTE	Cast-Time-Res-Year			1956	time_delta	precision=years
+ATTRIBUTE	Cast-Time-Res-Centi-Sec			1957	time_delta	precision=centiseconds
+ATTRIBUTE	Cast-Time-Res-Milli-Sec			1958	time_delta	precision=milliseconds
+ATTRIBUTE	Cast-Time-Res-Micro-Sec			1959	time_delta	precision=microseconds
+ATTRIBUTE	Cast-Time-Res-Nano-Sec			1960	time_delta	precision=nanoseconds
+
+#
+#	Range:	1961-2199
 #		Free
 #
 
@@ -540,4 +578,3 @@ VALUE	Auth-Type			Accept			254
 #
 VALUE	Strip-User-Name			No			0
 VALUE	Strip-User-Name			Yes			1
-

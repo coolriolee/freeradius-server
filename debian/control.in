@@ -5,6 +5,7 @@ Build-Depends: @BUILDDEPS@ debhelper (>= 9),
  dh-systemd (>= 1.5) | debhelper (>= 13.3.0),
  dpkg-dev (>= 1.13.19),
  freetds-dev,
+ libbrotli-dev,
  libcap-dev,
  libcurl4-openssl-dev | libcurl4-gnutls-dev,
  libgdbm-dev,
@@ -17,7 +18,7 @@ Build-Depends: @BUILDDEPS@ debhelper (>= 9),
  libkrb5-dev | heimdal-dev,
  libldap2-dev,
  libmemcached-dev,
- default-libmysqlclient-dev | libmysqlclient-dev,
+ libmariadb-dev,
  libpam0g-dev,
  libpcap-dev,
  libpcre2-dev | libpcre3-dev,
@@ -126,12 +127,11 @@ Description: FreeRADIUS shared library development files
  .
  This package contains the development headers and static library version.
 
-Package: freeradius-dhcp
+Package: freeradius-brotli
 Architecture: any
 Depends: freeradius (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}, ${dist:Depends}
-Description: DHCP module for FreeRADIUS server
- The FreeRADIUS server can act as a DHCP server, and this module
- is necessary for that.
+Description: Brotli compression and decompression for FreeRADIUS server
+ This module adds brotli compression and decompression support to FreeRADIUS.
 
 Package: freeradius-krb5
 Architecture: any

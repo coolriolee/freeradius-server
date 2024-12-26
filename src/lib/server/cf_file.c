@@ -40,6 +40,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/file.h>
 #include <freeradius-devel/util/misc.h>
 #include <freeradius-devel/util/perm.h>
+#include <freeradius-devel/util/md5.h>
 #include <freeradius-devel/util/syserror.h>
 
 #include <sys/types.h>
@@ -119,9 +120,6 @@ typedef struct {
 
 	CONF_SECTION	*parent;		//!< which started this file
 	CONF_SECTION	*current;		//!< sub-section we're reading
-	CONF_SECTION	*special;		//!< map / update section
-
-	bool		require_edits;		//!< are we required to do edits?
 
 	int		braces;
 	bool		from_dir;		//!< this file was read from $include foo/
@@ -261,8 +259,8 @@ char const *cf_expand_variables(char const *cf, int lineno,
 
 				if (buf.st_size >= ((output + outsize) - p)) {
 					close(fd);
-					ERROR("%s[%d]: Reference \"${%s}\" file is too large (%zd >= %zd)", cf, lineno, name,
-					      (size_t) buf.st_size, ((output + outsize) - p));
+					ERROR("%s[%d]: Reference \"${%s}\" file is too large (%zu >= %zu)", cf, lineno, name,
+					      (size_t) buf.st_size, (size_t) ((output + outsize) - p));
 					return NULL;
 				}
 
@@ -488,7 +486,7 @@ static bool cf_template_merge(CONF_SECTION *cs, CONF_SECTION const *template)
 			 *	Create a new pair with all of the data
 			 *	of the old one.
 			 */
-			cp2 = cf_pair_dup(cs, cp1);
+			cp2 = cf_pair_dup(cs, cp1, true);
 			if (!cp2) return false;
 
 			cf_filename_set(cp2, cp1->item.filename);
@@ -566,7 +564,7 @@ static int cf_file_open(CONF_SECTION *cs, char const *filename, bool from_dir, F
 	if (from_dir) {
 		cf_file_t my_file;
 		char const *r;
-		int dirfd;
+		int my_fd;
 
 		my_file.cs = cs;
 		my_file.filename = filename;
@@ -575,12 +573,12 @@ static int cf_file_open(CONF_SECTION *cs, char const *filename, bool from_dir, F
 		 *	Find and open the directory containing filename so we can use
 		 * 	 the "at"functions to avoid time of check/time of use insecurities.
 		 */
-		if (fr_dirfd(&dirfd, &r, filename) < 0) {
+		if (fr_dirfd(&my_fd, &r, filename) < 0) {
 			ERROR("Failed to open directory containing %s", filename);
 			return -1;
 		}
 
-		if (fstatat(dirfd, r, &my_file.buf, 0) < 0) goto error;
+		if (fstatat(my_fd, r, &my_file.buf, 0) < 0) goto error;
 
 		file = fr_rb_find(tree, &my_file);
 
@@ -594,12 +592,12 @@ static int cf_file_open(CONF_SECTION *cs, char const *filename, bool from_dir, F
 		 *	$INCLUDE directory, then we read it again.
 		 */
 		if (file && !file->from_dir) {
-			if (dirfd != AT_FDCWD) close(dirfd);
+			if (my_fd != AT_FDCWD) close(my_fd);
 			return 1;
 		}
-		fd = openat(dirfd, r, O_RDONLY, 0);
+		fd = openat(my_fd, r, O_RDONLY, 0);
 		fp = (fd < 0) ? NULL : fdopen(fd, "r");
-		if (dirfd != AT_FDCWD) close(dirfd);
+		if (my_fd != AT_FDCWD) close(my_fd);
 	} else {
 		fp = fopen(filename, "r");
 		if (fp) fd = fileno(fp);
@@ -698,30 +696,30 @@ bool cf_file_check(CONF_PAIR *cp, bool check_perms)
 
 		if ((conf_check_gid != (gid_t)-1) && ((egid = getegid()) != conf_check_gid)) {
 			if (setegid(conf_check_gid) < 0) {
-				cf_log_perr(cp, "Failed setting effective group ID (%i) for file check: %s",
-					    conf_check_gid, fr_syserror(errno));
+				cf_log_perr(cp, "Failed setting effective group ID (%d) for file check: %s",
+					    (int) conf_check_gid, fr_syserror(errno));
 				goto error;
 			}
 		}
 		if ((conf_check_uid != (uid_t)-1) && ((euid = geteuid()) != conf_check_uid)) {
 			if (seteuid(conf_check_uid) < 0) {
-				cf_log_perr(cp, "Failed setting effective user ID (%i) for file check: %s",
-					    conf_check_uid, fr_syserror(errno));
+				cf_log_perr(cp, "Failed setting effective user ID (%d) for file check: %s",
+					    (int) conf_check_uid, fr_syserror(errno));
 				goto error;
 			}
 		}
 		fd = open(filename, O_RDONLY);
 		if (conf_check_uid != euid) {
 			if (seteuid(euid) < 0) {
-				cf_log_perr(cp, "Failed restoring effective user ID (%i) after file check: %s",
-					    euid, fr_syserror(errno));
+				cf_log_perr(cp, "Failed restoring effective user ID (%d) after file check: %s",
+					    (int) euid, fr_syserror(errno));
 				goto error;
 			}
 		}
 		if (conf_check_gid != egid) {
 			if (setegid(egid) < 0) {
-				cf_log_perr(cp, "Failed restoring effective group ID (%i) after file check: %s",
-					    egid, fr_syserror(errno));
+				cf_log_perr(cp, "Failed restoring effective group ID (%d) after file check: %s",
+					    (int) egid, fr_syserror(errno));
 				goto error;
 			}
 		}
@@ -832,7 +830,7 @@ static int cf_get_token(CONF_SECTION *parent, char const **ptr_p, fr_token_t *to
 	 *	Don't allow casts or regexes.  But do allow bare
 	 *	%{...} expansions.
 	 */
-	slen = tmpl_preparse(&out, &outlen, ptr, strlen(ptr), token, NULL, false, true);
+	slen = tmpl_preparse(&out, &outlen, ptr, strlen(ptr), token);
 	if (slen <= 0) {
 		char *spaces, *text;
 
@@ -890,7 +888,7 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 	/*
 	 *	Can't do this inside of update / map.
 	 */
-	if (frame->special) {
+	if (parent->unlang == CF_UNLANG_ASSIGNMENT) {
 		ERROR("%s[%d]: Parse error: Invalid location for $INCLUDE",
 		      frame->filename, frame->lineno);
 		return -1;
@@ -949,7 +947,6 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 		frame->required = required;
 		frame->parent = parent;
 		frame->current = parent;
-		frame->special = NULL;
 
 		/*
 		 *	For better debugging.
@@ -1012,7 +1009,6 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 		frame->parent = parent;
 		frame->current = parent;
 		frame->filename = talloc_strdup(frame->parent, value);
-		frame->special = NULL;
 		return 1;
 	}
 
@@ -1029,6 +1025,9 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 		struct dirent	*dp;
 		struct stat	stat_buf;
 		cf_file_heap_t	*h;
+#ifdef S_IWOTH
+		int		my_fd;
+#endif
 
 		/*
 		 *	We need to keep a copy of parent while the
@@ -1047,11 +1046,15 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 			talloc_free(directory);
 			return -1;
 		}
+
 #ifdef S_IWOTH
+		my_fd = dirfd(dir);
+		fr_assert(my_fd >= 0);
+
 		/*
 		 *	Security checks.
 		 */
-		if (fstat(dirfd(dir), &stat_buf) < 0) {
+		if (fstat(my_fd, &stat_buf) < 0) {
 			ERROR("%s[%d]: Failed reading directory %s: %s", frame->filename, frame->lineno,
 			      directory, fr_syserror(errno));
 			goto error;
@@ -1131,11 +1134,6 @@ static int process_include(cf_stack_t *stack, CONF_SECTION *parent, char const *
 			(void) fr_heap_insert(&frame->heap, h);
 		}
 		closedir(dir);
-
-		/*
-		 *	No "$INCLUDE dir/" inside of update / map.  That's dumb.
-		 */
-		frame->special = NULL;
 		return 1;
 	}
 #else
@@ -1390,7 +1388,7 @@ static ssize_t fr_skip_condition(char const *start, char const *end, bool const 
 		/*
 		 *	In the configuration files, conditions end with ") {" or just "{"
 		 */
-		if ((depth == 0) && terminal && terminal[(uint8_t) *p]) {
+		if ((depth == 0) && terminal[(uint8_t) *p]) {
 			return p - start;
 		}
 
@@ -1512,7 +1510,7 @@ static ssize_t fr_skip_condition(char const *start, char const *end, bool const 
 	 */
 	if (eol) *eol = (depth > 0);
 
-	if (terminal && terminal[(uint8_t) *p]) return p - start;
+	if (terminal[(uint8_t) *p]) return p - start;
 
 	fr_strerror_const("Unexpected end of condition");
 	return -(p - start);
@@ -1624,7 +1622,7 @@ static CONF_ITEM *process_if(cf_stack_t *stack)
 		 *	Anything other than EOL is a problem at this point.
 		 */
 		if (*p) {
-			fr_strerror_const("Unexpected text");
+			fr_strerror_const("Unexpected text after condition");
 			goto error;
 		}
 
@@ -1640,6 +1638,16 @@ static CONF_ITEM *process_if(cf_stack_t *stack)
 	}
 
 	fr_assert((size_t) slen < (stack->bufsize - 1));
+
+	ptr += slen;
+	fr_skip_whitespace(ptr);
+
+	if (*ptr != '{') {
+		cf_log_err(cs, "Expected '{' instead of %s", ptr);
+		talloc_free(cs);
+		return NULL;
+	}
+	ptr++;
 
 	/*
 	 *	Save the parsed condition (minus trailing whitespace)
@@ -1667,19 +1675,10 @@ static CONF_ITEM *process_if(cf_stack_t *stack)
 	MEM(cs->name2 = talloc_typed_strdup(cs, buff[3]));
 	cs->name2_quote = T_BARE_WORD;
 
-	ptr += slen;
-	fr_skip_whitespace(ptr);
-
-	if (*ptr != '{') {
-		cf_log_err(cs, "Expected '{' instead of %s", ptr);
-		talloc_free(cs);
-		return NULL;
-	}
-	ptr++;
-
 	stack->ptr = ptr;
 
-	cs->allow_unlang = cs->allow_locals = true;
+	cs->allow_locals = true;
+	cs->unlang = CF_UNLANG_ALLOW;
 	return cf_section_to_item(cs);
 }
 
@@ -1765,7 +1764,7 @@ alloc_section:
 		css->argc++;
 	}
 	stack->ptr = ptr;
-	frame->special = css;
+	css->unlang = CF_UNLANG_ASSIGNMENT;
 
 	return cf_section_to_item(css);
 }
@@ -1806,11 +1805,6 @@ static CONF_ITEM *process_subrequest(cf_stack_t *stack)
 		return NULL;
 	}
 
-	if (token != T_BARE_WORD) {
-		ERROR("%s[%d]: The first argument to 'subrequest' must be a name or an attribute reference",
-		      frame->filename, frame->lineno);
-		return NULL;
-	}
 	mod = buff[1];
 
         /*
@@ -1891,9 +1885,9 @@ alloc_section:
 	}
 
 	stack->ptr = ptr;
-	frame->special = css;
 
-	css->allow_unlang = css->allow_locals = true;
+	css->allow_locals = true;
+	css->unlang = CF_UNLANG_ALLOW;
 	return cf_section_to_item(css);
 }
 
@@ -1964,7 +1958,7 @@ static CONF_ITEM *process_catch(cf_stack_t *stack)
 	cf_filename_set(css, frame->filename);
 	cf_lineno_set(css, frame->lineno);
 	css->name2_quote = T_BARE_WORD;
-	css->allow_unlang = 1;
+	css->unlang = CF_UNLANG_ALLOW;
 
 	css->argc = argc;
 	if (argc) {
@@ -1984,73 +1978,265 @@ static CONF_ITEM *process_catch(cf_stack_t *stack)
 	talloc_free(name2);
 
 	stack->ptr = ptr;
-	frame->special = css;
 
 	return cf_section_to_item(css);
 }
 
-static int add_section_pair(CONF_SECTION **parent, char const **attr, char const *dot, char *buffer, size_t buffer_len, char const *filename, int lineno)
+static int parse_error(cf_stack_t *stack, char const *ptr, char const *message)
 {
-	CONF_SECTION *cs;
-	char const *name1 = *attr;
-	char *name2 = NULL;
-	char const *next;
-	char *p;
+	char *spaces, *text;
+	cf_stack_frame_t *frame = &stack->frame[stack->depth];
 
-	if (!dot[1] || (dot[1] == '.')) {
-		ERROR("%s[%d]: Invalid name", filename, lineno);
-		return -1;
-	}
-
-	if ((size_t) (dot - name1) >= buffer_len) {
-		ERROR("%s[%d]: Name too long", filename, lineno);
-		return -1;
-	}
-
-	memcpy(buffer, name1, dot - name1);
-	buffer[dot - name1] = '\0';
-	next = dot + 1;
+	if (!ptr) ptr = stack->ptr;
 
 	/*
-	 *	Look for name1[name2]
+	 *	We must pass a _negative_ offset to this function.
 	 */
-	p = strchr(buffer, '[');
-	if (p) {
-		name2 = p;
+	fr_canonicalize_error(NULL, &spaces, &text, stack->ptr - ptr, stack->ptr);
 
-		p = strchr(p, ']');
-		if (!p || ((p[1] != '\0') && (p[1] != '.'))) {
-			cf_log_err(*parent, "Could not parse name2 in '%s', expected 'name1[name2]", name1);
-			return -1;
-		}
+	ERROR("%s[%d]: %s", frame->filename, frame->lineno, text);
+	ERROR("%s[%d]: %s^ - %s", frame->filename, frame->lineno, spaces, message);
 
-		*p = '\0';
-		*(name2++) = '\0';
-	}
-
-	/*
-	 *	Reference a subsection which already exists.  If not,
-	 *	create it.
-	 */
-	cs = cf_section_find(*parent, buffer, name2);
-	if (!cs) {
-		cs = cf_section_alloc(*parent, *parent, buffer, NULL);
-		if (!cs) {
-			cf_log_err(*parent, "Failed allocating memory for section");
-			return -1;
-		}
-		cf_filename_set(cs, filename);
-		cf_lineno_set(cs, lineno);
-	}
-
-	*parent = cs;
-	*attr = next;
-
-	p = strchr(next + 1, '.');
-	if (!p) return 0;
-
-	return add_section_pair(parent, attr, p, buffer, buffer_len, filename, lineno);
+	talloc_free(spaces);
+	talloc_free(text);
+	return -1;
 }
+
+static int parse_type_name(cf_stack_t *stack, char const **ptr_p, char const *type_ptr, fr_type_t *type_p)
+{
+	fr_type_t type;
+	fr_token_t token;
+	char const *ptr = *ptr_p;
+	char const *ptr2;
+
+	/*
+	 *	Parse an explicit type.
+	 */
+	type = fr_table_value_by_str(fr_type_table, stack->buff[1], FR_TYPE_NULL);
+	switch (type) {
+	default:
+		break;
+
+	case FR_TYPE_NULL:
+	case FR_TYPE_VOID:
+	case FR_TYPE_VALUE_BOX:
+	case FR_TYPE_MAX:
+		(void) parse_error(stack, type_ptr, "Unknown or invalid variable type in 'foreach'");
+		return -1;
+	}
+
+	fr_skip_whitespace(ptr);
+	ptr2 = ptr;
+
+	/*
+	 *	Parse the variable name.  @todo - allow '-' in names.
+	 */
+	token = gettoken(&ptr, stack->buff[2], stack->bufsize, false);
+	if (token != T_BARE_WORD) {
+		(void) parse_error(stack, ptr2, "Invalid variable name for key in 'foreach'");
+		return -1;
+	}
+	fr_skip_whitespace(ptr);
+
+	*ptr_p = ptr;
+	*type_p = type;
+
+	return 0;
+}
+
+/*
+ *	foreach &User-Name {  - old and deprecated
+ *
+ *	foreach value (...) { - automatically define variable
+ *
+ *	foreach string value ( ...) { - data type for variable
+ *
+ *	foreach string key, type value (..) { - key is "string", value is as above
+ */
+static CONF_ITEM *process_foreach(cf_stack_t *stack)
+{
+	fr_token_t	token;
+	fr_type_t	type;
+	CONF_SECTION	*css;
+	char const	*ptr = stack->ptr, *ptr2, *type_ptr;
+	cf_stack_frame_t *frame = &stack->frame[stack->depth];
+	CONF_SECTION	*parent = frame->current;
+
+	css = cf_section_alloc(parent, parent, "foreach", NULL);
+	if (!css) {
+		ERROR("%s[%d]: Failed allocating memory for section",
+		      frame->filename, frame->lineno);
+		return NULL;
+	}
+
+	cf_filename_set(css, frame->filename);
+	cf_lineno_set(css, frame->lineno);
+	css->name2_quote = T_BARE_WORD;
+	css->unlang = CF_UNLANG_ALLOW;
+	css->allow_locals = true;
+
+	/*
+	 *	Get the first argument to "foreach".  For backwards
+	 *	compatibility, it could be an attribute reference.
+	 */
+	type_ptr = ptr;
+	if (cf_get_token(parent, &ptr, &token, stack->buff[1], stack->bufsize,
+			 frame->filename, frame->lineno) < 0) {
+		return NULL;
+	}
+
+	if (token != T_BARE_WORD) {
+	invalid_argument:
+		(void) parse_error(stack, type_ptr, "Unexpected argument to 'foreach'");
+		return NULL;
+	}
+
+	fr_skip_whitespace(ptr);
+
+	/*
+	 *	foreach foo { ...
+	 *
+	 *	Deprecated and don't use.
+	 */
+	if (*ptr == '{') {
+		css->name2 = talloc_typed_strdup(css, stack->buff[1]);
+
+		ptr++;
+		stack->ptr = ptr;
+
+		cf_log_warn(css, "Using deprecated syntax.  Please use new the new 'foreach' syntax.");
+		return cf_section_to_item(css);
+	}
+
+	fr_skip_whitespace(ptr);
+
+	/*
+	 *	foreach value (...) {
+	 */
+	if (*ptr == '(') {
+		type = FR_TYPE_NULL;
+		strcpy(stack->buff[2], stack->buff[1]); /* so that we can parse expression in buff[1] */
+		goto alloc_argc_2;
+	}
+
+	/*
+	 *	on input, type name is in stack->buff[1]
+	 *	on output, variable name is in stack->buff[2]
+	 */
+	if (parse_type_name(stack, &ptr, type_ptr, &type) < 0) return NULL;
+
+	/*
+	 *	if we now have an expression block, then just have variable type / name.
+	 */
+	if (*ptr == '(') goto alloc_argc_2;
+
+	/*
+	 *	There's a comma.  the first "type name" is for the key.  We skip the comma, and parse the
+	 *	second "type name" as being for the value.
+	 *
+	 *	foreach type key, type value (...)
+	 */
+	if (*ptr == ',') {
+		/*
+		 *	We have 4 arguments, [var-type, var-name, key-type, key-name]
+		 *
+		 *	We don't really care about key-type, but we might care later.
+		 */
+		css->argc = 4;
+		css->argv = talloc_array(css, char const *, css->argc);
+		css->argv_quote = talloc_array(css, fr_token_t, css->argc);
+
+		css->argv[2] = fr_type_to_str(type);
+		css->argv_quote[2] = T_BARE_WORD;
+
+		css->argv[3] = talloc_typed_strdup(css->argv, stack->buff[2]);
+		css->argv_quote[3] = T_BARE_WORD;
+
+		ptr++;
+		fr_skip_whitespace(ptr);
+		type_ptr = ptr;
+
+		/*
+		 *	Now parse "type value"
+		 */
+		token = gettoken(&ptr, stack->buff[1], stack->bufsize, false);
+		if (token != T_BARE_WORD) goto invalid_argument;
+
+		if (parse_type_name(stack, &ptr, type_ptr, &type) < 0) return NULL;
+
+		if (!fr_type_is_leaf(type)) {
+			(void) parse_error(stack, type_ptr, "Invalid data type for 'key' variable");
+			return NULL;
+		}
+	}
+
+	/*
+	 *	The thing to loop over must now be in an expression block.
+	 */
+	if (*ptr != '(') {
+		(void) parse_error(stack, ptr, "Expected (...) after 'foreach' variable definition");
+		return NULL;
+	}
+
+	goto parse_expression;
+
+alloc_argc_2:
+	css->argc = 2;
+	css->argv = talloc_array(css, char const *, css->argc);
+	css->argv_quote = talloc_array(css, fr_token_t, css->argc);
+
+
+parse_expression:
+	/*
+	 *	"(" whitespace EXPRESSION whitespace ")"
+	 */
+	ptr++;
+	fr_skip_whitespace(ptr);
+	ptr2 = ptr;
+
+	if (cf_get_token(parent, &ptr, &token, stack->buff[1], stack->bufsize,
+			 frame->filename, frame->lineno) < 0) {
+		return NULL;
+	}
+
+	/*
+	 *	We can do &foo[*] or %func(...), but not "...".
+	 */
+	if (token != T_BARE_WORD) {
+		(void) parse_error(stack, ptr2, "Invalid reference in 'foreach'");
+		return NULL;
+	}
+
+	fr_skip_whitespace(ptr);
+	if (*ptr != ')') {
+		(void) parse_error(stack, ptr, "Missing ')' in 'foreach'");
+		return NULL;
+	}
+	ptr++;
+	fr_skip_whitespace(ptr);
+
+	if (*ptr != '{') {
+		(void) parse_error(stack, ptr, "Expected '{' in 'foreach'");
+		return NULL;
+	}
+
+	css->name2 = talloc_typed_strdup(css, stack->buff[1]);
+
+	/*
+	 *	Add in the extra arguments
+	 */
+	css->argv[0] = fr_type_to_str(type);
+	css->argv_quote[0] = T_BARE_WORD;
+
+	css->argv[1] = talloc_typed_strdup(css->argv, stack->buff[2]);
+	css->argv_quote[1] = T_BARE_WORD;
+
+	ptr++;
+	stack->ptr = ptr;
+
+	return cf_section_to_item(css);
+}
+
 
 static int add_pair(CONF_SECTION *parent, char const *attr, char const *value,
 		    fr_token_t name1_token, fr_token_t op_token, fr_token_t value_token,
@@ -2060,25 +2246,6 @@ static int add_pair(CONF_SECTION *parent, char const *attr, char const *value,
 	conf_parser_t *rule;
 	CONF_PAIR *cp;
 	bool pass2 = false;
-
-	/*
-	 *	For laziness, allow specifying paths for CONF_PAIRs
-	 *
-	 *		section.subsection.pair = value
-	 *
-	 *	Note that we do this ONLY for CONF_PAIRs which have
-	 *	values, so that we don't pick up module references /
-	 *	methods.  And we don't do this for things which begin
-	 *	with '&' (or %), so we don't pick up attribute
-	 *	references.
-	 */
-	if ((*attr >= 'A') && (name1_token == T_BARE_WORD) && value && !parent->attr) {
-		char const *p = strchr(attr, '.');
-
-		if (p && (add_section_pair(&parent, &attr, p, buff, talloc_array_length(buff), filename, lineno) < 0)) {
-			return -1;
-		}
-	}
 
 	/*
 	 *	If we have the value, expand any configuration
@@ -2129,6 +2296,7 @@ static int add_pair(CONF_SECTION *parent, char const *attr, char const *value,
 static fr_table_ptr_sorted_t unlang_keywords[] = {
 	{ L("catch"),		(void *) process_catch },
 	{ L("elsif"),		(void *) process_if },
+	{ L("foreach"),		(void *) process_foreach },
 	{ L("if"),		(void *) process_if },
 	{ L("map"),		(void *) process_map },
 	{ L("subrequest"),	(void *) process_subrequest }
@@ -2143,6 +2311,7 @@ static int parse_input(cf_stack_t *stack)
 	char const	*value;
 	CONF_SECTION	*css;
 	char const	*ptr = stack->ptr;
+	char const	*ptr2;
 	cf_stack_frame_t *frame = &stack->frame[stack->depth];
 	CONF_SECTION	*parent = frame->current;
 	char		*buff[4];
@@ -2173,8 +2342,7 @@ static int parse_input(cf_stack_t *stack)
 		 *	another file.  That's fine.
 		 */
 		if (parent == frame->parent) {
-			ERROR("%s[%d]: Too many closing braces", frame->filename, frame->lineno);
-			return -1;
+			return parse_error(stack, ptr, "Too many closing braces");
 		}
 
 		fr_assert(frame->braces > 0);
@@ -2188,8 +2356,6 @@ static int parse_input(cf_stack_t *stack)
 		 */
 		if (!cf_template_merge(parent, parent->template)) return -1;
 
-		if (parent == frame->special) frame->special = NULL;
-
 		frame->current = cf_item_to_section(parent->item.parent);
 
 		ptr++;
@@ -2201,42 +2367,63 @@ static int parse_input(cf_stack_t *stack)
 	 *	Found nothing to get excited over.  It MUST be
 	 *	a key word.
 	 */
-	if (cf_get_token(parent, &ptr, &name1_token, buff[1], stack->bufsize,
-			 frame->filename, frame->lineno) < 0) {
-		return -1;
+	ptr2 = ptr;
+	switch (parent->unlang) {
+	default:
+		/*
+		 *	The LHS is a bare word / keyword in normal configuration file syntax.
+		 */
+		name1_token = gettoken(&ptr, buff[1], stack->bufsize, false);
+		if (name1_token == T_EOL) return 0;
+
+		if (name1_token == T_INVALID) {
+			return parse_error(stack, ptr2, fr_strerror());
+		}
+
+		if (name1_token != T_BARE_WORD) {
+			return parse_error(stack, ptr2, "Invalid location for quoted string");
+		}
+
+		fr_skip_whitespace(ptr);
+		break;
+
+	case CF_UNLANG_ALLOW:
+	case CF_UNLANG_EDIT:
+	case CF_UNLANG_ASSIGNMENT:
+		/*
+		 *	The LHS can be an xlat expansion, attribute reference, etc.
+		 */
+		if (cf_get_token(parent, &ptr, &name1_token, buff[1], stack->bufsize,
+				 frame->filename, frame->lineno) < 0) {
+			return -1;
+		}
+		break;
 	}
 
 	/*
-	 *	See which unlang keywords are allowed
-	 *
-	 *	0 - no unlang keywords are allowed.
-	 *	1 - unlang keywords are allowed
-	 *	2 - unlang keywords are allowed only in sub-sections
-	 *	  i.e. policy { ... } doesn't allow "if".  But the "if"
-	 *	  keyword is allowed in children of "policy".
+	 *	Check if the thing we just parsed is an unlang keyword.
 	 */
-	if (parent->allow_unlang != 1) {
-		if ((strcmp(buff[1], "if") == 0) ||
-		    (strcmp(buff[1], "elsif") == 0)) {
-			ERROR("%s[%d]: Invalid location for '%s'",
-			      frame->filename, frame->lineno, buff[1]);
-			return -1;
-		}
-
-	} else if ((name1_token == T_BARE_WORD) && isalpha((uint8_t) *buff[1])) {
-		fr_type_t type;
-
-		/*
-		 *	The next thing should be a keyword.
-		 */
+	if ((name1_token == T_BARE_WORD) && isalpha((uint8_t) *buff[1])) {
 		process = (cf_process_func_t) fr_table_value_by_str(unlang_keywords, buff[1], NULL);
 		if (process) {
 			CONF_ITEM *ci;
 
+			/*
+			 *	Disallow keywords outside of unlang sections.
+			 *
+			 *	We don't strictly need to do this with the more state-oriented parser, but
+			 *	people keep putting unlang into random places in the configuration files,
+			 *	which is wrong.
+			 */
+			if (parent->unlang != CF_UNLANG_ALLOW) {
+				return parse_error(stack, ptr2, "Invalid location for unlang keyword");
+			}
+
 			stack->ptr = ptr;
 			ci = process(stack);
-			ptr = stack->ptr;
 			if (!ci) return -1;
+
+			ptr = stack->ptr;
 			if (cf_item_is_section(ci)) {
 				parent->allow_locals = false;
 				css = cf_item_to_section(ci);
@@ -2244,33 +2431,53 @@ static int parse_input(cf_stack_t *stack)
 			}
 
 			/*
-			 *	Else the item is a pair, and it's already added to the section.
+			 *	Else the item is a pair, and the call to process() it already added it to the
+			 *	current section.
 			 */
 			goto added_pair;
 		}
 
 		/*
-		 *	The next token is an assignment operator, so we ignore it.
+		 *	The next token isn't text, so we ignore it.
 		 */
 		if (!isalnum((int) *ptr)) goto check_for_eol;
+	}
 
-		/*
-		 *	It's not a keyword, check for a data type, which means we have a local variable
-		 *	definition.
-		 */
+	/*
+	 *	See if this thing is a variable definition.
+	 */
+	if ((name1_token == T_BARE_WORD) && parent->allow_locals) {
+		fr_type_t type;
+		char const *ptr3;
+
 		type = fr_table_value_by_str(fr_type_table, buff[1], FR_TYPE_NULL);
 		if (type == FR_TYPE_NULL) {
 			parent->allow_locals = false;
 			goto check_for_eol;
 		}
 
-		if (!parent->allow_locals && (cf_section_find_in_parent(parent, "dictionary", NULL) == NULL)) {
-			ERROR("%s[%d]: Parse error: Invalid location for variable definition",
-			      frame->filename, frame->lineno);
-			return -1;
-		}
-
 		if (type == FR_TYPE_TLV) goto parse_name2;
+
+		/*
+		 *	group {
+		 *
+		 *	is a section.
+		 */
+		if (type == FR_TYPE_GROUP) {
+			fr_skip_whitespace(ptr);
+			if (*ptr == '{') {
+				ptr++;
+				value = NULL;
+				name2_token = T_BARE_WORD;
+				goto alloc_section;
+			}
+
+		} else if (!fr_type_is_leaf(type)) {
+			/*
+			 *	Other structural types are allowed.
+			 */
+			return parse_error(stack, ptr2, "Invalid data type for local variable.  Must be 'tlv' or else a non-structrul type");
+		}
 
 		/*
 		 *	We don't have an operator, so set it to a magic value.
@@ -2280,20 +2487,49 @@ static int parse_input(cf_stack_t *stack)
 		/*
 		 *	Parse the name of the local variable, and use it as the "value" for the CONF_PAIR.
 		 */
+		ptr3 = ptr;
 		if (cf_get_token(parent, &ptr, &value_token, buff[2], stack->bufsize,
 				 frame->filename, frame->lineno) < 0) {
 			return -1;
 		}
+
+		if (value_token != T_BARE_WORD) {
+			return parse_error(stack, ptr3, "Invalid name");
+		}
+
 		value = buff[2];
 
-		goto alloc_pair;
+		/*
+		 *	Non-structural things must be variable definitions.
+		 */
+		if (fr_type_is_leaf(type)) goto alloc_pair;
+
+		/*
+		 *	Parse:	group foo
+		 *	   vs   group foo { ...
+		 */
+		fr_skip_whitespace(ptr);
+
+		if (*ptr != '{') goto alloc_pair;
+
+		ptr++;
+		name2_token = T_BARE_WORD;
+		goto alloc_section;
 	}
 
 	/*
-	 *	parent single word is done.  Create a CONF_PAIR.
+	 *	We've parsed the LHS thing.  The RHS might be empty, or an operator, or another word, or an
+	 *	open bracket.
 	 */
 check_for_eol:
 	if (!*ptr || (*ptr == '#') || (*ptr == ',') || (*ptr == ';') || (*ptr == '}')) {
+		/*
+		 *	Only unlang sections can have module references.
+		 *
+		 *	We also allow bare words in edit lists, where the RHS is a list of values.
+		 *
+		 *	@todo - detail "suppress" requires bare words :(
+		 */
 		parent->allow_locals = false;
 		value_token = T_INVALID;
 		op_token = T_OP_EQ;
@@ -2313,104 +2549,264 @@ check_for_eol:
 	}
 
 	/*
-	 *	We allow certain kinds of strings, attribute
-	 *	references (i.e. foreach) and bare names that
-	 *	start with a letter.  We also allow UTF-8
-	 *	characters.
-	 *
-	 *	Once we fix the parser to be less generic, we
-	 *	can tighten these rules.  Right now, it's
-	 *	*technically* possible to define a module with
-	 *	&foo or "with spaces" as the second name.
-	 *	Which seems bad.  But the old parser allowed
-	 *	it, so oh well.
+	 *	Parse the thing after the first word.  It can be an operator, or the second name for a section.
 	 */
-	if ((*ptr == '"') || (*ptr == '`') || (*ptr == '\'') || ((*ptr == '&') && (ptr[1] != '=')) ||
-	    ((*((uint8_t const *) ptr) & 0x80) != 0) || isalpha((uint8_t) *ptr) || isdigit((uint8_t) *ptr)) {
+	ptr2 = ptr;
+	switch (parent->unlang) {
+	default:
+		/*
+		 *	Configuration sections can only have '=' after the
+		 *	first word, OR a second word which is the second name
+		 *	of a configuration section.
+		 */
+		if (*ptr == '=') goto operator;
+
+		/*
+		 *	Section name2 can only be alphanumeric or UTF-8.
+		 */
 	parse_name2:
-		if (cf_get_token(parent, &ptr, &name2_token, buff[2], stack->bufsize,
-				 frame->filename, frame->lineno) < 0) {
-			return -1;
+		if (!(isalpha((uint8_t) *ptr) || isdigit((uint8_t) *ptr) || (*(uint8_t const *) ptr >= 0x80))) {
+			/*
+			 *	Maybe they missed a closing brace somewhere?
+			 */
+			name2_token = gettoken(&ptr, buff[2], stack->bufsize, false); /* can't be EOL */
+			if (fr_assignment_op[name2_token]) {
+				return parse_error(stack, ptr2, "Unexpected operator, was expecting a configuration section.  Is there a missing '}' somewhere?");
+			}
+
+			return parse_error(stack, ptr2, "Invalid second name for configuration section");
 		}
+
+		name2_token = gettoken(&ptr, buff[2], stack->bufsize, false); /* can't be EOL */
+		if (name1_token == T_INVALID) {
+			return parse_error(stack, ptr2, fr_strerror());
+		}
+
+		if (name1_token != T_BARE_WORD) {
+			return parse_error(stack, ptr2, "Unexpected quoted string after section name");
+		}
+
+		fr_skip_whitespace(ptr);
 
 		if (*ptr != '{') {
-			ERROR("%s[%d]: Parse error: expected '{', got text \"%s\"",
-			      frame->filename, frame->lineno, ptr);
-			return -1;
+			return parse_error(stack, ptr, "Missing '{' for configuration section");
 		}
+
 		ptr++;
 		value = buff[2];
+		goto alloc_section;
 
-	alloc_section:
-		css = cf_section_alloc(parent, parent, buff[1], value);
-		if (!css) {
-			ERROR("%s[%d]: Failed allocating memory for section",
-			      frame->filename, frame->lineno);
-			return -1;
-		}
-
-		cf_filename_set(css, frame->filename);
-		cf_lineno_set(css, frame->lineno);
-		css->name2_quote = name2_token;
-
+	case CF_UNLANG_ASSIGNMENT:
 		/*
-		 *	Hack for better error messages in
-		 *	nested sections.  parent information
-		 *	should really be put into a parser
-		 *	struct, as with tmpls.
+		 *	The next thing MUST be an operator.  We don't support nested attributes in "update" or
+		 *	"map" sections.
 		 */
-		if (!frame->special && (strcmp(css->name1, "update") == 0)) {
-			frame->special = css;
-		}
+		goto operator;
 
+	case CF_UNLANG_EDIT:
 		/*
-		 *	Only a few top-level sections allow "unlang"
-		 *	statements.  And for those, "unlang"
-		 *	statements are only allowed in child
-		 *	subsection.
+		 *	The next thing MUST be an operator.  Edit sections always do operations, even on
+		 *	lists.  i.e. there is no second name section when editing a list.
 		 */
-		if (!parent->allow_unlang && !parent->item.parent) {
-			if (strcmp(css->name1, "server") == 0) css->allow_unlang = 2;
-			if (strcmp(css->name1, "policy") == 0) css->allow_unlang = 2;
+		goto operator;
 
-		} else if ((parent->allow_unlang == 2) && (strcmp(css->name1, "listen") == 0)) { /* hacks for listeners */
-			css->allow_unlang = css->allow_locals = false;
-
-		} else {
-			/*
-			 *	Allow unlang if the parent allows it, but don't allow
-			 *	unlang in list assignment sections.
-			 */
-			css->allow_unlang = css->allow_locals = parent->allow_unlang && !fr_list_assignment_op[name2_token];
-		}
-
-	add_section:
+	case CF_UNLANG_ALLOW:
 		/*
-		 *	The current section is now the child section.
+		 *	It's not a string, bare word, or attribute reference.  It must be an operator.
 		 */
-		frame->current = css;
-		frame->braces++;
-		css = NULL;
-		stack->ptr = ptr;
-		return 1;
+		if (!((*ptr == '"') || (*ptr == '`') || (*ptr == '\'') || ((*ptr == '&') && (ptr[1] != '=')) ||
+		      ((*((uint8_t const *) ptr) & 0x80) != 0) || isalpha((uint8_t) *ptr) || isdigit((uint8_t) *ptr))) {
+			goto operator;
+		}
+		break;
 	}
 
 	/*
-	 *	The next thing MUST be an operator.  All
-	 *	operators start with one of these characters,
-	 *	so we check for them first.
+	 *	The second name could be a bare word, xlat expansion, string etc.
 	 */
-	if ((ptr[0] != '=') && (ptr[0] != '!') && (ptr[0] != '<') && (ptr[0] != '>') &&
-	    (ptr[1] != '=') && (ptr[1] != '~')) {
-		ERROR("%s[%d]: Parse error at unexpected text: %s",
-		      frame->filename, frame->lineno, ptr);
+	if (cf_get_token(parent, &ptr, &name2_token, buff[2], stack->bufsize,
+			 frame->filename, frame->lineno) < 0) {
 		return -1;
 	}
+
+	if (*ptr != '{') {
+		return parse_error(stack, ptr, "Expected '{'");
+	}
+	ptr++;
+	value = buff[2];
+
+alloc_section:
+	parent->allow_locals = false;
+
+	css = cf_section_alloc(parent, parent, buff[1], value);
+	if (!css) {
+		ERROR("%s[%d]: Failed allocating memory for section",
+		      frame->filename, frame->lineno);
+		return -1;
+	}
+
+	cf_filename_set(css, frame->filename);
+	cf_lineno_set(css, frame->lineno);
+	css->name2_quote = name2_token;
+	css->unlang = CF_UNLANG_NONE;
+	css->allow_locals = false;
+
+	/*
+	 *	Only a few top-level sections allow "unlang"
+	 *	statements.  And for those, "unlang"
+	 *	statements are only allowed in child
+	 *	subsection.
+	 */
+	switch (parent->unlang) {
+	case CF_UNLANG_NONE:
+		if (!parent->item.parent) {
+			if (strcmp(css->name1, "server") == 0) css->unlang = CF_UNLANG_SERVER;
+			if (strcmp(css->name1, "policy") == 0) css->unlang = CF_UNLANG_POLICY;
+			if (strcmp(css->name1, "modules") == 0) css->unlang = CF_UNLANG_MODULES;
+			if (strcmp(css->name1, "templates") == 0) css->unlang = CF_UNLANG_CAN_HAVE_UPDATE;
+
+		} else if ((cf_item_to_section(parent->item.parent)->unlang == CF_UNLANG_MODULES) &&
+			   (strcmp(css->name1, "update") == 0)) {
+			/*
+			 *	Module configuration can contain "update" statements.
+			 */
+			css->unlang = CF_UNLANG_ASSIGNMENT;
+			css->allow_locals = false;
+		}
+		break;
+
+		/*
+		 *	It's a policy section - allow unlang inside of child sections.
+		 */
+	case CF_UNLANG_POLICY:
+		css->unlang = CF_UNLANG_ALLOW;
+		css->allow_locals = true;
+		break;
+
+		/*
+		 *	A virtual server has processing sections, but only a limited number of them.
+		 *	Rather than trying to autoload them and glue the interpreter into the conf
+		 *	file parser, we just hack it.
+		 */
+	case CF_UNLANG_SERVER:
+		// git grep SECTION_NAME src/process/ src/lib/server/process.h | sed 's/.*SECTION_NAME("//;s/",.*//' | sort -u
+		if ((strcmp(css->name1, "accounting") == 0) ||
+		    (strcmp(css->name1, "add") == 0) ||
+		    (strcmp(css->name1, "authenticate") == 0) ||
+		    (strcmp(css->name1, "clear") == 0) ||
+		    (strcmp(css->name1, "deny") == 0) ||
+		    (strcmp(css->name1, "error") == 0) ||
+		    (strcmp(css->name1, "load") == 0) ||
+		    (strcmp(css->name1, "new") == 0) ||
+		    (strcmp(css->name1, "recv") == 0) ||
+		    (strcmp(css->name1, "send") == 0) ||
+		    (strcmp(css->name1, "store") == 0) ||
+		    (strcmp(css->name1, "establish") == 0) ||
+		    (strcmp(css->name1, "verify") == 0)) {
+			css->unlang = CF_UNLANG_ALLOW;
+			css->allow_locals = true;
+			break;
+		}
+
+		/*
+		 *	Allow local variables, but no unlang statements.
+		 */
+		if (strcmp(css->name1, "dictionary") == 0) {
+			css->unlang = CF_UNLANG_DICTIONARY;
+			css->allow_locals = true;
+			break;
+		}
+
+		/*
+		 *	ldap sync has "update" a few levels down.
+		 */
+		if (strcmp(css->name1, "listen") == 0) {
+			css->unlang = CF_UNLANG_CAN_HAVE_UPDATE;
+		}
+		break;
+
+		/*
+		 *	Virtual modules in the "modules" section can have unlang.
+		 */
+	case CF_UNLANG_MODULES:
+		if ((strcmp(css->name1, "group") == 0) ||
+		    (strcmp(css->name1, "load-balance") == 0) ||
+		    (strcmp(css->name1, "redundant") == 0) ||
+		    (strcmp(css->name1, "redundant-load-balance") == 0)) {
+			css->unlang = CF_UNLANG_ALLOW;
+			css->allow_locals = true;
+		} else {
+			css->unlang = CF_UNLANG_CAN_HAVE_UPDATE;
+		}
+		break;
+
+	case CF_UNLANG_EDIT:
+		/*
+		 *	Edit sections can only have children which are edit sections.
+		 */
+		css->unlang = CF_UNLANG_EDIT;
+		break;
+
+	case CF_UNLANG_ALLOW:
+		/*
+		 *	If we are doing list assignment, then don't allow local variables.  The children are
+		 *	also then all edit sections, and not unlang statements.
+		 *
+		 *	If we're not doing list assignment, then name2 has to be a bare word, string, etc.
+		 */
+		css->allow_locals = !fr_list_assignment_op[name2_token];
+		if (css->allow_locals) {
+			/*
+			 *	@todo - tighten this up for "actions" sections, and module rcode
+			 *	over-rides.
+			 *
+			 *	Perhaps the best way to do that is to change the syntax for module
+			 *	over-rides, so that the parser doesn't have to guess.  :(
+			 */
+			css->unlang = CF_UNLANG_ALLOW;
+		} else {
+			css->unlang = CF_UNLANG_EDIT;
+		}
+		break;
+
+		/*
+		 *	We can (maybe?) do nested assignments inside of an old-style "update" or "map" section
+		 */
+	case CF_UNLANG_ASSIGNMENT:
+		css->unlang = CF_UNLANG_ASSIGNMENT;
+		break;
+
+	case CF_UNLANG_DICTIONARY:
+		css->unlang = CF_UNLANG_DICTIONARY;
+		css->allow_locals = true;
+		break;
+
+	case CF_UNLANG_CAN_HAVE_UPDATE:
+		if (strcmp(css->name1, "update") == 0) {
+			css->unlang = CF_UNLANG_ASSIGNMENT;
+		} else {
+			css->unlang = CF_UNLANG_CAN_HAVE_UPDATE;
+		}
+		break;
+	}
+
+add_section:
+	/*
+	 *	The current section is now the child section.
+	 */
+	frame->current = css;
+	frame->braces++;
+	css = NULL;
+	stack->ptr = ptr;
+	return 1;
+
 
 	/*
 	 *	If we're not parsing a section, then the next
 	 *	token MUST be an operator.
 	 */
+operator:
+	ptr2 = ptr;
 	name2_token = gettoken(&ptr, buff[2], stack->bufsize, false);
 	switch (name2_token) {
 	case T_OP_ADD_EQ:
@@ -2426,37 +2822,33 @@ check_for_eol:
 	case T_OP_LT:
 	case T_OP_CMP_EQ:
 	case T_OP_CMP_FALSE:
+	case T_OP_SET:
+	case T_OP_PREPEND:
 		/*
-		 *	As a hack, allow any operators when using &foo=bar
+		 *	Allow more operators in unlang statements, edit sections, and old-style "update" sections.
 		 */
-		if (!frame->special && (buff[1][0] != '&')) {
-			ERROR("%s[%d]: Invalid operator in assignment for %s ...",
-			      frame->filename, frame->lineno, buff[1]);
-			return -1;
+		if ((parent->unlang != CF_UNLANG_ALLOW) && (parent->unlang != CF_UNLANG_EDIT) && (parent->unlang != CF_UNLANG_ASSIGNMENT)) {
+			return parse_error(stack, ptr2, "Invalid operator for assignment");
 		}
 		FALL_THROUGH;
 
 	case T_OP_EQ:
-	case T_OP_SET:
-	case T_OP_PREPEND:
+		/*
+		 *	Configuration variables can only use =
+		 */
 		fr_skip_whitespace(ptr);
 		op_token = name2_token;
 		break;
 
 	default:
-		ERROR("%s[%d]: Parse error after \"%s\": unexpected token \"%s\"",
-		      frame->filename, frame->lineno, buff[1], fr_table_str_by_value(fr_tokens_table, name2_token, "<INVALID>"));
-
-		return -1;
+		return parse_error(stack, ptr2, "Syntax error, the input should be an assignment operator");
 	}
 
 	/*
 	 *	MUST have something after the operator.
 	 */
 	if (!*ptr || (*ptr == '#') || (*ptr == ',') || (*ptr == ';')) {
-		ERROR("%s[%d]: Syntax error: Expected to see a value after the operator '%s': %s",
-		      frame->filename, frame->lineno, buff[2], ptr);
-		return -1;
+		return parse_error(stack, ptr, "Missing value after operator");
 	}
 
 	/*
@@ -2471,22 +2863,12 @@ check_for_eol:
 	 *	allow it everywhere.
 	 */
 	if (*ptr == '{') {
-		if (!parent->allow_unlang && !frame->require_edits) {
-			ERROR("%s[%d]: Parse error: Invalid location for grouped attribute",
-			      frame->filename, frame->lineno);
-			return -1;
-		}
-
-		if (*buff[1] != '&') {
-			ERROR("%s[%d]: Parse error: Expected '&' before attribute name",
-			      frame->filename, frame->lineno);
-			return -1;
+		if ((parent->unlang != CF_UNLANG_ALLOW) && (parent->unlang != CF_UNLANG_EDIT)) {
+			return parse_error(stack, ptr, "Invalid location for nested attribute assignment");
 		}
 
 		if (!fr_list_assignment_op[name2_token]) {
-			ERROR("%s[%d]: Parse error: Invalid assignment operator '%s' for list",
-			      frame->filename, frame->lineno, buff[2]);
-			return -1;
+			return parse_error(stack, ptr, "Invalid assignment operator for list");
 		}
 
 		/*
@@ -2504,7 +2886,6 @@ check_for_eol:
 		 *	situation later.
 		 */
 		value = NULL;
-		frame->require_edits = true;
 		goto alloc_section;
 	}
 
@@ -2513,12 +2894,13 @@ check_for_eol:
 	/*
 	 *	Parse the value for a CONF_PAIR.
 	 *
-	 *	If it's not an "update" section, and it's an "edit" thing, then try to parse an expression.
+	 *	If it's unlang or an edit section, the RHS can be an expression.
 	 */
-	if (!frame->special && (frame->require_edits || (*buff[1] == '&'))) {
+	if ((parent->unlang == CF_UNLANG_ALLOW) || (parent->unlang == CF_UNLANG_EDIT)) {
 		bool eol;
 		ssize_t slen;
-		char const *ptr2 = ptr;
+
+		ptr2 = ptr;
 
 		/*
 		 *	If the RHS is an expression (foo) or function %foo(), then mark it up as an expression.
@@ -2558,18 +2940,14 @@ check_for_eol:
 		 */
 		slen = fr_skip_condition(ptr, NULL, terminal_end_line, &eol);
 		if (slen < 0) {
-			ERROR("%s[%d]: Parse error in expression: %s",
-			      frame->filename, frame->lineno, fr_strerror());
-			return -1;
+			return parse_error(stack, ptr + (-slen), fr_strerror());
 		}
 
 		/*
 		 *	We parsed until the end of the string, but the condition still needs more data.
 		 */
 		if (eol) {
-			ERROR("%s[%d]: Expression is unfinished at end of line",
-			      frame->filename, frame->lineno);
-			return -1;
+			return parse_error(stack, ptr + slen, "Expression is unfinished at end of line");
 		}
 
 		/*
@@ -2594,6 +2972,17 @@ check_for_eol:
 		ptr += slen;
 		if ((*ptr == ',') || (*ptr == ';')) ptr++;
 
+#if 0
+	} else if ((parent->unlang != CF_UNLANG_ASSIGNMENT) &&
+		   ((*ptr == '`') || (*ptr == '%') || (*ptr == '('))) {
+		/*
+		 *	Config sections can't use backticks, xlat expansions, or expressions.
+		 *
+		 *	Except module configurations can have key = %{...}
+		 */
+		return parse_error(stack, ptr, "Invalid value for assignment in configuration file");
+#endif
+
 	} else {
 		if (cf_get_token(parent, &ptr, &value_token, buff[2], stack->bufsize,
 				 frame->filename, frame->lineno) < 0) {
@@ -2603,7 +2992,8 @@ check_for_eol:
 	}
 
 	/*
-	 *	Add parent CONF_PAIR to our CONF_SECTION
+	 *	We have an attribute assignment, which means that we no longer allow local variables to be
+	 *	defined.
 	 */
 	parent->allow_locals = false;
 
@@ -2639,9 +3029,7 @@ added_pair:
 	 *	error.
 	 */
 	if (*ptr && (*ptr != '#')) {
-		ERROR("%s[%d]: Syntax error: Unexpected text: %s",
-		      frame->filename, frame->lineno, ptr);
-		return -1;
+		return parse_error(stack, ptr, "Unexpected text after configuration item");
 	}
 
 	/*
@@ -2683,11 +3071,36 @@ static int frame_readdir(cf_stack_t *stack)
 	frame->filename = h->filename;
 	frame->lineno = 0;
 	frame->from_dir = true;
-	frame->special = NULL; /* can't do includes inside of update / map */
-	frame->require_edits = stack->frame[stack->depth - 1].require_edits;
 	return 1;
 }
 
+
+static fr_md5_ctx_t *cf_md5_ctx = NULL;
+
+void cf_md5_init(void)
+{
+	cf_md5_ctx = fr_md5_ctx_alloc();
+}
+
+
+static void cf_md5_update(char const *p)
+{
+	if (!cf_md5_ctx) return;
+
+	fr_md5_update(cf_md5_ctx, (uint8_t const *)p, strlen(p));
+}
+
+void cf_md5_final(uint8_t *digest)
+{
+	if (!cf_md5_ctx) {
+		memset(digest, 0, MD5_DIGEST_LENGTH);
+		return;
+	}
+
+	fr_md5_final(digest, cf_md5_ctx);
+	fr_md5_ctx_free(&cf_md5_ctx);
+	cf_md5_ctx = NULL;
+}
 
 static int cf_file_fill(cf_stack_t *stack)
 {
@@ -2704,6 +3117,7 @@ read_continuation:
 	 *	Get data, and remember if we are at EOF.
 	 */
 	at_eof = (fgets(stack->fill, stack->bufsize - (stack->fill - stack->buff[0]), frame->fp) == NULL);
+	cf_md5_update(stack->fill);
 	frame->lineno++;
 
 	/*
@@ -2927,8 +3341,7 @@ do_frame:
 				continue;
 			}
 
-			ERROR("%s[%d]: Invalid text starting with '$'", frame->filename, frame->lineno);
-			return -1;
+			return parse_error(stack, ptr, "Unknown $... keyword");
 		}
 
 		/*
@@ -3331,4 +3744,15 @@ retry:
 	}
 
 	return NULL;
+}
+
+/*
+ *	Only for unit_test_map
+ */
+void cf_section_set_unlang(CONF_SECTION *cs)
+{
+	fr_assert(cs->unlang == CF_UNLANG_NONE);
+	fr_assert(!cs->item.parent);
+
+	cs->unlang = CF_UNLANG_ALLOW;
 }

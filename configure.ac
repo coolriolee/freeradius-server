@@ -1343,6 +1343,12 @@ if test "x$WITH_OPENSSL" = xyes; then
 
       if test "$OPENSSL_LDFLAGS" != "$smart_ldflags"; then
         AC_MSG_FAILURE(["inconsistent LDFLAGS between -lssl '$smart_ldflags' and -lcrypto '$OPENSSL_LDFLAGS'"])
+      else
+        dnl # Check for optional EVP functions which may not be present in all builds of OpenSSL
+        AC_CHECK_FUNCS(
+          EVP_blake2s256 \
+          EVP_blake2b512
+        )
       fi
     fi
   else
@@ -1370,10 +1376,10 @@ if test "x$WITH_OPENSSL" = xyes; then
       ]
     )
 
-    AC_MSG_CHECKING([for OpenSSL version >= 1.1.1])
+    AC_MSG_CHECKING([for OpenSSL version >= 3.0.0])
     AC_EGREP_CPP(yes,
       [#include <openssl/crypto.h>
-       #if (OPENSSL_VERSION_NUMBER >= 0x10101000L)
+       #if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
        yes
        #endif
       ],
@@ -2266,13 +2272,19 @@ if test "x$REGEX" = "x"; then
   if test "x$ac_cv_header_regex_h" = "xyes"; then
     REGEX=yes
     AC_MSG_CHECKING([for extended regular expressions])
-    AC_EGREP_CPP(yes,
-      [
-        #include <regex.h>
-        #ifdef REG_EXTENDED
-        yes
-        #endif
-      ],
+
+    AC_RUN_IFELSE(
+      [AC_LANG_PROGRAM(
+        [[
+	  #include <stdlib.h>
+          #include <regex.h>
+        ]],
+	[[
+          #ifdef REG_EXTENDED
+          exit(1);
+          #endif
+	]]
+      )],
       [
         AC_MSG_RESULT(yes)
         AC_DEFINE(HAVE_REG_EXTENDED, [1], [define this if we have REG_EXTENDED (from <regex.h>)])
